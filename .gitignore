@@ -1,10 +1,17 @@
+#code
 .venv/
 .idea/
+.trae/
+.zed/
 .vscode/
 .cache/
+.zed.sessions/
+.claude/
 
+# env
 venv/
-
+.target/
+target/
 node_modules/
 data/
 db/
