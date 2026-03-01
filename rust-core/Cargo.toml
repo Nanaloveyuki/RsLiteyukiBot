@@ -1,0 +1,16 @@
+[package]
+name = "liteyukibot-core"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+name = "liteyukibot_core"
+
+[dependencies]
+pyo3 = { version = "0.28.2", features = ["extension-module", "abi3-py312"] }
+pyo3-async-runtimes = { version = "0.28.0", features = ["tokio-runtime"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.49.0", features = ["full"] }
+
