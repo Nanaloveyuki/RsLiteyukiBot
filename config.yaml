@@ -4,3 +4,21 @@ log_level: DEBUG
 
 host: 0.0.0.0
 port: 8090
+
+rust:
+  runtime:
+    worker_count: 4
+    ingress_queue: 512
+    worker_queue: 256
+  log:
+    mode: color
+    level: info
+    timezone: local
+    timestamp_format: custom
+    timestamp_pattern: "%Y-%m-%d %H:%M:%S"
+  adapters: []
+  tui:
+    resume:
+      store_path: ./.liteyuki-tui-resumes.json
+      max_sessions: 64
+      max_size_mib: 16

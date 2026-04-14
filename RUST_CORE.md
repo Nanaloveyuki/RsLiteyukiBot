@@ -50,8 +50,14 @@ Top-level schema:
 - `log.timezone`
 - `log.timestamp_format`
 - `log.timestamp_pattern`
+- `adapters[]` (可同时配置多个：`http` / `sse` / `web_socket_forward` / `web_socket_reverse`，并兼容 `websocket_forward` / `websocket_reverse`)
+- `tui.resume.store_path`
+- `tui.resume.max_sessions`
+- `tui.resume.max_size_mib`
 
 Or nested under `rust`:
 
 - `rust.runtime.*`
 - `rust.log.*`
+- `rust.adapters[]`
+- `rust.tui.resume.*`

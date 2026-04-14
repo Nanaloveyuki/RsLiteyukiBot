@@ -1,3 +1,3 @@
 mod app;
 
-pub use app::{UiEvent, UiLevel, run};
+pub use app::{TuiConfig, UiEvent, UiLevel, run};

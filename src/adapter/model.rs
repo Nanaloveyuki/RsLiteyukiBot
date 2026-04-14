@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdapterTransport {
+    #[serde(alias = "websocket_forward", alias = "ws_forward")]
     WebSocketForward,
+    #[serde(alias = "websocket_reverse", alias = "ws_reverse")]
     WebSocketReverse,
     Sse,
     Http,
@@ -110,3 +112,18 @@ fn default_outbound_topic() -> String {
     "adapter.outbound".to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_transport_accepts_websocket_aliases() {
+        let forward: AdapterTransport =
+            serde_json::from_str("\"websocket_forward\"").expect("forward alias should parse");
+        assert_eq!(forward, AdapterTransport::WebSocketForward);
+
+        let reverse: AdapterTransport =
+            serde_json::from_str("\"websocket_reverse\"").expect("reverse alias should parse");
+        assert_eq!(reverse, AdapterTransport::WebSocketReverse);
+    }
+}

@@ -22,9 +22,10 @@ use tokio::sync::mpsc;
 
 const UI_LOG_CAPACITY: usize = 300;
 const COMMAND_HISTORY_CAPACITY: usize = 200;
-const RESUME_STORE_CAPACITY: usize = 64;
 const RESUME_FLUSH_INTERVAL: Duration = Duration::from_millis(800);
 const DEFAULT_LOG_VIEW_ROWS: usize = 12;
+const DEFAULT_RESUME_MAX_SESSIONS: usize = 64;
+const DEFAULT_RESUME_MAX_SIZE_MIB: u64 = 16;
 const TUI_COMMANDS: [&str; 9] = [
     "/help",
     "/log",
@@ -85,6 +86,33 @@ struct CompletionState {
     index: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct TuiConfig {
+    pub resume_store_path: PathBuf,
+    pub resume_max_sessions: usize,
+    pub resume_max_size_mib: u64,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            resume_store_path: PathBuf::from(".liteyuki-tui-resumes.json"),
+            resume_max_sessions: DEFAULT_RESUME_MAX_SESSIONS,
+            resume_max_size_mib: DEFAULT_RESUME_MAX_SIZE_MIB,
+        }
+    }
+}
+
+impl TuiConfig {
+    fn normalized(self) -> Self {
+        Self {
+            resume_store_path: self.resume_store_path,
+            resume_max_sessions: self.resume_max_sessions.max(1),
+            resume_max_size_mib: self.resume_max_size_mib.max(1),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ResumeSession {
     uid: String,
@@ -127,7 +155,6 @@ impl ResumeStore {
             logs: Vec::new(),
             command_history: Vec::new(),
         });
-        self.trim();
     }
 
     fn update_session(&mut self, uid: &str, logs: &VecDeque<UiLog>, command_history: &[String]) {
@@ -150,20 +177,16 @@ impl ResumeStore {
                 command_history: command_vec,
             });
         }
-
-        self.trim();
     }
 
     fn get(&self, uid: &str) -> Option<&ResumeSession> {
         self.sessions.iter().find(|session| session.uid == uid)
     }
 
-    fn trim(&mut self) {
-        if self.sessions.len() <= RESUME_STORE_CAPACITY {
-            return;
-        }
-        let overflow = self.sessions.len() - RESUME_STORE_CAPACITY;
-        self.sessions.drain(0..overflow);
+    fn estimated_size_bytes(&self) -> usize {
+        serde_json::to_vec(self)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX)
     }
 }
 
@@ -185,6 +208,8 @@ struct AppState {
     log_view_rows: usize,
     resume_store_path: PathBuf,
     resume_store: ResumeStore,
+    resume_max_sessions: usize,
+    resume_max_size_bytes: usize,
     active_resume_uid: String,
     resume_dirty: bool,
     last_resume_flush: Instant,
@@ -197,19 +222,19 @@ impl AppState {
         target: RuntimeTarget,
         settings_desc: String,
         adapters: Vec<AdapterConfig>,
-        resume_store_path: PathBuf,
+        tui_config: TuiConfig,
     ) -> Self {
+        let tui_config = tui_config.normalized();
         let mut adapter_inbound_topics = HashSet::new();
         let mut adapter_running = HashMap::new();
         for adapter in &adapters {
             adapter_inbound_topics.insert(adapter.route.inbound_topic.clone());
             adapter_running.insert(adapter.id.clone(), false);
         }
-        let mut resume_store = ResumeStore::load(&resume_store_path);
+        let mut resume_store = ResumeStore::load(&tui_config.resume_store_path);
         let active_resume_uid = generate_resume_uid();
         resume_store.create_session(active_resume_uid.clone());
-
-        Self {
+        let mut state = Self {
             target,
             settings_desc,
             started_at: Instant::now(),
@@ -225,13 +250,50 @@ impl AppState {
             history_draft: String::new(),
             log_scroll: 0,
             log_view_rows: DEFAULT_LOG_VIEW_ROWS,
-            resume_store_path,
+            resume_store_path: tui_config.resume_store_path,
             resume_store,
+            resume_max_sessions: tui_config.resume_max_sessions,
+            resume_max_size_bytes: mib_to_bytes(tui_config.resume_max_size_mib),
             active_resume_uid,
             resume_dirty: true,
             last_resume_flush: Instant::now(),
             view_mode: UiViewMode::Dashboard,
             completion_state: None,
+        };
+        state.enforce_resume_limits();
+        state
+    }
+
+    fn drop_oldest_non_active_resume(&mut self) -> bool {
+        if self.resume_store.sessions.len() <= 1 {
+            return false;
+        }
+        if let Some(index) = self
+            .resume_store
+            .sessions
+            .iter()
+            .position(|session| session.uid != self.active_resume_uid)
+        {
+            self.resume_store.sessions.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn enforce_resume_limits(&mut self) {
+        let max_sessions = self.resume_max_sessions.max(1);
+        while self.resume_store.sessions.len() > max_sessions {
+            if !self.drop_oldest_non_active_resume() {
+                break;
+            }
+        }
+
+        let max_size_bytes = self.resume_max_size_bytes.max(1);
+        while self.resume_store.estimated_size_bytes() > max_size_bytes {
+            if !self.drop_oldest_non_active_resume() {
+                break;
+            }
         }
     }
 
@@ -290,6 +352,7 @@ impl AppState {
             &self.logs,
             &self.command_history,
         );
+        self.enforce_resume_limits();
     }
 
     fn flush_resume_if_needed(&mut self, force: bool) {
@@ -784,10 +847,10 @@ pub async fn run(
     settings_desc: String,
     adapter_configs: Vec<AdapterConfig>,
     adapter_autostart: bool,
+    tui_config: TuiConfig,
     ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let resume_store_path = resolve_resume_store_path();
-    let mut app = AppState::new(target, settings_desc, adapter_configs, resume_store_path);
+    let mut app = AppState::new(target, settings_desc, adapter_configs, tui_config);
     app.push_log(
         UiLevel::Info,
         "TUI ready: type /help in console, Ctrl+C or /quit to exit",
@@ -795,6 +858,14 @@ pub async fn run(
     app.push_log(
         UiLevel::Info,
         format!("new resume created: {}", app.active_resume_uid()),
+    );
+    app.push_log(
+        UiLevel::Info,
+        format!(
+            "resume policy: max_sessions={}, max_size={} MiB",
+            app.resume_max_sessions,
+            bytes_to_mib(app.resume_max_size_bytes)
+        ),
     );
     if adapter_autostart {
         app.push_log(UiLevel::Info, "adapters autostart enabled");
@@ -1119,13 +1190,6 @@ fn restore_terminal(
     Ok(())
 }
 
-fn resolve_resume_store_path() -> PathBuf {
-    std::env::var("LY_RESUME_STORE_PATH")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".liteyuki-tui-resumes.json"))
-}
-
 fn rounded_block<'a>(title: &'a str) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)
@@ -1139,6 +1203,16 @@ fn generate_resume_uid() -> String {
         Local::now().format("%Y%m%d%H%M%S%6f"),
         std::process::id()
     )
+}
+
+fn mib_to_bytes(mib: u64) -> usize {
+    let bytes = (mib as u128) * 1024 * 1024;
+    bytes.min(usize::MAX as u128) as usize
+}
+
+fn bytes_to_mib(bytes: usize) -> usize {
+    let mib = bytes / (1024 * 1024);
+    mib.max(1)
 }
 
 #[cfg(test)]
@@ -1160,6 +1234,14 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    fn test_tui_config(path: PathBuf) -> TuiConfig {
+        TuiConfig {
+            resume_store_path: path,
+            resume_max_sessions: 64,
+            resume_max_size_mib: 16,
+        }
+    }
+
     #[test]
     fn command_history_navigation_restores_draft() {
         let path = temp_resume_path("history-navigation");
@@ -1169,7 +1251,7 @@ mod tests {
             RuntimeTarget::Cli,
             "test".to_string(),
             Vec::new(),
-            path.clone(),
+            test_tui_config(path.clone()),
         );
         app.record_command("/help");
         app.record_command("/clear");
@@ -1199,7 +1281,7 @@ mod tests {
             RuntimeTarget::Cli,
             "test".to_string(),
             Vec::new(),
-            path.clone(),
+            test_tui_config(path.clone()),
         );
         app.resume_store
             .create_session("resume-alpha-001".to_string());
@@ -1224,7 +1306,7 @@ mod tests {
             RuntimeTarget::Cli,
             "test".to_string(),
             Vec::new(),
-            path.clone(),
+            test_tui_config(path.clone()),
         );
 
         app.console_input = "/".to_string();
@@ -1249,7 +1331,7 @@ mod tests {
             RuntimeTarget::Cli,
             "test".to_string(),
             Vec::new(),
-            path.clone(),
+            test_tui_config(path.clone()),
         );
 
         app.console_input = "/h".to_string();
@@ -1274,7 +1356,7 @@ mod tests {
             RuntimeTarget::Cli,
             "test".to_string(),
             Vec::new(),
-            path.clone(),
+            test_tui_config(path.clone()),
         );
         let original_uid = app.active_resume_uid().to_string();
         app.push_log(UiLevel::Info, "from-original");
@@ -1327,7 +1409,7 @@ mod tests {
             RuntimeTarget::Cli,
             "test".to_string(),
             Vec::new(),
-            path.clone(),
+            test_tui_config(path.clone()),
         );
         for i in 1..=5 {
             app.push_log(UiLevel::Info, format!("line-{i}"));
@@ -1367,7 +1449,7 @@ mod tests {
             RuntimeTarget::Cli,
             "test".to_string(),
             Vec::new(),
-            path.clone(),
+            test_tui_config(path.clone()),
         );
 
         assert!(!app.is_log_console_view());
@@ -1377,6 +1459,93 @@ mod tests {
         assert!(!app.is_log_console_view());
         app.handle_console_command("/log on");
         assert!(app.is_log_console_view());
+
+        remove_file_if_exists(&path);
+    }
+
+    #[test]
+    fn resume_count_limit_keeps_active_session() {
+        let path = temp_resume_path("resume-count-limit");
+        remove_file_if_exists(&path);
+
+        let mut app = AppState::new(
+            RuntimeTarget::Cli,
+            "test".to_string(),
+            Vec::new(),
+            TuiConfig {
+                resume_store_path: path.clone(),
+                resume_max_sessions: 2,
+                resume_max_size_mib: 16,
+            },
+        );
+        let active_uid = app.active_resume_uid().to_string();
+
+        app.resume_store.create_session("old-1".to_string());
+        app.resume_store.create_session("old-2".to_string());
+        app.resume_store.create_session("old-3".to_string());
+        app.enforce_resume_limits();
+
+        assert!(app.resume_store.sessions.len() <= 2);
+        assert!(
+            app.resume_store
+                .sessions
+                .iter()
+                .any(|session| session.uid == active_uid)
+        );
+
+        remove_file_if_exists(&path);
+    }
+
+    #[test]
+    fn resume_size_limit_keeps_active_session() {
+        let path = temp_resume_path("resume-size-limit");
+        remove_file_if_exists(&path);
+
+        let mut app = AppState::new(
+            RuntimeTarget::Cli,
+            "test".to_string(),
+            Vec::new(),
+            TuiConfig {
+                resume_store_path: path.clone(),
+                resume_max_sessions: 64,
+                resume_max_size_mib: 1,
+            },
+        );
+        let active_uid = app.active_resume_uid().to_string();
+
+        let large = "x".repeat(600 * 1024);
+        app.resume_store.sessions.push(ResumeSession {
+            uid: "old-large-a".to_string(),
+            created_at: Local::now().to_rfc3339(),
+            updated_at: Local::now().to_rfc3339(),
+            logs: vec![UiLog {
+                level: UiLevel::Info,
+                timestamp: "00:00:00".to_string(),
+                message: large.clone(),
+            }],
+            command_history: vec![],
+        });
+        app.resume_store.sessions.push(ResumeSession {
+            uid: "old-large-b".to_string(),
+            created_at: Local::now().to_rfc3339(),
+            updated_at: Local::now().to_rfc3339(),
+            logs: vec![UiLog {
+                level: UiLevel::Info,
+                timestamp: "00:00:00".to_string(),
+                message: large,
+            }],
+            command_history: vec![],
+        });
+
+        app.enforce_resume_limits();
+
+        assert!(app.resume_store.estimated_size_bytes() <= app.resume_max_size_bytes);
+        assert!(
+            app.resume_store
+                .sessions
+                .iter()
+                .any(|session| session.uid == active_uid)
+        );
 
         remove_file_if_exists(&path);
     }
