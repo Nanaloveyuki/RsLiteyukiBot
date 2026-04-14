@@ -1,3 +1,4 @@
+pub mod adapter;
 pub mod bootstrap;
 pub mod comm;
 pub mod core;
@@ -5,6 +6,13 @@ pub mod observability;
 pub mod plugin;
 pub mod session;
 
+pub use adapter::{
+    AdapterConfig, AdapterEndpoint, AdapterError, AdapterManager, AdapterPacket, AdapterRoute,
+    AdapterSink, AdapterSinkFuture, AdapterTransport, HttpMethod, HttpTransportClient,
+    ManagedAdapterSink, ManagedAdapterSinkFuture, SseEvent, SseParser, SseTransportClient,
+    WebSocketAdapterHandle, decode_sse_event, encode_sse_event, sink_from_fn,
+    start_forward_adapter, start_reverse_adapter,
+};
 pub use bootstrap::{
     ConfigError, ConfigManager, ConfigSetting, RuntimeSettings, RuntimeSettingsSpec,
 };

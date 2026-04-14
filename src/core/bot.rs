@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::{
@@ -9,6 +10,7 @@ use super::{
     LifecycleExecutionError, LifecycleFailurePolicy, Lifespan, ManagedProcessSpec, ProcessManager,
     ProcessManagerError, RuntimeTarget,
 };
+use crate::adapter::{AdapterConfig, AdapterError, AdapterManager, sink_from_fn};
 use crate::comm::{ChannelRegistry, SharedStore};
 use crate::observability::Logger;
 use crate::plugin::{
@@ -23,13 +25,14 @@ type EventHandler = Arc<dyn Fn(BotEvent, Logger) -> EventFuture + Send + Sync + 
 type BootstrapFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'static>>;
 type BootstrapHook = Arc<dyn Fn(BotBootstrapContext) -> BootstrapFuture + Send + Sync + 'static>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum LiteyukiBotError {
     AlreadyStarted,
     NotStarted,
     Lifecycle(LifecycleExecutionError),
     Process(ProcessManagerError),
     Plugin(PluginLoadError),
+    Adapter(AdapterError),
     Bootstrap(String),
     Send(String),
 }
@@ -42,6 +45,7 @@ impl std::fmt::Display for LiteyukiBotError {
             Self::Lifecycle(err) => write!(f, "lifecycle error: {err}"),
             Self::Process(err) => write!(f, "process manager error: {err}"),
             Self::Plugin(err) => write!(f, "plugin error: {err}"),
+            Self::Adapter(err) => write!(f, "adapter error: {err}"),
             Self::Bootstrap(err) => write!(f, "bootstrap hook failed: {err}"),
             Self::Send(err) => write!(f, "send event failed: {err}"),
         }
@@ -68,6 +72,12 @@ impl From<PluginLoadError> for LiteyukiBotError {
     }
 }
 
+impl From<AdapterError> for LiteyukiBotError {
+    fn from(value: AdapterError) -> Self {
+        Self::Adapter(value)
+    }
+}
+
 #[derive(Clone)]
 pub struct BotBootstrapContext {
     pub target: RuntimeTarget,
@@ -77,6 +87,7 @@ pub struct BotBootstrapContext {
     pub session_router: SessionRouter,
     pub plugin_manager: PluginManager,
     pub plugin_sdk: PluginSdk,
+    pub adapter_manager: AdapterManager,
     pub logger: Logger,
 }
 
@@ -90,6 +101,8 @@ pub struct LiteyukiBotBuilder {
     plugin_ids: Vec<String>,
     plugin_dirs: Vec<PathBuf>,
     plugin_sdk: Option<PluginSdk>,
+    adapter_configs: Vec<AdapterConfig>,
+    adapter_autostart: bool,
 }
 
 impl LiteyukiBotBuilder {
@@ -104,6 +117,8 @@ impl LiteyukiBotBuilder {
             plugin_ids: Vec::new(),
             plugin_dirs: Vec::new(),
             plugin_sdk: None,
+            adapter_configs: Vec::new(),
+            adapter_autostart: false,
         }
     }
 
@@ -156,11 +171,25 @@ impl LiteyukiBotBuilder {
         self
     }
 
+    pub fn with_adapter_configs<I>(mut self, adapter_configs: I) -> Self
+    where
+        I: IntoIterator<Item = AdapterConfig>,
+    {
+        self.adapter_configs = adapter_configs.into_iter().collect();
+        self
+    }
+
+    pub fn with_adapter_autostart(mut self, enabled: bool) -> Self {
+        self.adapter_autostart = enabled;
+        self
+    }
+
     pub fn build(self) -> LiteyukiBot {
         let runtime_config = self.target.tune_runtime_config(self.runtime_config);
         let base_logger = Logger::with_config(runtime_config.logger.clone());
         let session_router = SessionRouter::with_logger(base_logger.clone());
         let plugin_manager = PluginManager::with_logger(base_logger.clone());
+        let adapter_manager = AdapterManager::with_logger(base_logger.clone());
         let plugin_sdk = self.plugin_sdk.unwrap_or_default();
         let custom_handler = self.event_handler.clone();
         let runtime_router = session_router.clone();
@@ -203,6 +232,15 @@ impl LiteyukiBotBuilder {
         let channels = ChannelRegistry::default();
         let shared_store = SharedStore::new(channels.clone());
 
+        for config in self.adapter_configs {
+            if let Err(err) = adapter_manager.register(config) {
+                logger.warn_in(
+                    MODULE_BOT,
+                    format!("skip adapter registration: {}", err),
+                );
+            }
+        }
+
         LiteyukiBot {
             target: self.target,
             runtime,
@@ -215,10 +253,13 @@ impl LiteyukiBotBuilder {
             session_router,
             plugin_manager,
             plugin_sdk,
+            adapter_manager,
             plugin_ids: self.plugin_ids,
             plugin_dirs: self.plugin_dirs,
+            adapter_autostart: self.adapter_autostart,
             logger,
             bootstrap_hooks: Vec::new(),
+            inbound_adapter_event_seq: Arc::new(AtomicU64::new(10_000_000)),
         }
     }
 }
@@ -235,10 +276,13 @@ pub struct LiteyukiBot {
     session_router: SessionRouter,
     plugin_manager: PluginManager,
     plugin_sdk: PluginSdk,
+    adapter_manager: AdapterManager,
     plugin_ids: Vec<String>,
     plugin_dirs: Vec<PathBuf>,
+    adapter_autostart: bool,
     logger: Logger,
     bootstrap_hooks: Vec<BootstrapHook>,
+    inbound_adapter_event_seq: Arc<AtomicU64>,
 }
 
 impl LiteyukiBot {
@@ -277,6 +321,10 @@ impl LiteyukiBot {
         &self.plugin_sdk
     }
 
+    pub fn adapter_manager(&self) -> &AdapterManager {
+        &self.adapter_manager
+    }
+
     pub fn lifecycle_context(&self) -> Arc<LifecycleContext> {
         self.lifecycle.clone()
     }
@@ -308,6 +356,10 @@ impl LiteyukiBot {
 
     pub fn register_plugin<P: Plugin + 'static>(&self, plugin: P) -> Result<(), PluginLoadError> {
         self.plugin_manager.register_plugin(plugin)
+    }
+
+    pub fn register_adapter(&self, config: AdapterConfig) -> Result<(), AdapterError> {
+        self.adapter_manager.register(config)
     }
 
     pub fn on_message<F, Fut>(
@@ -400,6 +452,7 @@ impl LiteyukiBot {
                 session_router: self.session_router.clone(),
                 plugin_manager: self.plugin_manager.clone(),
                 plugin_sdk: self.plugin_sdk.clone(),
+                adapter_manager: self.adapter_manager.clone(),
                 logger: self.logger.clone(),
             })
             .await
@@ -413,6 +466,11 @@ impl LiteyukiBot {
 
         let handle = self.runtime.start();
         self.runtime_handle = Some(handle);
+
+        if self.adapter_autostart {
+            self.start_adapters().await?;
+        }
+
         self.lifespan.after_start(self.lifecycle.clone()).await?;
         self.logger.info_in(
             MODULE_BOT,
@@ -475,6 +533,12 @@ impl LiteyukiBot {
             first_error = Some(err.into());
         }
 
+        if let Err(err) = self.adapter_manager.shutdown_all().await {
+            if first_error.is_none() {
+                first_error = Some(err.into());
+            }
+        }
+
         if let Err(err) = self.process_manager.terminate_all().await {
             if first_error.is_none() {
                 first_error = Some(err.into());
@@ -522,6 +586,36 @@ impl LiteyukiBot {
             .await
             .map_err(LiteyukiBotError::Plugin)?;
         Ok(())
+    }
+
+    pub async fn start_adapters(&self) -> Result<(), LiteyukiBotError> {
+        let handle = self
+            .runtime_handle
+            .as_ref()
+            .ok_or(LiteyukiBotError::NotStarted)?;
+        let ingress = handle.ingress_sender();
+        let event_seq = Arc::clone(&self.inbound_adapter_event_seq);
+        let sink = sink_from_fn(move |packet| {
+            let ingress = ingress.clone();
+            let event_seq = Arc::clone(&event_seq);
+            async move {
+                let fallback_id = event_seq.fetch_add(1, Ordering::SeqCst);
+                let event = packet.into_bot_event(fallback_id);
+                let _ = ingress.send(event).await;
+            }
+        });
+
+        self.adapter_manager
+            .start_enabled(sink)
+            .await
+            .map_err(LiteyukiBotError::Adapter)
+    }
+
+    pub async fn stop_adapters(&self) -> Result<(), LiteyukiBotError> {
+        self.adapter_manager
+            .shutdown_all()
+            .await
+            .map_err(LiteyukiBotError::Adapter)
     }
 
     fn plugin_context(&self) -> PluginContext {

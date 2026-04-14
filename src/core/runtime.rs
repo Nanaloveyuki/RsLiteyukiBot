@@ -271,6 +271,10 @@ pub struct BotHandle {
 }
 
 impl BotHandle {
+    pub fn ingress_sender(&self) -> mpsc::Sender<BotEvent> {
+        self.ingress_tx.clone()
+    }
+
     pub async fn send(&self, event: BotEvent) -> Result<(), mpsc::error::SendError<BotEvent>> {
         self.ingress_tx.send(event).await
     }
