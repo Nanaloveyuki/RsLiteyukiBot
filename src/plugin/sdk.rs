@@ -9,6 +9,7 @@ use crate::core::LifecycleContext;
 use crate::observability::Logger;
 use crate::session::SessionRouter;
 
+use super::abi::PluginAbiContract;
 use super::{PluginDescriptor, PluginRuntimeKind};
 
 pub type PluginSdkFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginSdkError>> + Send>>;
@@ -46,22 +47,29 @@ pub struct PluginLoadPlan {
     pub runtime_kind: PluginRuntimeKind,
     pub state: PluginLoadState,
     pub reason: Option<String>,
+    pub contract: PluginAbiContract,
 }
 
 impl PluginLoadPlan {
-    pub fn ready(runtime_kind: PluginRuntimeKind) -> Self {
+    pub fn ready(runtime_kind: PluginRuntimeKind, contract: PluginAbiContract) -> Self {
         Self {
             runtime_kind,
             state: PluginLoadState::Ready,
             reason: None,
+            contract,
         }
     }
 
-    pub fn deferred(runtime_kind: PluginRuntimeKind, reason: impl Into<String>) -> Self {
+    pub fn deferred(
+        runtime_kind: PluginRuntimeKind,
+        contract: PluginAbiContract,
+        reason: impl Into<String>,
+    ) -> Self {
         Self {
             runtime_kind,
             state: PluginLoadState::Deferred,
             reason: Some(reason.into()),
+            contract,
         }
     }
 }
@@ -243,14 +251,24 @@ impl RuntimeAdapter for NativeRuntimeAdapter {
         descriptor: &PluginDescriptor,
         _host: &dyn PluginHostApi,
     ) -> PluginSdkFuture<PluginLoadPlan> {
+        let abi_version = normalize_abi_version(&descriptor.runtime.abi);
+        let host_api_version = normalize_host_api_version(&descriptor.sdk.api_version);
+        let mut contract = PluginAbiContract::new(
+            PluginRuntimeKind::Native,
+            "liteyuki-native",
+            abi_version,
+            host_api_version,
+        );
+        contract.required_methods.push(super::abi::PluginAbiMethod::HandleEvent);
         let has_entry = !descriptor.runtime.entrypoint.trim().is_empty()
             || !descriptor.runtime.module.trim().is_empty();
         Box::pin(async move {
             if has_entry {
-                Ok(PluginLoadPlan::ready(PluginRuntimeKind::Native))
+                Ok(PluginLoadPlan::ready(PluginRuntimeKind::Native, contract))
             } else {
                 Ok(PluginLoadPlan::deferred(
                     PluginRuntimeKind::Native,
+                    contract,
                     "native plugin entrypoint is not declared",
                 ))
             }
@@ -265,12 +283,19 @@ impl RuntimeAdapter for PythonRuntimeAdapter {
 
     fn plan_load(
         &self,
-        _descriptor: &PluginDescriptor,
+        descriptor: &PluginDescriptor,
         _host: &dyn PluginHostApi,
     ) -> PluginSdkFuture<PluginLoadPlan> {
+        let contract = PluginAbiContract::new(
+            PluginRuntimeKind::Python,
+            "liteyuki-python-bridge",
+            normalize_abi_version(&descriptor.runtime.abi),
+            normalize_host_api_version(&descriptor.sdk.api_version),
+        );
         Box::pin(async move {
             Ok(PluginLoadPlan::deferred(
                 PluginRuntimeKind::Python,
+                contract,
                 "python runtime bridge is reserved for future pyo3 integration",
             ))
         })
@@ -284,15 +309,37 @@ impl RuntimeAdapter for LuaRuntimeAdapter {
 
     fn plan_load(
         &self,
-        _descriptor: &PluginDescriptor,
+        descriptor: &PluginDescriptor,
         _host: &dyn PluginHostApi,
     ) -> PluginSdkFuture<PluginLoadPlan> {
+        let contract = PluginAbiContract::new(
+            PluginRuntimeKind::Lua,
+            "liteyuki-lua-bridge",
+            normalize_abi_version(&descriptor.runtime.abi),
+            normalize_host_api_version(&descriptor.sdk.api_version),
+        );
         Box::pin(async move {
             Ok(PluginLoadPlan::deferred(
                 PluginRuntimeKind::Lua,
+                contract,
                 "lua runtime bridge is reserved for future lua integration",
             ))
         })
     }
 }
 
+fn normalize_abi_version(raw: &str) -> String {
+    if raw.trim().is_empty() {
+        "1.0".to_string()
+    } else {
+        raw.trim().to_string()
+    }
+}
+
+fn normalize_host_api_version(raw: &str) -> String {
+    if raw.trim().is_empty() {
+        "0.1".to_string()
+    } else {
+        raw.trim().to_string()
+    }
+}

@@ -19,11 +19,12 @@ pub use core::{
 };
 pub use observability::{LogLevel, LogMode, Logger, LoggerConfig, TimeZone, TimestampFormat};
 pub use plugin::{
-    LoadedPlugin, LuaRuntimeAdapter, NativeRuntimeAdapter, Plugin, PluginContext, PluginDescriptor,
-    PluginFuture, PluginHostApi, PluginHostBridge, PluginLoadError, PluginLoadPlan,
-    PluginLoadState, PluginManager, PluginManifest, PluginManifestError, PluginManifestLoader,
-    PluginMetadata, PluginRuntimeKind, PluginRuntimeSpec, PluginSdk, PluginSdkError,
-    PluginSdkFuture, PluginSdkSpec, PluginType, PythonRuntimeAdapter, RuntimeAdapter,
-    RuntimeAdapterRegistry,
+    LoadedPlugin, LuaRuntimeAdapter, NativeRuntimeAdapter, Plugin, PluginAbiContract,
+    PluginAbiMethod, PluginCallEnvelope, PluginCallResult, PluginContext, PluginDescriptor,
+    PluginErrorCode, PluginFuture, PluginHandshakeRequest, PluginHandshakeResponse, PluginHostApi,
+    PluginHostBridge, PluginLoadError, PluginLoadPlan, PluginLoadState, PluginManager,
+    PluginManifest, PluginManifestError, PluginManifestLoader, PluginMetadata, PluginRuntimeKind,
+    PluginRuntimeSpec, PluginSdk, PluginSdkError, PluginSdkFuture, PluginSdkSpec, PluginType,
+    PythonRuntimeAdapter, RuntimeAdapter, RuntimeAdapterRegistry,
 };
 pub use session::{Matcher, MatcherReport, Rule, SessionDispatchReport, SessionEvent, SessionRouter, SessionScope};

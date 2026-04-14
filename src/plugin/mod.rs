@@ -1,8 +1,13 @@
+mod abi;
 mod loader;
 mod manager;
 mod model;
 mod sdk;
 
+pub use abi::{
+    PluginAbiContract, PluginAbiMethod, PluginCallEnvelope, PluginCallResult, PluginErrorCode,
+    PluginHandshakeRequest, PluginHandshakeResponse,
+};
 pub use loader::{PluginManifest, PluginManifestError, PluginManifestLoader};
 pub use manager::{LoadedPlugin, Plugin, PluginContext, PluginFuture, PluginLoadError, PluginManager};
 pub use model::{

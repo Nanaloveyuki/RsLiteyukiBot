@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use liteyukibot_core::{
     ChannelRegistry, LifecycleContext, Plugin, PluginContext, PluginManager, PluginMetadata,
     PluginSdk, PluginType, RuntimeTarget, SessionRouter, SharedStore, PluginHostBridge,
-    PluginLoadState,
+    PluginLoadState, PluginRuntimeKind, PluginAbiMethod,
 };
 use liteyukibot_core::{Logger, LoggerConfig};
 use liteyukibot_core::{RuntimeCapabilities, RuntimeFlavor};
@@ -104,6 +104,18 @@ async fn plugin_manager_register_and_load_plugin() {
 
     assert!(manager.is_loaded("counting"));
     assert_eq!(loaded.load(Ordering::SeqCst), 1);
+    let loaded_plugins = manager.loaded_plugins();
+    assert_eq!(loaded_plugins.len(), 1);
+    assert_eq!(loaded_plugins[0].load_plan.runtime_kind, PluginRuntimeKind::Native);
+    assert_eq!(loaded_plugins[0].load_plan.state, PluginLoadState::Deferred);
+    assert_eq!(loaded_plugins[0].load_plan.contract.abi_name, "liteyuki-native");
+    assert!(
+        loaded_plugins[0]
+            .load_plan
+            .contract
+            .required_methods
+            .contains(&PluginAbiMethod::HandleEvent)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -170,7 +182,12 @@ async fn plugin_manager_marks_python_runtime_as_deferred_plan() {
     let loaded = manager.loaded_plugins();
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].descriptor.metadata.id, "python-echo");
+    assert_eq!(loaded[0].load_plan.runtime_kind, PluginRuntimeKind::Python);
     assert_eq!(loaded[0].load_plan.state, PluginLoadState::Deferred);
+    assert_eq!(
+        loaded[0].load_plan.contract.abi_name,
+        "liteyuki-python-bridge"
+    );
 }
 
 struct TempDir {
