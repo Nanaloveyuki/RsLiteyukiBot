@@ -79,3 +79,6 @@ docs/.vitepress/.temp
 # pdm
 __pypackages__/
 pdm.lock
+
+# rust
+.liteyuki-tui-resumes.json
