@@ -1,0 +1,11 @@
+[runtime]
+worker_count = 4
+ingress_queue = 1024
+worker_queue = 256
+
+[log]
+mode = "color"
+level = "info"
+timezone = "local"
+timestamp_format = "custom"
+timestamp_pattern = "%Y-%m-%d %H:%M:%S"
