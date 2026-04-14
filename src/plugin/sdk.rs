@@ -76,12 +76,7 @@ impl PluginLoadPlan {
 
 pub trait PluginHostApi: Send + Sync {
     fn log(&self, message: String) -> PluginSdkFuture<()>;
-    fn publish(
-        &self,
-        channel_name: String,
-        topic: String,
-        payload: Value,
-    ) -> PluginSdkFuture<()>;
+    fn publish(&self, channel_name: String, topic: String, payload: Value) -> PluginSdkFuture<()>;
     fn kv_get(&self, key: String) -> PluginSdkFuture<Option<Value>>;
     fn kv_set(&self, key: String, value: Value) -> PluginSdkFuture<()>;
 }
@@ -138,12 +133,7 @@ impl PluginHostApi for PluginHostBridge {
         })
     }
 
-    fn publish(
-        &self,
-        channel_name: String,
-        topic: String,
-        payload: Value,
-    ) -> PluginSdkFuture<()> {
+    fn publish(&self, channel_name: String, topic: String, payload: Value) -> PluginSdkFuture<()> {
         let shared_store = self.shared_store.clone();
         Box::pin(async move {
             let message = ChannelMessage::new(topic, payload, Some("plugin-sdk"));
@@ -226,13 +216,12 @@ impl PluginSdk {
         descriptor: &PluginDescriptor,
         host: &dyn PluginHostApi,
     ) -> Result<PluginLoadPlan, PluginSdkError> {
-        let adapter =
-            self.adapters
-                .find(descriptor.runtime.kind)
-                .ok_or(PluginSdkError::UnsupportedRuntime {
-                    kind: descriptor.runtime.kind,
-                    reason: "no runtime adapter registered".to_string(),
-                })?;
+        let adapter = self.adapters.find(descriptor.runtime.kind).ok_or(
+            PluginSdkError::UnsupportedRuntime {
+                kind: descriptor.runtime.kind,
+                reason: "no runtime adapter registered".to_string(),
+            },
+        )?;
         adapter.plan_load(descriptor, host).await
     }
 }
@@ -259,7 +248,9 @@ impl RuntimeAdapter for NativeRuntimeAdapter {
             abi_version,
             host_api_version,
         );
-        contract.required_methods.push(super::abi::PluginAbiMethod::HandleEvent);
+        contract
+            .required_methods
+            .push(super::abi::PluginAbiMethod::HandleEvent);
         let has_entry = !descriptor.runtime.entrypoint.trim().is_empty()
             || !descriptor.runtime.module.trim().is_empty();
         Box::pin(async move {

@@ -117,7 +117,8 @@ impl ProcessManager {
     {
         let name: Arc<str> = Arc::from(name.into());
         spec.name = Arc::clone(&name);
-        let runner: ManagedProcessRunner = Arc::new(move |shutdown_rx| Box::pin(runner(shutdown_rx)));
+        let runner: ManagedProcessRunner =
+            Arc::new(move |shutdown_rx| Box::pin(runner(shutdown_rx)));
 
         let mut registrations = self
             .registrations
@@ -326,7 +327,10 @@ async fn supervise_process(
 
         if !pending_restart {
             if let Some(logger) = &logger {
-                logger.info_in(MODULE_PROCESS_MANAGER, format!("process '{}' stopped", name));
+                logger.info_in(
+                    MODULE_PROCESS_MANAGER,
+                    format!("process '{}' stopped", name),
+                );
             }
             return;
         }

@@ -35,4 +35,6 @@ pub use plugin::{
     PluginRuntimeSpec, PluginSdk, PluginSdkError, PluginSdkFuture, PluginSdkSpec, PluginType,
     PythonRuntimeAdapter, RuntimeAdapter, RuntimeAdapterRegistry,
 };
-pub use session::{Matcher, MatcherReport, Rule, SessionDispatchReport, SessionEvent, SessionRouter, SessionScope};
+pub use session::{
+    Matcher, MatcherReport, Rule, SessionDispatchReport, SessionEvent, SessionRouter, SessionScope,
+};

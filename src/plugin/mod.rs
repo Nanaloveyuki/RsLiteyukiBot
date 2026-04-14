@@ -9,7 +9,9 @@ pub use abi::{
     PluginHandshakeRequest, PluginHandshakeResponse,
 };
 pub use loader::{PluginManifest, PluginManifestError, PluginManifestLoader};
-pub use manager::{LoadedPlugin, Plugin, PluginContext, PluginFuture, PluginLoadError, PluginManager};
+pub use manager::{
+    LoadedPlugin, Plugin, PluginContext, PluginFuture, PluginLoadError, PluginManager,
+};
 pub use model::{
     PluginDescriptor, PluginMetadata, PluginRuntimeKind, PluginRuntimeSpec, PluginSdkSpec,
     PluginType,

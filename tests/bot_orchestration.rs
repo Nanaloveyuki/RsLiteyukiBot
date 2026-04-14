@@ -106,4 +106,3 @@ async fn liteyuki_bot_orchestrates_runtime_and_managed_processes() {
 
     bot.shutdown().await.expect("shutdown should succeed");
 }
-

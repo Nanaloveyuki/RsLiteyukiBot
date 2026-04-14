@@ -111,4 +111,3 @@ pub struct PluginCallResult {
     pub message: String,
     pub payload: Option<Value>,
 }
-

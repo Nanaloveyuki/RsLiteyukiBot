@@ -36,11 +36,7 @@ impl SharedStore {
         self.inner.lock().unwrap().clone()
     }
 
-    pub fn publish(
-        &self,
-        channel_name: &str,
-        message: ChannelMessage,
-    ) -> Result<(), ChannelError> {
+    pub fn publish(&self, channel_name: &str, message: ChannelMessage) -> Result<(), ChannelError> {
         let channel = self.registry.get_or_create(channel_name, 256);
         channel.send(message)
     }

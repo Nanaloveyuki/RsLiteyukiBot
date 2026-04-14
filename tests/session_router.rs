@@ -75,4 +75,3 @@ async fn session_router_supports_rule_composition() {
     assert_eq!(report.handled, 1);
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
-

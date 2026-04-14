@@ -16,4 +16,3 @@ pub use websocket::{
     AdapterSink, AdapterSinkFuture, WebSocketAdapterHandle, start_forward_adapter,
     start_reverse_adapter,
 };
-

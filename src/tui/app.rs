@@ -11,13 +11,13 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use liteyukibot_core::{AdapterConfig, LiteyukiBot, RuntimeTarget};
+use liteyukibot_core::{AdapterConfig, AdapterTransport, LiteyukiBot, RuntimeTarget};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -112,6 +112,15 @@ pub struct ReloadResult {
 
 pub type ReloadFuture<'a> = Pin<Box<dyn Future<Output = Result<ReloadResult, String>> + 'a>>;
 pub type ReloadHandler = for<'a> fn(&'a mut LiteyukiBot) -> ReloadFuture<'a>;
+
+pub struct RunOptions {
+    pub target: RuntimeTarget,
+    pub settings_desc: String,
+    pub adapter_configs: Vec<AdapterConfig>,
+    pub adapter_autostart: bool,
+    pub tui_config: TuiConfig,
+    pub reload_handler: ReloadHandler,
+}
 
 impl Default for TuiConfig {
     fn default() -> Self {
@@ -392,11 +401,31 @@ impl AppState {
     }
 
     fn refresh_adapter_state(&mut self, bot: &LiteyukiBot) {
+        let mut state_changes = Vec::new();
         for adapter in &self.adapters {
-            self.adapter_running.insert(
-                adapter.id.clone(),
-                bot.adapter_manager().is_running(&adapter.id),
-            );
+            let next_running = bot.adapter_manager().is_running(&adapter.id);
+            let prev_running = self
+                .adapter_running
+                .insert(adapter.id.clone(), next_running)
+                .unwrap_or(false);
+            if prev_running != next_running {
+                state_changes.push((adapter.id.clone(), adapter.transport, next_running));
+            }
+        }
+
+        for (id, transport, running) in state_changes {
+            if running {
+                self.push_log(
+                    UiLevel::Info,
+                    format!(
+                        "adapter '{}' connected ({})",
+                        id,
+                        adapter_transport_label(transport)
+                    ),
+                );
+            } else {
+                self.push_log(UiLevel::Warn, format!("adapter '{}' disconnected", id));
+            }
         }
     }
 
@@ -683,6 +712,31 @@ impl AppState {
         }
     }
 
+    fn completion_preview(&self) -> Option<String> {
+        if !self.console_input.trim_start().starts_with('/') {
+            return None;
+        }
+        let (_, mode, candidates) = self.completion_context()?;
+        let candidate = candidates.first()?;
+        Some(Self::apply_completion_candidate(mode, candidate))
+    }
+
+    fn completion_preview_suffix(&self) -> Option<String> {
+        let preview = self.completion_preview()?;
+        if preview == self.console_input {
+            return None;
+        }
+        if let Some(suffix) = preview.strip_prefix(self.console_input.as_str()) {
+            if suffix.is_empty() {
+                None
+            } else {
+                Some(suffix.to_string())
+            }
+        } else {
+            Some(format!("  ({preview})"))
+        }
+    }
+
     fn show_resume_list(&mut self) {
         if self.resume_store.sessions.is_empty() {
             self.push_log(UiLevel::Info, "no resume history found");
@@ -905,14 +959,17 @@ impl AppState {
 
 pub async fn run(
     bot: &mut LiteyukiBot,
-    target: RuntimeTarget,
-    settings_desc: String,
-    adapter_configs: Vec<AdapterConfig>,
-    adapter_autostart: bool,
-    tui_config: TuiConfig,
-    reload_handler: ReloadHandler,
+    options: RunOptions,
     ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let RunOptions {
+        target,
+        settings_desc,
+        adapter_configs,
+        adapter_autostart,
+        tui_config,
+        reload_handler,
+    } = options;
     let mut app = AppState::new(target, settings_desc, adapter_configs, tui_config);
     app.push_log(
         UiLevel::Info,
@@ -1032,6 +1089,7 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &mut AppState) {
         .constraints([Constraint::Percentage(24), Constraint::Percentage(76)])
         .split(root[1]);
 
+    let adapter_text_width = (mid[0].width as usize).saturating_sub(2).max(1);
     let adapter_items: Vec<ListItem<'_>> = if app.adapters.is_empty() {
         vec![ListItem::new(Line::from("no adapters configured"))]
     } else {
@@ -1051,10 +1109,30 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &mut AppState) {
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
-                ListItem::new(Line::from(vec![
+                let name_style = if running {
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                let mut lines = vec![Line::from(vec![
                     Span::styled(format!("[{}] ", status), status_style),
-                    Span::raw(format!("{} ({:?})", adapter.id, adapter.transport)),
-                ]))
+                    Span::styled(adapter.id.clone(), name_style),
+                ])];
+                let detail = format!(
+                    "({}) {}",
+                    adapter_transport_label(adapter.transport),
+                    adapter.endpoint.url
+                );
+                let detail_lines = wrap_text_hard(&detail, adapter_text_width.saturating_sub(2));
+                for detail_line in detail_lines {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(detail_line, Style::default().fg(Color::DarkGray)),
+                    ]));
+                }
+                ListItem::new(Text::from(lines))
             })
             .collect()
     };
@@ -1107,6 +1185,7 @@ fn draw_log_console_view(
 
 fn render_logs_panel(frame: &mut ratatui::Frame<'_>, app: &mut AppState, area: Rect, title: &str) {
     let log_rows = (area.height as usize).saturating_sub(2).max(1);
+    let log_text_width = (area.width as usize).saturating_sub(2).max(1);
     app.set_log_view_rows(log_rows);
     let max_scroll = app.max_log_scroll();
     let (start, end) = app.log_window_bounds();
@@ -1123,14 +1202,27 @@ fn render_logs_panel(frame: &mut ratatui::Frame<'_>, app: &mut AppState, area: R
                 UiLevel::Error => ("ERR ", Style::default().fg(Color::Red)),
                 UiLevel::Event => ("EVT ", Style::default().fg(Color::Green)),
             };
-            ListItem::new(Line::from(vec![
+            let prefix = format!("{} [{}] ", log.timestamp, tag);
+            let prefix_width = prefix.chars().count();
+            let message_width = log_text_width.saturating_sub(prefix_width).max(1);
+            let wrapped_message = wrap_text_hard(log.message.as_str(), message_width);
+            let first_line = wrapped_message.first().cloned().unwrap_or_default();
+            let mut lines = vec![Line::from(vec![
                 Span::styled(
                     format!("{} ", log.timestamp),
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(format!("[{}] ", tag), style),
-                Span::raw(log.message.clone()),
-            ]))
+                Span::raw(first_line),
+            ])];
+            let indent = " ".repeat(prefix_width);
+            for segment in wrapped_message.iter().skip(1) {
+                lines.push(Line::from(vec![
+                    Span::raw(indent.clone()),
+                    Span::raw(segment.clone()),
+                ]));
+            }
+            ListItem::new(Text::from(lines))
         })
         .collect();
 
@@ -1144,12 +1236,62 @@ fn render_logs_panel(frame: &mut ratatui::Frame<'_>, app: &mut AppState, area: R
 }
 
 fn render_command_panel(frame: &mut ratatui::Frame<'_>, app: &AppState, area: Rect) {
-    let input_widget = Paragraph::new(Line::from(vec![
+    let mut spans = vec![
         Span::styled("> ", Style::default().fg(Color::Cyan)),
         Span::raw(app.console_input.as_str()),
-    ]))
-    .block(rounded_block("Command"));
+    ];
+    if let Some(preview) = app.completion_preview_suffix() {
+        spans.push(Span::styled(
+            preview,
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ));
+    }
+
+    let input_widget = Paragraph::new(Line::from(spans)).block(rounded_block("Command"));
     frame.render_widget(input_widget, area);
+}
+
+fn adapter_transport_label(transport: AdapterTransport) -> &'static str {
+    match transport {
+        AdapterTransport::WebSocketForward => "ws-forward",
+        AdapterTransport::WebSocketReverse => "ws-reverse",
+        AdapterTransport::Sse => "sse",
+        AdapterTransport::Http => "http",
+    }
+}
+
+fn wrap_text_hard(text: &str, max_width: usize) -> Vec<String> {
+    let width = max_width.max(1);
+    let mut lines = Vec::new();
+
+    for source_line in text.lines() {
+        if source_line.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let mut chunk = String::new();
+        let mut chunk_width = 0usize;
+        for ch in source_line.chars() {
+            chunk.push(ch);
+            chunk_width += 1;
+            if chunk_width >= width {
+                lines.push(chunk);
+                chunk = String::new();
+                chunk_width = 0;
+            }
+        }
+        if !chunk.is_empty() {
+            lines.push(chunk);
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn poll_key_events(
@@ -1375,6 +1517,35 @@ mod tests {
         app.console_input = "/he".to_string();
         app.autocomplete_console_input();
         assert_eq!(app.console_input, "/help");
+
+        remove_file_if_exists(&path);
+    }
+
+    #[test]
+    fn completion_preview_shows_suffix_for_best_match() {
+        let path = temp_resume_path("completion-preview");
+        remove_file_if_exists(&path);
+
+        let mut app = AppState::new(
+            RuntimeTarget::Cli,
+            "test".to_string(),
+            Vec::new(),
+            test_tui_config(path.clone()),
+        );
+
+        app.console_input = "/re".to_string();
+        assert_eq!(app.completion_preview_suffix().as_deref(), Some("load"));
+
+        app.console_input = "/help".to_string();
+        assert!(app.completion_preview_suffix().is_none());
+
+        app.resume_store
+            .create_session("resume-preview-001".to_string());
+        app.console_input = "/resume resume-pr".to_string();
+        assert_eq!(
+            app.completion_preview_suffix().as_deref(),
+            Some("eview-001")
+        );
 
         remove_file_if_exists(&path);
     }

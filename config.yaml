@@ -38,7 +38,7 @@ connect:
     #   port: 8080
     #   path: /ws
   tcp-http:
-    enabled: true
+    enabled: false
     host: 127.0.0.1
     port: 8081
     path: /
@@ -46,7 +46,7 @@ connect:
     max_connections: 100
     timeout_seconds: 30
   sse:
-    enabled: true
+    enabled: false
     host: 127.0.0.1
     port: 8082
     path: /sse

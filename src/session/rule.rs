@@ -61,8 +61,11 @@ impl Rule {
         let keywords: Vec<String> = words.into_iter().map(Into::into).collect();
         Rule::new("keywords", move |event| {
             let keywords = keywords.clone();
-            async move { keywords.iter().any(|keyword| event.message.contains(keyword)) }
+            async move {
+                keywords
+                    .iter()
+                    .any(|keyword| event.message.contains(keyword))
+            }
         })
     }
 }
-

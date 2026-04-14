@@ -52,7 +52,8 @@ impl Matcher {
         F: Fn(Arc<SessionEvent>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), String>> + Send + 'static,
     {
-        self.handlers.push(Arc::new(move |event| Box::pin(handler(event))));
+        self.handlers
+            .push(Arc::new(move |event| Box::pin(handler(event))));
     }
 
     pub async fn run(&self, event: Arc<SessionEvent>) -> MatcherReport {
@@ -77,4 +78,3 @@ impl Matcher {
         report
     }
 }
-

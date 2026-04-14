@@ -82,7 +82,11 @@ impl PluginManifestLoader {
 
     pub fn load_manifest(path: &Path) -> Result<PluginManifest, PluginManifestError> {
         let content = std::fs::read_to_string(path).map_err(|err| {
-            PluginManifestError::Io(format!("read manifest failed for {}: {}", path.display(), err))
+            PluginManifestError::Io(format!(
+                "read manifest failed for {}: {}",
+                path.display(),
+                err
+            ))
         })?;
         let raw: RawManifest = serde_json::from_str(&content).map_err(|err| {
             PluginManifestError::Parse(format!(
@@ -151,4 +155,3 @@ fn normalize_plugin_id(name: &str) -> String {
     }
     id.trim_matches('-').to_string()
 }
-

@@ -195,10 +195,10 @@ pub async fn start_reverse_adapter(
                                     let Ok(inbound) = inbound else {
                                         break;
                                     };
-                                    if let Some(size) = ws_message_payload_size(&inbound) {
-                                        if enforce_ws_payload_limit(size, max_payload_size, "reverse inbound").is_err() {
-                                            continue;
-                                        }
+                                    if let Some(size) = ws_message_payload_size(&inbound)
+                                        && enforce_ws_payload_limit(size, max_payload_size, "reverse inbound").is_err()
+                                    {
+                                        continue;
                                     }
                                     if let Ok(Some(packet)) = parse_packet(inbound) {
                                         sink(packet).await;

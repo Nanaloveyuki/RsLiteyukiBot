@@ -56,4 +56,3 @@ fn now_millis() -> u128 {
         .unwrap_or_default()
         .as_millis()
 }
-

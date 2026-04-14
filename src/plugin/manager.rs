@@ -64,7 +64,9 @@ impl std::fmt::Display for PluginLoadError {
             Self::NotFound(id) => write!(f, "plugin '{}' not found", id),
             Self::AlreadyLoaded(id) => write!(f, "plugin '{}' already loaded", id),
             Self::Hook { id, reason } => write!(f, "plugin '{}' load hook failed: {}", id, reason),
-            Self::Sdk { id, reason } => write!(f, "plugin '{}' sdk planning failed: {}", id, reason),
+            Self::Sdk { id, reason } => {
+                write!(f, "plugin '{}' sdk planning failed: {}", id, reason)
+            }
             Self::Io(message) => write!(f, "plugin IO error: {}", message),
             Self::Parse(message) => write!(f, "plugin parse error: {}", message),
         }

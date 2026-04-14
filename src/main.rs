@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 use liteyukibot_core::{AdapterConfig, LiteyukiBot, LogLevel, RuntimeSettings, RuntimeTarget};
 use serde::Deserialize;
@@ -18,6 +19,9 @@ const APP_CONFIG_PATHS: [&str; 6] = [
     "config/rust-core.yaml",
     "config/rust-core.toml",
 ];
+
+static LAST_RELOAD_WARNING_STATE: LazyLock<Mutex<Option<ReloadWarningState>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 #[derive(Debug, Deserialize, Default)]
 struct AppConfigDoc {
@@ -47,7 +51,7 @@ struct AppRustSection {
     tui: Option<TuiConfigSection>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 struct RuntimeConfigSection {
     #[serde(default)]
     worker_count: Option<usize>,
@@ -57,7 +61,7 @@ struct RuntimeConfigSection {
     worker_queue: Option<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 struct LogConfigSection {
     #[serde(default)]
     mode: Option<String>,
@@ -228,6 +232,21 @@ struct AdapterConfigDoc {
     adapters: Vec<AdapterConfig>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ReloadWarningState {
+    runtime: Option<RuntimeConfigSection>,
+    log: Option<LogConfigSection>,
+}
+
+impl ReloadWarningState {
+    fn from_doc(doc: &AppConfigDoc) -> Self {
+        Self {
+            runtime: config_runtime(doc).cloned(),
+            log: config_log(doc).cloned(),
+        }
+    }
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(err) = ensure_default_config_files() {
@@ -247,6 +266,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     runtime_config.logger.min_level = LogLevel::Error;
 
     let app_config = load_app_config();
+    prime_reload_warning_state(&app_config);
     let target = resolve_runtime_target();
     let adapter_configs = load_adapter_configs(&app_config).unwrap_or_default();
     let adapter_autostart = !adapter_configs.is_empty();
@@ -307,12 +327,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tui_result = tui::run(
         &mut bot,
-        target,
-        active_settings.describe(),
-        adapter_configs,
-        adapter_autostart,
-        tui_config,
-        reload_from_config,
+        tui::RunOptions {
+            target,
+            settings_desc: active_settings.describe(),
+            adapter_configs,
+            adapter_autostart,
+            tui_config,
+            reload_handler: reload_from_config,
+        },
         &mut ui_rx,
     )
     .await;
@@ -335,20 +357,30 @@ fn resolve_runtime_target() -> RuntimeTarget {
 }
 
 fn load_app_config() -> AppConfigDoc {
+    load_app_config_with_warnings(true).0
+}
+
+fn load_app_config_with_warnings(emit_stderr: bool) -> (AppConfigDoc, Vec<String>) {
     let Some(path) = resolve_app_config_path() else {
-        return AppConfigDoc::default();
+        return (AppConfigDoc::default(), Vec::new());
     };
 
     match load_app_config_from_path(&path) {
         Ok(doc) => {
-            for warning in validate_app_config(&doc) {
-                eprintln!("config warning ({}): {warning}", path.display());
+            let warnings = validate_app_config(&doc);
+            if emit_stderr {
+                for warning in &warnings {
+                    eprintln!("config warning ({}): {warning}", path.display());
+                }
             }
-            doc
+            (doc, warnings)
         }
         Err(err) => {
-            eprintln!("failed to load app config from {}: {err}", path.display());
-            AppConfigDoc::default()
+            let message = format!("failed to load app config from {}: {err}", path.display());
+            if emit_stderr {
+                eprintln!("{message}");
+            }
+            (AppConfigDoc::default(), vec![message])
         }
     }
 }
@@ -705,9 +737,7 @@ fn websocket_endpoint_to_adapter(
         )
     });
 
-    let Some(url) = url else {
-        return None;
-    };
+    let url = url?;
 
     Some(AdapterConfig {
         id: id.to_string(),
@@ -875,8 +905,8 @@ fn payload_preview(payload: &Value) -> String {
 
 fn reload_from_config(bot: &mut LiteyukiBot) -> tui::ReloadFuture<'_> {
     Box::pin(async move {
-        let app_config = load_app_config();
-        let warnings = runtime_reload_warnings(&app_config);
+        let (app_config, mut warnings) = load_app_config_with_warnings(false);
+        warnings.extend(collect_runtime_reload_warnings(&app_config));
         let adapters = load_adapter_configs(&app_config)
             .map_err(|err| format!("failed to load adapter configs: {err}"))?;
         let autostart = !adapters.is_empty();
@@ -1027,37 +1057,70 @@ fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
         }
     }
 
-    warnings.extend(runtime_reload_warnings(doc));
-
     warnings
 }
 
-fn runtime_reload_warnings(doc: &AppConfigDoc) -> Vec<String> {
+fn prime_reload_warning_state(doc: &AppConfigDoc) {
+    let mut lock = LAST_RELOAD_WARNING_STATE
+        .lock()
+        .expect("reload warning state lock should not be poisoned");
+    *lock = Some(ReloadWarningState::from_doc(doc));
+}
+
+fn collect_runtime_reload_warnings(doc: &AppConfigDoc) -> Vec<String> {
+    let current = ReloadWarningState::from_doc(doc);
+    let mut lock = LAST_RELOAD_WARNING_STATE
+        .lock()
+        .expect("reload warning state lock should not be poisoned");
+    let warnings = runtime_reload_warnings(lock.as_ref(), &current);
+    *lock = Some(current);
+    warnings
+}
+
+fn runtime_reload_warnings(
+    previous: Option<&ReloadWarningState>,
+    current: &ReloadWarningState,
+) -> Vec<String> {
     let mut warnings = Vec::new();
 
-    if let Some(runtime) = config_runtime(doc)
-        && (runtime.worker_count.is_some()
-            || runtime.ingress_queue.is_some()
-            || runtime.worker_queue.is_some())
-    {
+    let runtime_changed = previous.is_none_or(|prev| prev.runtime != current.runtime);
+    let runtime_sensitive = previous
+        .is_some_and(|prev| runtime_has_hot_reload_sensitive_fields(&prev.runtime))
+        || runtime_has_hot_reload_sensitive_fields(&current.runtime);
+    if runtime_changed && runtime_sensitive {
         warnings.push(
             "runtime.worker_count/ingress_queue/worker_queue are low-level parameters; /reload will not hot-apply them. Restart is recommended, hot switching may cause unpredictable behavior.".to_string(),
         );
     }
 
-    if let Some(log) = config_log(doc)
-        && (log.mode.is_some()
-            || log.level.is_some()
-            || log.timezone.is_some()
-            || log.timestamp_format.is_some()
-            || log.timestamp_pattern.is_some())
-    {
+    let log_changed = previous.is_none_or(|prev| prev.log != current.log);
+    let log_sensitive = previous.is_some_and(|prev| log_has_startup_only_fields(&prev.log))
+        || log_has_startup_only_fields(&current.log);
+    if log_changed && log_sensitive {
         warnings.push(
             "log mode/level/timestamp parameters are loaded at startup and may not be fully applied by /reload. Restart is recommended for deterministic behavior.".to_string(),
         );
     }
 
     warnings
+}
+
+fn runtime_has_hot_reload_sensitive_fields(runtime: &Option<RuntimeConfigSection>) -> bool {
+    runtime.as_ref().is_some_and(|runtime| {
+        runtime.worker_count.is_some()
+            || runtime.ingress_queue.is_some()
+            || runtime.worker_queue.is_some()
+    })
+}
+
+fn log_has_startup_only_fields(log: &Option<LogConfigSection>) -> bool {
+    log.as_ref().is_some_and(|log| {
+        log.mode.is_some()
+            || log.level.is_some()
+            || log.timezone.is_some()
+            || log.timestamp_format.is_some()
+            || log.timestamp_pattern.is_some()
+    })
 }
 
 #[cfg(test)]
@@ -1145,12 +1208,44 @@ mod tests {
             tui: None,
         };
 
-        let warnings = runtime_reload_warnings(&doc);
+        let current = ReloadWarningState::from_doc(&doc);
+        let warnings = runtime_reload_warnings(None, &current);
         assert!(
             warnings
                 .iter()
                 .any(|w| w.contains("hot switching may cause unpredictable behavior"))
         );
+    }
+
+    #[test]
+    fn runtime_reload_warnings_skip_when_sensitive_fields_unchanged() {
+        let doc = AppConfigDoc {
+            rust: Some(AppRustSection {
+                runtime: Some(RuntimeConfigSection {
+                    worker_count: Some(8),
+                    ingress_queue: Some(1024),
+                    worker_queue: Some(256),
+                }),
+                log: Some(LogConfigSection {
+                    mode: Some("color".to_string()),
+                    level: Some("info".to_string()),
+                    timezone: Some("local".to_string()),
+                    timestamp_format: Some("custom".to_string()),
+                    timestamp_pattern: Some("%Y-%m-%d %H:%M:%S".to_string()),
+                }),
+                adapters: None,
+                tui: None,
+            }),
+            runtime: None,
+            log: None,
+            adapters: None,
+            connect: None,
+            tui: None,
+        };
+
+        let state = ReloadWarningState::from_doc(&doc);
+        let warnings = runtime_reload_warnings(Some(&state), &state);
+        assert!(warnings.is_empty());
     }
 
     #[test]
