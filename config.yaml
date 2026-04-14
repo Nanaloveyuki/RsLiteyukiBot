@@ -1,10 +1,3 @@
-config_dir: ./configs
-
-log_level: DEBUG
-
-host: 0.0.0.0
-port: 8090
-
 rust:
   runtime:
     worker_count: 4
@@ -22,3 +15,35 @@ rust:
       store_path: ./.liteyuki-tui-resumes.json
       max_sessions: 64
       max_size_mib: 16
+
+connect:
+  websocket:
+    enabled: true
+    # mode: forward | reverse | both
+    mode: reverse
+    host: 0.0.0.0
+    port: 8080
+    path: /ws
+    # url: ws://127.0.0.1:3000/ws
+    timeout_seconds: 30
+    # optional split config; when set, forward/reverse can be enabled together
+    # forward:
+    #   enabled: true
+    #   url: ws://127.0.0.1:3000/ws
+    # reverse:
+    #   enabled: true
+    #   host: 0.0.0.0
+    #   port: 8080
+    #   path: /ws
+  tcp-http:
+    enabled: true
+    host: 127.0.0.1
+    port: 8081
+    path: /
+    timeout_seconds: 30
+  sse:
+    enabled: true
+    host: 127.0.0.1
+    port: 8082
+    path: /sse
+    timeout_seconds: 30

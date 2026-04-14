@@ -30,6 +30,8 @@ struct AppConfigDoc {
     #[serde(default)]
     adapters: Option<Vec<AdapterConfig>>,
     #[serde(default)]
+    connect: Option<ConnectConfigSection>,
+    #[serde(default)]
     tui: Option<TuiConfigSection>,
 }
 
@@ -67,6 +69,126 @@ struct LogConfigSection {
     timestamp_format: Option<String>,
     #[serde(default)]
     timestamp_pattern: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct ConnectConfigSection {
+    #[serde(default)]
+    websocket: Option<WebSocketConnectSection>,
+    #[serde(default, rename = "tcp-http")]
+    tcp_http: Option<HttpConnectSection>,
+    #[serde(default)]
+    sse: Option<SseConnectSection>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct WebSocketConnectSection {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    headers: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    queue_capacity: Option<usize>,
+    #[serde(default)]
+    inbound_topic: Option<String>,
+    #[serde(default)]
+    outbound_topic: Option<String>,
+    #[serde(default)]
+    forward: Option<WebSocketEndpointSection>,
+    #[serde(default)]
+    reverse: Option<WebSocketEndpointSection>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct WebSocketEndpointSection {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    headers: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    queue_capacity: Option<usize>,
+    #[serde(default)]
+    inbound_topic: Option<String>,
+    #[serde(default)]
+    outbound_topic: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct HttpConnectSection {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    headers: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    queue_capacity: Option<usize>,
+    #[serde(default)]
+    inbound_topic: Option<String>,
+    #[serde(default)]
+    outbound_topic: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct SseConnectSection {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    headers: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    queue_capacity: Option<usize>,
+    #[serde(default)]
+    inbound_topic: Option<String>,
+    #[serde(default)]
+    outbound_topic: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -282,6 +404,31 @@ const DEFAULT_YAML_CONFIG_TEMPLATE: &str = r#"rust:
       store_path: ./.liteyuki-tui-resumes.json
       max_sessions: 64
       max_size_mib: 16
+
+connect:
+  websocket:
+    enabled: true
+    # mode: forward | reverse | both
+    mode: reverse
+    # reverse mode can use port (+ optional host/path)
+    host: 0.0.0.0
+    port: 8080
+    path: /ws
+    # forward mode can use url directly
+    # url: ws://127.0.0.1:3000/ws
+    timeout_seconds: 30
+  tcp-http:
+    enabled: true
+    host: 127.0.0.1
+    port: 8081
+    path: /
+    timeout_seconds: 30
+  sse:
+    enabled: true
+    host: 127.0.0.1
+    port: 8082
+    path: /sse
+    timeout_seconds: 30
 "#;
 
 const DEFAULT_TOML_CONFIG_TEMPLATE: &str = r#"[rust]
@@ -303,6 +450,28 @@ timestamp_pattern = "%Y-%m-%d %H:%M:%S"
 store_path = "./.liteyuki-tui-resumes.json"
 max_sessions = 64
 max_size_mib = 16
+
+[connect.websocket]
+enabled = true
+mode = "reverse" # forward | reverse | both
+host = "0.0.0.0"
+port = 8080
+path = "/ws"
+timeout_seconds = 30
+
+[connect.tcp-http]
+enabled = true
+host = "127.0.0.1"
+port = 8081
+path = "/"
+timeout_seconds = 30
+
+[connect.sse]
+enabled = true
+host = "127.0.0.1"
+port = 8082
+path = "/sse"
+timeout_seconds = 30
 "#;
 
 fn load_app_config_from_path(path: &Path) -> Result<AppConfigDoc, Box<dyn std::error::Error>> {
@@ -324,6 +493,10 @@ fn config_adapters(doc: &AppConfigDoc) -> Option<&Vec<AdapterConfig>> {
         .as_ref()
         .and_then(|section| section.adapters.as_ref())
         .or(doc.adapters.as_ref())
+}
+
+fn config_connect(doc: &AppConfigDoc) -> Option<&ConnectConfigSection> {
+    doc.connect.as_ref()
 }
 
 fn config_tui_resume(doc: &AppConfigDoc) -> Option<&TuiResumeSection> {
@@ -368,10 +541,9 @@ fn load_adapter_configs(
         return Ok(sanitize_adapter_configs(list, "LY_ADAPTERS_JSON"));
     }
 
-    Ok(sanitize_adapter_configs(
-        config_adapters(app_config).cloned().unwrap_or_default(),
-        "config",
-    ))
+    let mut combined = config_adapters(app_config).cloned().unwrap_or_default();
+    combined.extend(connect_to_adapter_configs(app_config));
+    Ok(sanitize_adapter_configs(combined, "config"))
 }
 
 fn resolve_tui_config(app_config: &AppConfigDoc) -> tui::TuiConfig {
@@ -410,6 +582,247 @@ fn resolve_tui_config(app_config: &AppConfigDoc) -> tui::TuiConfig {
     }
 
     config
+}
+
+fn connect_to_adapter_configs(doc: &AppConfigDoc) -> Vec<AdapterConfig> {
+    let Some(connect) = config_connect(doc) else {
+        return Vec::new();
+    };
+
+    let mut adapters = Vec::new();
+
+    if let Some(ws) = &connect.websocket {
+        let mut has_nested = false;
+        if let Some(forward) = &ws.forward {
+            has_nested = true;
+            if forward.enabled.unwrap_or(false)
+                && let Some(config) =
+                    websocket_endpoint_to_adapter("connect-ws-forward", true, forward, ws)
+            {
+                adapters.push(config);
+            }
+        }
+        if let Some(reverse) = &ws.reverse {
+            has_nested = true;
+            if reverse.enabled.unwrap_or(false)
+                && let Some(config) =
+                    websocket_endpoint_to_adapter("connect-ws-reverse", false, reverse, ws)
+            {
+                adapters.push(config);
+            }
+        }
+
+        if !has_nested && ws.enabled.unwrap_or(false) {
+            let mode = ws.mode.as_deref().unwrap_or_default().to_ascii_lowercase();
+            let resolved_mode = if mode.is_empty() {
+                if ws.port.is_some() && ws.url.is_none() {
+                    "reverse".to_string()
+                } else {
+                    "forward".to_string()
+                }
+            } else {
+                mode
+            };
+
+            if matches!(resolved_mode.as_str(), "forward" | "both" | "all")
+                && let Some(config) = websocket_root_to_adapter("connect-ws-forward", true, ws)
+            {
+                adapters.push(config);
+            }
+            if matches!(resolved_mode.as_str(), "reverse" | "both" | "all")
+                && let Some(config) = websocket_root_to_adapter("connect-ws-reverse", false, ws)
+            {
+                adapters.push(config);
+            }
+        }
+    }
+
+    if let Some(http) = &connect.tcp_http
+        && http.enabled.unwrap_or(false)
+    {
+        adapters.push(http_to_adapter("connect-http", http));
+    }
+
+    if let Some(sse) = &connect.sse
+        && sse.enabled.unwrap_or(false)
+    {
+        adapters.push(sse_to_adapter("connect-sse", sse));
+    }
+
+    adapters
+}
+
+fn websocket_endpoint_to_adapter(
+    id: &str,
+    is_forward: bool,
+    endpoint: &WebSocketEndpointSection,
+    fallback: &WebSocketConnectSection,
+) -> Option<AdapterConfig> {
+    use liteyukibot_core::{AdapterEndpoint, AdapterRoute, AdapterTransport};
+
+    let url = endpoint.url.clone().or_else(|| {
+        build_url(
+            "ws",
+            endpoint
+                .host
+                .as_deref()
+                .or(fallback.host.as_deref())
+                .unwrap_or(if is_forward { "127.0.0.1" } else { "0.0.0.0" }),
+            endpoint.port.or(fallback.port),
+            endpoint
+                .path
+                .as_deref()
+                .or(fallback.path.as_deref())
+                .unwrap_or(if is_forward { "/ws" } else { "/" }),
+        )
+    });
+
+    let Some(url) = url else {
+        return None;
+    };
+
+    Some(AdapterConfig {
+        id: id.to_string(),
+        enabled: true,
+        transport: if is_forward {
+            AdapterTransport::WebSocketForward
+        } else {
+            AdapterTransport::WebSocketReverse
+        },
+        endpoint: AdapterEndpoint {
+            url,
+            headers: endpoint
+                .headers
+                .clone()
+                .or_else(|| fallback.headers.clone())
+                .unwrap_or_default(),
+            token: endpoint.token.clone().or_else(|| fallback.token.clone()),
+            timeout_ms: seconds_to_timeout_ms(
+                endpoint.timeout_seconds.or(fallback.timeout_seconds),
+            ),
+        },
+        route: AdapterRoute {
+            inbound_topic: endpoint
+                .inbound_topic
+                .clone()
+                .or_else(|| fallback.inbound_topic.clone())
+                .unwrap_or_else(|| "adapter.inbound".to_string()),
+            outbound_topic: endpoint
+                .outbound_topic
+                .clone()
+                .or_else(|| fallback.outbound_topic.clone())
+                .unwrap_or_else(|| "adapter.outbound".to_string()),
+        },
+        queue_capacity: endpoint
+            .queue_capacity
+            .or(fallback.queue_capacity)
+            .unwrap_or(256),
+    })
+}
+
+fn websocket_root_to_adapter(
+    id: &str,
+    is_forward: bool,
+    ws: &WebSocketConnectSection,
+) -> Option<AdapterConfig> {
+    let endpoint = WebSocketEndpointSection {
+        enabled: Some(true),
+        url: ws.url.clone(),
+        host: ws.host.clone(),
+        port: ws.port,
+        path: ws.path.clone(),
+        headers: ws.headers.clone(),
+        token: ws.token.clone(),
+        timeout_seconds: ws.timeout_seconds,
+        queue_capacity: ws.queue_capacity,
+        inbound_topic: ws.inbound_topic.clone(),
+        outbound_topic: ws.outbound_topic.clone(),
+    };
+    websocket_endpoint_to_adapter(id, is_forward, &endpoint, ws)
+}
+
+fn http_to_adapter(id: &str, section: &HttpConnectSection) -> AdapterConfig {
+    use liteyukibot_core::{AdapterEndpoint, AdapterRoute, AdapterTransport};
+
+    AdapterConfig {
+        id: id.to_string(),
+        enabled: true,
+        transport: AdapterTransport::Http,
+        endpoint: AdapterEndpoint {
+            url: section.url.clone().unwrap_or_else(|| {
+                build_url(
+                    "http",
+                    section.host.as_deref().unwrap_or("127.0.0.1"),
+                    section.port,
+                    section.path.as_deref().unwrap_or("/"),
+                )
+                .unwrap_or_else(|| "http://127.0.0.1:8081/".to_string())
+            }),
+            headers: section.headers.clone().unwrap_or_default(),
+            token: section.token.clone(),
+            timeout_ms: seconds_to_timeout_ms(section.timeout_seconds),
+        },
+        route: AdapterRoute {
+            inbound_topic: section
+                .inbound_topic
+                .clone()
+                .unwrap_or_else(|| "adapter.inbound".to_string()),
+            outbound_topic: section
+                .outbound_topic
+                .clone()
+                .unwrap_or_else(|| "adapter.outbound".to_string()),
+        },
+        queue_capacity: section.queue_capacity.unwrap_or(256),
+    }
+}
+
+fn sse_to_adapter(id: &str, section: &SseConnectSection) -> AdapterConfig {
+    use liteyukibot_core::{AdapterEndpoint, AdapterRoute, AdapterTransport};
+
+    AdapterConfig {
+        id: id.to_string(),
+        enabled: true,
+        transport: AdapterTransport::Sse,
+        endpoint: AdapterEndpoint {
+            url: section.url.clone().unwrap_or_else(|| {
+                build_url(
+                    "http",
+                    section.host.as_deref().unwrap_or("127.0.0.1"),
+                    section.port,
+                    section.path.as_deref().unwrap_or("/sse"),
+                )
+                .unwrap_or_else(|| "http://127.0.0.1:8082/sse".to_string())
+            }),
+            headers: section.headers.clone().unwrap_or_default(),
+            token: section.token.clone(),
+            timeout_ms: seconds_to_timeout_ms(section.timeout_seconds),
+        },
+        route: AdapterRoute {
+            inbound_topic: section
+                .inbound_topic
+                .clone()
+                .unwrap_or_else(|| "adapter.inbound".to_string()),
+            outbound_topic: section
+                .outbound_topic
+                .clone()
+                .unwrap_or_else(|| "adapter.outbound".to_string()),
+        },
+        queue_capacity: section.queue_capacity.unwrap_or(256),
+    }
+}
+
+fn build_url(scheme: &str, host: &str, port: Option<u16>, path: &str) -> Option<String> {
+    let port = port?;
+    let normalized_path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    Some(format!("{scheme}://{host}:{port}{normalized_path}"))
+}
+
+fn seconds_to_timeout_ms(seconds: Option<u64>) -> u64 {
+    seconds.unwrap_or(5).saturating_mul(1000).max(10)
 }
 
 fn payload_preview(payload: &Value) -> String {
@@ -499,6 +912,37 @@ fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
         }
     }
 
+    if let Some(connect) = config_connect(doc) {
+        if let Some(ws) = &connect.websocket {
+            if ws.enabled.unwrap_or(false) {
+                let has_nested = ws.forward.is_some() || ws.reverse.is_some();
+                if !has_nested && ws.url.is_none() && ws.port.is_none() {
+                    warnings.push(
+                        "connect.websocket enabled but neither url nor port is set".to_string(),
+                    );
+                }
+            }
+            if let Some(forward) = &ws.forward
+                && forward.enabled.unwrap_or(false)
+                && forward.url.is_none()
+                && (forward.port.is_none() || forward.host.as_deref().is_none())
+            {
+                warnings.push(
+                    "connect.websocket.forward enabled but url is missing and host/port is incomplete"
+                        .to_string(),
+                );
+            }
+            if let Some(reverse) = &ws.reverse
+                && reverse.enabled.unwrap_or(false)
+                && reverse.url.is_none()
+                && reverse.port.is_none()
+            {
+                warnings
+                    .push("connect.websocket.reverse enabled but url/port is missing".to_string());
+            }
+        }
+    }
+
     warnings.extend(runtime_reload_warnings(doc));
 
     warnings
@@ -585,6 +1029,7 @@ mod tests {
             runtime: None,
             log: None,
             adapters: None,
+            connect: None,
             tui: None,
         };
 
@@ -612,6 +1057,7 @@ mod tests {
             runtime: None,
             log: None,
             adapters: None,
+            connect: None,
             tui: None,
         };
 
@@ -621,5 +1067,83 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("hot switching may cause unpredictable behavior"))
         );
+    }
+
+    #[test]
+    fn connect_websocket_both_mode_generates_forward_and_reverse_adapters() {
+        let doc = AppConfigDoc {
+            rust: None,
+            runtime: None,
+            log: None,
+            adapters: None,
+            connect: Some(ConnectConfigSection {
+                websocket: Some(WebSocketConnectSection {
+                    enabled: Some(true),
+                    mode: Some("both".to_string()),
+                    url: Some("ws://127.0.0.1:3000/ws".to_string()),
+                    host: Some("0.0.0.0".to_string()),
+                    port: Some(8080),
+                    path: Some("/ws".to_string()),
+                    headers: None,
+                    token: None,
+                    timeout_seconds: Some(30),
+                    queue_capacity: Some(256),
+                    inbound_topic: None,
+                    outbound_topic: None,
+                    forward: None,
+                    reverse: None,
+                }),
+                tcp_http: None,
+                sse: None,
+            }),
+            tui: None,
+        };
+
+        let adapters = load_adapter_configs(&doc).expect("connect adapters should parse");
+        assert!(
+            adapters
+                .iter()
+                .any(|adapter| adapter.id == "connect-ws-forward")
+        );
+        assert!(
+            adapters
+                .iter()
+                .any(|adapter| adapter.id == "connect-ws-reverse")
+        );
+    }
+
+    #[test]
+    fn connect_websocket_port_without_mode_defaults_to_reverse() {
+        let doc = AppConfigDoc {
+            rust: None,
+            runtime: None,
+            log: None,
+            adapters: None,
+            connect: Some(ConnectConfigSection {
+                websocket: Some(WebSocketConnectSection {
+                    enabled: Some(true),
+                    mode: None,
+                    url: None,
+                    host: Some("0.0.0.0".to_string()),
+                    port: Some(8090),
+                    path: Some("/ws".to_string()),
+                    headers: None,
+                    token: None,
+                    timeout_seconds: Some(30),
+                    queue_capacity: None,
+                    inbound_topic: None,
+                    outbound_topic: None,
+                    forward: None,
+                    reverse: None,
+                }),
+                tcp_http: None,
+                sse: None,
+            }),
+            tui: None,
+        };
+
+        let adapters = load_adapter_configs(&doc).expect("connect adapters should parse");
+        assert_eq!(adapters.len(), 1);
+        assert_eq!(adapters[0].id, "connect-ws-reverse");
     }
 }
