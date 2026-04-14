@@ -5,7 +5,7 @@ rust:
     worker_queue: 256
   log:
     mode: color
-    level: info
+    level: debug
     timezone: local
     timestamp_format: custom
     timestamp_pattern: "%Y-%m-%d %H:%M:%S"
@@ -53,3 +53,11 @@ connect:
     max_payload_size: 1048576
     max_connections: 100
     timeout_seconds: 30
+
+onebot-v11:
+  # 仅白名单会话可触发外部 /help。
+  # 可写纯ID（private常用 user_id；group常用 group_id）或带前缀:
+  # - "3541766758"
+  # - "private:3541766758"
+  # - "group:699493240"
+  whitelist: []

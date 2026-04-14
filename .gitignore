@@ -82,3 +82,10 @@ pdm.lock
 
 # rust
 .liteyuki-tui-resumes.json
+
+# config
+config.yaml
+config.toml
+
+# onebot v11 doc
+dev-docs/onebot-v11/

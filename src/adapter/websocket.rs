@@ -2,8 +2,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
+use serde_json::{Map, Value};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
@@ -267,30 +269,199 @@ fn parse_bind_addr(url: &str) -> Result<String, AdapterError> {
 }
 
 fn serialize_packet(packet: &AdapterPacket) -> Result<String, AdapterError> {
+    if let Some(payload) = onebot_v11_outbound_payload(packet) {
+        return serde_json::to_string(payload).map_err(|err| {
+            AdapterError::Serialize(format!("encode ws packet(onebot-v11) failed: {}", err))
+        });
+    }
     serde_json::to_string(packet)
         .map_err(|err| AdapterError::Serialize(format!("encode ws packet failed: {}", err)))
 }
 
 fn parse_packet(message: Message) -> Result<Option<AdapterPacket>, AdapterError> {
     match message {
-        Message::Text(text) => {
-            let packet = serde_json::from_str::<AdapterPacket>(&text).map_err(|err| {
-                AdapterError::Serialize(format!("decode ws packet failed: {}", err))
-            })?;
-            Ok(Some(packet))
-        }
+        Message::Text(text) => parse_packet_text(&text),
         Message::Binary(binary) => {
-            let text = String::from_utf8(binary).map_err(|err| {
+            let text = String::from_utf8(binary.to_vec()).map_err(|err| {
                 AdapterError::Serialize(format!("binary ws payload is not utf8: {}", err))
             })?;
-            let packet = serde_json::from_str::<AdapterPacket>(&text).map_err(|err| {
-                AdapterError::Serialize(format!("decode ws packet failed: {}", err))
-            })?;
-            Ok(Some(packet))
+            parse_packet_text(&text)
         }
         Message::Ping(_) | Message::Pong(_) => Ok(None),
         Message::Close(_) => Ok(None),
         Message::Frame(_) => Ok(None),
+    }
+}
+
+fn parse_packet_text(text: &str) -> Result<Option<AdapterPacket>, AdapterError> {
+    let value = serde_json::from_str::<Value>(text)
+        .map_err(|err| AdapterError::Serialize(format!("decode ws json failed: {}", err)))?;
+
+    if let Ok(packet) = serde_json::from_value::<AdapterPacket>(value.clone()) {
+        return Ok(Some(packet));
+    }
+
+    Ok(decode_onebot_v11_packet(value))
+}
+
+fn decode_onebot_v11_packet(value: Value) -> Option<AdapterPacket> {
+    let Value::Object(mut object) = value else {
+        return None;
+    };
+
+    if !looks_like_onebot_v11_payload(&object) {
+        return None;
+    }
+
+    let timestamp_ms = extract_onebot_timestamp_ms(&object);
+    let id = object
+        .get("message_id")
+        .and_then(value_to_u64)
+        .or_else(|| object.get("echo").and_then(value_to_u64))
+        .or_else(|| object.get("time").and_then(value_to_u64))
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| timestamp_ms.to_string());
+
+    object
+        .entry("_adapter_protocol".to_string())
+        .or_insert_with(|| Value::String("onebot.v11".to_string()));
+
+    Some(AdapterPacket {
+        id,
+        topic: onebot_v11_topic(&object),
+        payload: Value::Object(object),
+        timestamp_ms,
+        meta: Default::default(),
+    })
+}
+
+fn looks_like_onebot_v11_payload(object: &Map<String, Value>) -> bool {
+    object.contains_key("post_type")
+        || (object.contains_key("status") && object.contains_key("retcode"))
+}
+
+fn onebot_v11_topic(object: &Map<String, Value>) -> String {
+    if let Some(post_type) = object.get("post_type").and_then(Value::as_str) {
+        match post_type {
+            "message" => {
+                let message_type = object
+                    .get("message_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                format!("onebot.v11.event.message.{}", message_type)
+            }
+            "notice" => {
+                let notice_type = object
+                    .get("notice_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                format!("onebot.v11.event.notice.{}", notice_type)
+            }
+            "request" => {
+                let request_type = object
+                    .get("request_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                format!("onebot.v11.event.request.{}", request_type)
+            }
+            "meta_event" => {
+                let meta_type = object
+                    .get("meta_event_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                format!("onebot.v11.event.meta_event.{}", meta_type)
+            }
+            _ => format!("onebot.v11.event.{}", post_type),
+        }
+    } else if object.contains_key("status") && object.contains_key("retcode") {
+        "onebot.v11.api.response".to_string()
+    } else {
+        "onebot.v11.event".to_string()
+    }
+}
+
+fn extract_onebot_timestamp_ms(object: &Map<String, Value>) -> u128 {
+    object
+        .get("time")
+        .and_then(value_to_u64)
+        .map(|seconds| u128::from(seconds).saturating_mul(1000))
+        .unwrap_or_else(now_millis)
+}
+
+fn value_to_u64(value: &Value) -> Option<u64> {
+    if let Some(raw) = value.as_u64() {
+        return Some(raw);
+    }
+    if let Some(raw) = value.as_i64() {
+        return u64::try_from(raw).ok();
+    }
+    if let Some(raw) = value.as_str() {
+        return raw.parse::<u64>().ok();
+    }
+    None
+}
+
+fn onebot_v11_outbound_payload(packet: &AdapterPacket) -> Option<&Value> {
+    let object = packet.payload.as_object()?;
+    if object.get("action").and_then(Value::as_str).is_some() {
+        return Some(&packet.payload);
+    }
+    None
+}
+
+fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_packet_accepts_onebot_v11_event_json() {
+        let message = Message::Text(
+            r#"{"time":1710000000,"self_id":1234,"post_type":"message","message_type":"group","group_id":9876,"user_id":1001,"raw_message":"hello"}"#.to_string(),
+        );
+
+        let packet = parse_packet(message)
+            .expect("packet should parse")
+            .expect("message should decode");
+
+        assert_eq!(packet.topic, "onebot.v11.event.message.group");
+        assert_eq!(
+            packet
+                .payload
+                .get("_adapter_protocol")
+                .and_then(Value::as_str),
+            Some("onebot.v11")
+        );
+        assert_eq!(packet.payload.get("raw_message"), Some(&json!("hello")));
+    }
+
+    #[test]
+    fn serialize_packet_prefers_onebot_action_payload() {
+        let packet = AdapterPacket::new(
+            "1",
+            "adapter.outbound",
+            json!({
+                "action": "send_group_msg",
+                "params": { "group_id": 10000, "message": "hello" },
+                "echo": "abc-1"
+            }),
+        );
+
+        let encoded = serialize_packet(&packet).expect("encode should succeed");
+        let parsed: Value = serde_json::from_str(&encoded).expect("encoded json should parse");
+
+        assert_eq!(
+            parsed.get("action").and_then(Value::as_str),
+            Some("send_group_msg")
+        );
+        assert!(parsed.get("topic").is_none());
     }
 }
 

@@ -216,6 +216,11 @@ impl AdapterManager {
 
         let running = match config.transport {
             AdapterTransport::WebSocketForward => {
+                let sink = with_inbound_topic(
+                    sink.clone(),
+                    config.route.inbound_topic.clone(),
+                    config.id.clone(),
+                );
                 let handle = start_forward_adapter(
                     config.endpoint.clone(),
                     config.queue_capacity,
@@ -226,6 +231,11 @@ impl AdapterManager {
                 RunningAdapter::WebSocket(handle)
             }
             AdapterTransport::WebSocketReverse => {
+                let sink = with_inbound_topic(
+                    sink.clone(),
+                    config.route.inbound_topic.clone(),
+                    config.id.clone(),
+                );
                 let handle = start_reverse_adapter(
                     config.endpoint.clone(),
                     config.queue_capacity,
@@ -237,6 +247,11 @@ impl AdapterManager {
                 RunningAdapter::WebSocket(handle)
             }
             AdapterTransport::Sse => {
+                let sink = with_inbound_topic(
+                    sink.clone(),
+                    config.route.inbound_topic.clone(),
+                    config.id.clone(),
+                );
                 let mut rx = self
                     .sse_client
                     .open_stream(
@@ -418,4 +433,63 @@ where
     Fut: Future<Output = ()> + Send + 'static,
 {
     Arc::new(move |packet| Box::pin(handler(packet)))
+}
+
+fn with_inbound_topic(
+    sink: ManagedAdapterSink,
+    inbound_topic: String,
+    adapter_id: String,
+) -> ManagedAdapterSink {
+    Arc::new(move |packet| {
+        let sink = sink.clone();
+        let inbound_topic = inbound_topic.clone();
+        let adapter_id = adapter_id.clone();
+        Box::pin(async move {
+            let packet = normalize_inbound_packet(packet, &inbound_topic, &adapter_id);
+            sink(packet).await;
+        })
+    })
+}
+
+fn normalize_inbound_packet(
+    mut packet: AdapterPacket,
+    inbound_topic: &str,
+    adapter_id: &str,
+) -> AdapterPacket {
+    match packet.payload {
+        Value::Object(mut object) => {
+            object
+                .entry("_adapter_id".to_string())
+                .or_insert_with(|| Value::String(adapter_id.to_string()));
+
+            if should_override_inbound_topic(&packet.topic) && packet.topic != inbound_topic {
+                let original_topic = packet.topic.clone();
+                packet.topic = inbound_topic.to_string();
+                object
+                    .entry("_adapter_topic".to_string())
+                    .or_insert_with(|| Value::String(original_topic));
+            }
+            object
+                .entry("_adapter_ingress".to_string())
+                .or_insert_with(|| Value::String(inbound_topic.to_string()));
+            packet.payload = Value::Object(object);
+        }
+        other => {
+            packet.payload = json!({
+                "_adapter_id": adapter_id,
+                "_adapter_topic": packet.topic.clone(),
+                "_adapter_ingress": inbound_topic,
+                "data": other
+            });
+            if should_override_inbound_topic(&packet.topic) && packet.topic != inbound_topic {
+                packet.topic = inbound_topic.to_string();
+            }
+        }
+    }
+
+    packet
+}
+
+fn should_override_inbound_topic(topic: &str) -> bool {
+    topic.starts_with("onebot.v11.")
 }

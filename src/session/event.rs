@@ -47,39 +47,36 @@ impl SessionEvent {
         let payload = event.payload.clone();
         let bot_id = payload
             .get("bot_id")
-            .and_then(Value::as_str)
-            .unwrap_or("default")
-            .to_string();
+            .or_else(|| payload.get("self_id"))
+            .and_then(value_to_string)
+            .unwrap_or_else(|| "default".to_string());
         let user_id = payload
             .get("user_id")
-            .and_then(Value::as_str)
-            .unwrap_or("anonymous")
-            .to_string();
+            .and_then(value_to_string)
+            .unwrap_or_else(|| "anonymous".to_string());
         let topic = Arc::<str>::from(event.topic.clone());
 
         let scope = payload
             .get("scope")
             .and_then(Value::as_str)
             .map(SessionScope::parse)
+            .or_else(|| {
+                payload
+                    .get("message_type")
+                    .and_then(Value::as_str)
+                    .map(SessionScope::parse)
+            })
             .unwrap_or_else(|| infer_scope(topic.as_ref()));
 
         let session_id = payload
             .get("session_id")
-            .and_then(Value::as_str)
-            .map(ToString::to_string)
+            .and_then(value_to_string)
+            .or_else(|| payload.get("group_id").and_then(value_to_string))
+            .or_else(|| payload.get("guild_id").and_then(value_to_string))
+            .or_else(|| payload.get("channel_id").and_then(value_to_string))
             .unwrap_or_else(|| format!("{}:{}", topic, user_id));
 
-        let message = payload
-            .get("text")
-            .and_then(Value::as_str)
-            .map(ToString::to_string)
-            .or_else(|| {
-                payload
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string)
-            })
-            .unwrap_or_default();
+        let message = extract_message_text(&payload).unwrap_or_default();
 
         Self {
             event_id: event.id,
@@ -93,6 +90,71 @@ impl SessionEvent {
             scope,
         }
     }
+}
+
+fn extract_message_text(payload: &Value) -> Option<String> {
+    payload
+        .get("text")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| {
+            payload
+                .get("raw_message")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .or_else(|| {
+            payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .or_else(|| {
+            payload
+                .get("message")
+                .and_then(Value::as_array)
+                .and_then(|segments| join_message_segments(segments.as_slice()))
+        })
+}
+
+fn join_message_segments(segments: &[Value]) -> Option<String> {
+    let mut out = String::new();
+    for segment in segments {
+        if let Some(text) = segment
+            .get("data")
+            .and_then(Value::as_object)
+            .and_then(|data| data.get("text"))
+            .and_then(Value::as_str)
+        {
+            out.push_str(text);
+            continue;
+        }
+        if let Some(text) = segment.get("text").and_then(Value::as_str) {
+            out.push_str(text);
+            continue;
+        }
+        if let Some(text) = segment.as_str() {
+            out.push_str(text);
+        }
+    }
+
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn value_to_string(value: &Value) -> Option<String> {
+    if let Some(raw) = value.as_str() {
+        return Some(raw.to_string());
+    }
+    if let Some(raw) = value.as_u64() {
+        return Some(raw.to_string());
+    }
+    if let Some(raw) = value.as_i64() {
+        return Some(raw.to_string());
+    }
+    if let Some(raw) = value.as_bool() {
+        return Some(raw.to_string());
+    }
+    None
 }
 
 fn infer_scope(topic: &str) -> SessionScope {
@@ -116,4 +178,54 @@ fn infer_scope(topic: &str) -> SessionScope {
         return SessionScope::ChannelText;
     }
     SessionScope::Other(Arc::<str>::from("unknown"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::BotEvent;
+    use serde_json::json;
+
+    #[test]
+    fn from_bot_event_extracts_onebot_v11_fields() {
+        let event = BotEvent::new(
+            1,
+            "adapter.inbound",
+            json!({
+                "self_id": 42,
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 123456,
+                "user_id": 10001,
+                "raw_message": "你好"
+            }),
+        );
+
+        let session = SessionEvent::from_bot_event(&event);
+        assert_eq!(session.bot_id.as_ref(), "42");
+        assert_eq!(session.user_id.as_ref(), "10001");
+        assert_eq!(session.session_id.as_ref(), "123456");
+        assert_eq!(session.message.as_ref(), "你好");
+        assert_eq!(session.scope, SessionScope::Group);
+    }
+
+    #[test]
+    fn from_bot_event_joins_message_segments() {
+        let event = BotEvent::new(
+            2,
+            "adapter.inbound",
+            json!({
+                "message_type": "private",
+                "user_id": "u100",
+                "message": [
+                    { "type": "text", "data": { "text": "hello" } },
+                    { "type": "text", "data": { "text": " world" } }
+                ]
+            }),
+        );
+
+        let session = SessionEvent::from_bot_event(&event);
+        assert_eq!(session.message.as_ref(), "hello world");
+        assert_eq!(session.scope, SessionScope::Private);
+    }
 }

@@ -82,9 +82,27 @@ impl HttpTransportClient {
         packet: &AdapterPacket,
         max_payload_size: Option<usize>,
     ) -> Result<Value, AdapterError> {
+        if let Some(onebot_body) = onebot_v11_outbound_payload(packet) {
+            return self
+                .request_json(
+                    HttpMethod::POST,
+                    endpoint,
+                    Some(&onebot_body),
+                    max_payload_size,
+                )
+                .await;
+        }
         self.request_json(HttpMethod::POST, endpoint, Some(packet), max_payload_size)
             .await
     }
+}
+
+fn onebot_v11_outbound_payload(packet: &AdapterPacket) -> Option<Value> {
+    let object = packet.payload.as_object()?;
+    if object.get("action").and_then(Value::as_str).is_some() {
+        return Some(packet.payload.clone());
+    }
+    None
 }
 
 fn enforce_payload_limit(

@@ -1,250 +1,199 @@
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant};
 
-use liteyukibot_core::{AdapterConfig, LiteyukiBot, LogLevel, RuntimeSettings, RuntimeTarget};
-use serde::Deserialize;
+use liteyukibot_core::adapter::AdapterManager;
+use liteyukibot_core::session::SessionEvent;
+use liteyukibot_core::{
+    AdapterPacket, LiteyukiBot, LogLevel, Rule, RuntimeSettings, RuntimeTarget,
+};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+mod app_config;
+mod config_edit;
+mod onebot_support;
 mod tui;
+
+use app_config::*;
+use onebot_support::*;
 
 const APP_TITLE: &str = "RsLiteyukiBot";
 const DEFAULT_RUNTIME_TARGET: RuntimeTarget = RuntimeTarget::Cli;
-const APP_CONFIG_PATHS: [&str; 6] = [
-    "config.yaml",
-    "rust-config.yaml",
-    "rust-config.yml",
-    "rust-config.toml",
-    "config/rust-core.yaml",
-    "config/rust-core.toml",
-];
+const EXTERNAL_API_TIMEOUT: Duration = Duration::from_secs(12);
 
-static LAST_RELOAD_WARNING_STATE: LazyLock<Mutex<Option<ReloadWarningState>>> =
-    LazyLock::new(|| Mutex::new(None));
-
-#[derive(Debug, Deserialize, Default)]
-struct AppConfigDoc {
-    #[serde(default)]
-    rust: Option<AppRustSection>,
-    #[serde(default)]
-    runtime: Option<RuntimeConfigSection>,
-    #[serde(default)]
-    log: Option<LogConfigSection>,
-    #[serde(default)]
-    adapters: Option<Vec<AdapterConfig>>,
-    #[serde(default)]
-    connect: Option<ConnectConfigSection>,
-    #[serde(default)]
-    tui: Option<TuiConfigSection>,
+#[derive(Debug, Clone, Default)]
+struct ExternalGatewaySnapshot {
+    command_hits: u64,
+    api_requests: u64,
+    api_success: u64,
+    api_failed: u64,
+    api_timeouts: u64,
+    api_inflight: usize,
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct AppRustSection {
-    #[serde(default)]
-    runtime: Option<RuntimeConfigSection>,
-    #[serde(default)]
-    log: Option<LogConfigSection>,
-    #[serde(default)]
-    adapters: Option<Vec<AdapterConfig>>,
-    #[serde(default)]
-    tui: Option<TuiConfigSection>,
+#[derive(Debug)]
+struct PendingApiCall {
+    started_at: Instant,
 }
 
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
-struct RuntimeConfigSection {
-    #[serde(default)]
-    worker_count: Option<usize>,
-    #[serde(default)]
-    ingress_queue: Option<usize>,
-    #[serde(default)]
-    worker_queue: Option<usize>,
+#[derive(Debug, Default)]
+struct ExternalGatewayState {
+    command_hits: u64,
+    api_requests: u64,
+    api_success: u64,
+    api_failed: u64,
+    api_timeouts: u64,
+    pending: HashMap<String, PendingApiCall>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
-struct LogConfigSection {
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default)]
-    level: Option<String>,
-    #[serde(default)]
-    timezone: Option<String>,
-    #[serde(default)]
-    timestamp_format: Option<String>,
-    #[serde(default)]
-    timestamp_pattern: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct ConnectConfigSection {
-    #[serde(default)]
-    websocket: Option<WebSocketConnectSection>,
-    #[serde(default, rename = "tcp-http")]
-    tcp_http: Option<HttpConnectSection>,
-    #[serde(default)]
-    sse: Option<SseConnectSection>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct WebSocketConnectSection {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default)]
-    url: Option<String>,
-    #[serde(default)]
-    host: Option<String>,
-    #[serde(default)]
-    port: Option<u16>,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    headers: Option<std::collections::HashMap<String, String>>,
-    #[serde(default)]
-    token: Option<String>,
-    #[serde(default)]
-    timeout_seconds: Option<u64>,
-    #[serde(default)]
-    queue_capacity: Option<usize>,
-    #[serde(default)]
-    max_payload_size: Option<usize>,
-    #[serde(default)]
-    max_connections: Option<usize>,
-    #[serde(default)]
-    inbound_topic: Option<String>,
-    #[serde(default)]
-    outbound_topic: Option<String>,
-    #[serde(default)]
-    forward: Option<WebSocketEndpointSection>,
-    #[serde(default)]
-    reverse: Option<WebSocketEndpointSection>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct WebSocketEndpointSection {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default)]
-    url: Option<String>,
-    #[serde(default)]
-    host: Option<String>,
-    #[serde(default)]
-    port: Option<u16>,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    headers: Option<std::collections::HashMap<String, String>>,
-    #[serde(default)]
-    token: Option<String>,
-    #[serde(default)]
-    timeout_seconds: Option<u64>,
-    #[serde(default)]
-    queue_capacity: Option<usize>,
-    #[serde(default)]
-    max_payload_size: Option<usize>,
-    #[serde(default)]
-    max_connections: Option<usize>,
-    #[serde(default)]
-    inbound_topic: Option<String>,
-    #[serde(default)]
-    outbound_topic: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct HttpConnectSection {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default)]
-    url: Option<String>,
-    #[serde(default)]
-    host: Option<String>,
-    #[serde(default)]
-    port: Option<u16>,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    headers: Option<std::collections::HashMap<String, String>>,
-    #[serde(default)]
-    token: Option<String>,
-    #[serde(default)]
-    timeout_seconds: Option<u64>,
-    #[serde(default)]
-    queue_capacity: Option<usize>,
-    #[serde(default)]
-    max_payload_size: Option<usize>,
-    #[serde(default)]
-    max_connections: Option<usize>,
-    #[serde(default)]
-    inbound_topic: Option<String>,
-    #[serde(default)]
-    outbound_topic: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct SseConnectSection {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default)]
-    url: Option<String>,
-    #[serde(default)]
-    host: Option<String>,
-    #[serde(default)]
-    port: Option<u16>,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    headers: Option<std::collections::HashMap<String, String>>,
-    #[serde(default)]
-    token: Option<String>,
-    #[serde(default)]
-    timeout_seconds: Option<u64>,
-    #[serde(default)]
-    queue_capacity: Option<usize>,
-    #[serde(default)]
-    max_payload_size: Option<usize>,
-    #[serde(default)]
-    max_connections: Option<usize>,
-    #[serde(default)]
-    inbound_topic: Option<String>,
-    #[serde(default)]
-    outbound_topic: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct TuiConfigSection {
-    #[serde(default)]
-    resume: Option<TuiResumeSection>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct TuiResumeSection {
-    #[serde(default)]
-    store_path: Option<String>,
-    #[serde(default)]
-    max_sessions: Option<usize>,
-    #[serde(default)]
-    max_size_mib: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AdapterConfigDoc {
-    adapters: Vec<AdapterConfig>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct ReloadWarningState {
-    runtime: Option<RuntimeConfigSection>,
-    log: Option<LogConfigSection>,
-}
-
-impl ReloadWarningState {
-    fn from_doc(doc: &AppConfigDoc) -> Self {
-        Self {
-            runtime: config_runtime(doc).cloned(),
-            log: config_log(doc).cloned(),
+impl ExternalGatewayState {
+    fn snapshot(&self) -> ExternalGatewaySnapshot {
+        ExternalGatewaySnapshot {
+            command_hits: self.command_hits,
+            api_requests: self.api_requests,
+            api_success: self.api_success,
+            api_failed: self.api_failed,
+            api_timeouts: self.api_timeouts,
+            api_inflight: self.pending.len(),
         }
     }
+}
+
+#[derive(Clone, Default)]
+struct ExternalGateway {
+    state: Arc<Mutex<ExternalGatewayState>>,
+    echo_seq: Arc<AtomicU64>,
+}
+
+impl ExternalGateway {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn snapshot(&self) -> ExternalGatewaySnapshot {
+        self.state
+            .lock()
+            .expect("external gateway lock should not be poisoned")
+            .snapshot()
+    }
+
+    fn next_echo(&self, prefix: &str) -> String {
+        let seq = self.echo_seq.fetch_add(1, Ordering::SeqCst);
+        format!("{prefix}-{seq}")
+    }
+
+    fn record_command_hit(&self) -> ExternalGatewaySnapshot {
+        let mut state = self
+            .state
+            .lock()
+            .expect("external gateway lock should not be poisoned");
+        state.command_hits = state.command_hits.saturating_add(1);
+        state.snapshot()
+    }
+
+    fn track_request(&self, echo: String) -> ExternalGatewaySnapshot {
+        let mut state = self
+            .state
+            .lock()
+            .expect("external gateway lock should not be poisoned");
+        state.api_requests = state.api_requests.saturating_add(1);
+        state.pending.insert(
+            echo,
+            PendingApiCall {
+                started_at: Instant::now(),
+            },
+        );
+        state.snapshot()
+    }
+
+    fn mark_send_failed(&self, echo: &str) -> ExternalGatewaySnapshot {
+        let mut state = self
+            .state
+            .lock()
+            .expect("external gateway lock should not be poisoned");
+        if state.pending.remove(echo).is_some() {
+            state.api_failed = state.api_failed.saturating_add(1);
+        }
+        state.snapshot()
+    }
+
+    fn observe_payload(&self, payload: &Value, timeout: Duration) -> ExternalGatewaySnapshot {
+        let mut state = self
+            .state
+            .lock()
+            .expect("external gateway lock should not be poisoned");
+        sweep_pending_timeouts(&mut state, timeout);
+
+        if let Some((echo, success)) = parse_onebot_v11_api_response(payload)
+            && state.pending.remove(&echo).is_some()
+        {
+            if success {
+                state.api_success = state.api_success.saturating_add(1);
+            } else {
+                state.api_failed = state.api_failed.saturating_add(1);
+            }
+        }
+
+        state.snapshot()
+    }
+
+    fn sweep_timeouts(&self, timeout: Duration) -> ExternalGatewaySnapshot {
+        let mut state = self
+            .state
+            .lock()
+            .expect("external gateway lock should not be poisoned");
+        sweep_pending_timeouts(&mut state, timeout);
+        state.snapshot()
+    }
+}
+
+fn sweep_pending_timeouts(state: &mut ExternalGatewayState, timeout: Duration) {
+    let expired: Vec<String> = state
+        .pending
+        .iter()
+        .filter_map(|(echo, call)| {
+            if call.started_at.elapsed() >= timeout {
+                Some(echo.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if expired.is_empty() {
+        return;
+    }
+
+    for echo in expired {
+        if state.pending.remove(&echo).is_some() {
+            state.api_timeouts = state.api_timeouts.saturating_add(1);
+        }
+    }
+}
+
+fn parse_onebot_v11_api_response(payload: &Value) -> Option<(String, bool)> {
+    let object = payload.as_object()?;
+    if !object.contains_key("status") && !object.contains_key("retcode") {
+        return None;
+    }
+
+    let echo = object.get("echo").and_then(value_to_string)?;
+    let success = object
+        .get("status")
+        .and_then(Value::as_str)
+        .map(|status| status.eq_ignore_ascii_case("ok"))
+        .or_else(|| {
+            object
+                .get("retcode")
+                .and_then(Value::as_i64)
+                .map(|code| code == 0)
+        })
+        .unwrap_or(false);
+    Some((echo, success))
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -270,10 +219,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target = resolve_runtime_target();
     let adapter_configs = load_adapter_configs(&app_config).unwrap_or_default();
     let adapter_autostart = !adapter_configs.is_empty();
+    let help_whitelist = Arc::new(RwLock::new(resolve_help_whitelist(&app_config)));
     let tui_config = resolve_tui_config(&app_config);
+    let external_gateway = ExternalGateway::new();
 
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<tui::UiEvent>();
     let ui_tx_for_handler = ui_tx.clone();
+    let whitelist_size = help_whitelist
+        .read()
+        .map(|set| set.len())
+        .unwrap_or_default();
+    if whitelist_size > 0 {
+        let _ = ui_tx.send(tui::UiEvent::Log {
+            level: tui::UiLevel::Info,
+            message: format!(
+                "external /help whitelist enabled (sessions={})",
+                whitelist_size
+            ),
+        });
+    }
+    let external_gateway_for_handler = external_gateway.clone();
 
     let mut bot = LiteyukiBot::builder(APP_TITLE, env!("CARGO_PKG_VERSION"))
         .with_target(target)
@@ -282,7 +247,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_adapter_autostart(adapter_autostart)
         .with_event_handler(move |event, _logger| {
             let ui_tx_for_handler = ui_tx_for_handler.clone();
+            let external_gateway_for_handler = external_gateway_for_handler.clone();
             async move {
+                let snapshot = external_gateway_for_handler
+                    .observe_payload(&event.payload, EXTERNAL_API_TIMEOUT);
+                emit_external_stats(&ui_tx_for_handler, &snapshot);
+                if should_hide_event_from_tui(&event) {
+                    return;
+                }
                 let _ = ui_tx_for_handler.send(tui::UiEvent::RuntimeHandled {
                     id: event.id,
                     topic: event.topic.clone(),
@@ -291,6 +263,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .build();
+
+    emit_external_stats(&ui_tx, &external_gateway.snapshot());
+    let external_gateway_for_tick = external_gateway.clone();
+    let ui_tx_for_tick = ui_tx.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            ticker.tick().await;
+            let snapshot = external_gateway_for_tick.sweep_timeouts(EXTERNAL_API_TIMEOUT);
+            emit_external_stats(&ui_tx_for_tick, &snapshot);
+        }
+    });
 
     let tx_before = ui_tx.clone();
     bot.on_before_start_sync("tui-before-start", Default::default(), move |_context| {
@@ -323,6 +307,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
+    install_external_event_handlers(
+        &bot,
+        external_gateway.clone(),
+        ui_tx.clone(),
+        help_whitelist.clone(),
+    );
+
     bot.start().await?;
 
     let tui_result = tui::run(
@@ -334,6 +325,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             adapter_autostart,
             tui_config,
             reload_handler: reload_from_config,
+            whitelist_persist_handler: persist_help_whitelist,
+            help_whitelist: help_whitelist.clone(),
         },
         &mut ui_rx,
     )
@@ -356,551 +349,90 @@ fn resolve_runtime_target() -> RuntimeTarget {
         .unwrap_or(DEFAULT_RUNTIME_TARGET)
 }
 
-fn load_app_config() -> AppConfigDoc {
-    load_app_config_with_warnings(true).0
+fn emit_external_stats(
+    ui_tx: &mpsc::UnboundedSender<tui::UiEvent>,
+    snapshot: &ExternalGatewaySnapshot,
+) {
+    let _ = ui_tx.send(tui::UiEvent::ExternalStats {
+        command_hits: snapshot.command_hits,
+        api_requests: snapshot.api_requests,
+        api_success: snapshot.api_success,
+        api_failed: snapshot.api_failed,
+        api_timeouts: snapshot.api_timeouts,
+        api_inflight: snapshot.api_inflight as u64,
+    });
 }
 
-fn load_app_config_with_warnings(emit_stderr: bool) -> (AppConfigDoc, Vec<String>) {
-    let Some(path) = resolve_app_config_path() else {
-        return (AppConfigDoc::default(), Vec::new());
-    };
+fn install_external_event_handlers(
+    bot: &LiteyukiBot,
+    gateway: ExternalGateway,
+    ui_tx: mpsc::UnboundedSender<tui::UiEvent>,
+    help_whitelist: Arc<RwLock<HashSet<String>>>,
+) {
+    let adapter_manager = bot.adapter_manager().clone();
 
-    match load_app_config_from_path(&path) {
-        Ok(doc) => {
-            let warnings = validate_app_config(&doc);
-            if emit_stderr {
-                for warning in &warnings {
-                    eprintln!("config warning ({}): {warning}", path.display());
+    bot.on_message(
+        "builtin.external.help",
+        Rule::new("command.help", |event| async move {
+            is_help_command(event.message.as_ref())
+        }),
+        500,
+        true,
+        move |event| {
+            let adapter_manager = adapter_manager.clone();
+            let gateway = gateway.clone();
+            let ui_tx = ui_tx.clone();
+            let help_whitelist = help_whitelist.clone();
+            async move {
+                let allowed = help_whitelist
+                    .read()
+                    .map(|set| is_help_session_allowed(event.as_ref(), &set))
+                    .unwrap_or(false);
+                if !allowed {
+                    return Ok(());
                 }
+                reply_help_command(&adapter_manager, &gateway, &ui_tx, event).await
             }
-            (doc, warnings)
-        }
-        Err(err) => {
-            let message = format!("failed to load app config from {}: {err}", path.display());
-            if emit_stderr {
-                eprintln!("{message}");
-            }
-            (AppConfigDoc::default(), vec![message])
-        }
-    }
+        },
+    );
 }
 
-fn resolve_app_config_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("LY_CONFIG_PATH") {
-        return Some(PathBuf::from(path));
-    }
-
-    APP_CONFIG_PATHS
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| path.exists())
-}
-
-fn ensure_default_config_files() -> Result<(), Box<dyn std::error::Error>> {
-    write_default_config_if_missing(Path::new("config.yaml"))?;
-
-    if let Ok(path) = std::env::var("LY_CONFIG_PATH") {
-        let path = PathBuf::from(path);
-        write_default_config_if_missing(path.as_path())?;
-    }
-
-    Ok(())
-}
-
-fn write_default_config_if_missing(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if path.exists() {
+async fn reply_help_command(
+    adapter_manager: &AdapterManager,
+    gateway: &ExternalGateway,
+    ui_tx: &mpsc::UnboundedSender<tui::UiEvent>,
+    event: Arc<SessionEvent>,
+) -> Result<(), String> {
+    if !is_onebot_v11_payload(&event.payload) {
         return Ok(());
     }
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
+    emit_external_stats(ui_tx, &gateway.record_command_hit());
+
+    let adapter_id = event
+        .payload
+        .get("_adapter_id")
+        .and_then(value_to_string)
+        .ok_or_else(|| "missing adapter id in inbound payload".to_string())?;
+
+    let echo = gateway.next_echo("liteyuki-help");
+    let payload = build_onebot_v11_help_reply_payload(event.as_ref(), &echo)
+        .ok_or_else(|| "failed to build onebot v11 help response".to_string())?;
+    emit_external_stats(ui_tx, &gateway.track_request(echo.clone()));
+
+    let packet = AdapterPacket::new(
+        format!("help-{}", event.event_id),
+        "onebot.v11.api.send_msg",
+        payload,
+    );
+
+    let send_result = adapter_manager.send(&adapter_id, packet).await;
+
+    if let Err(err) = send_result {
+        emit_external_stats(ui_tx, &gateway.mark_send_failed(&echo));
+        return Err(format!("send help reply failed: {err}"));
     }
 
-    let template = default_config_template(path);
-    std::fs::write(path, template)?;
-    eprintln!("created default config file: {}", path.display());
     Ok(())
-}
-
-fn default_config_template(path: &Path) -> String {
-    let ext = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase());
-
-    match ext.as_deref() {
-        Some("toml") => DEFAULT_TOML_CONFIG_TEMPLATE.to_string(),
-        _ => DEFAULT_YAML_CONFIG_TEMPLATE.to_string(),
-    }
-}
-
-const DEFAULT_YAML_CONFIG_TEMPLATE: &str = r#"rust:
-  runtime:
-    worker_count: 4
-    ingress_queue: 1024
-    worker_queue: 256
-  log:
-    mode: color
-    level: info
-    timezone: local
-    timestamp_format: custom
-    timestamp_pattern: "%Y-%m-%d %H:%M:%S"
-  adapters: []
-  tui:
-    resume:
-      store_path: ./.liteyuki-tui-resumes.json
-      max_sessions: 64
-      max_size_mib: 16
-
-connect:
-  websocket:
-    enabled: true
-    # mode: forward | reverse | both
-    mode: reverse
-    # reverse mode can use port (+ optional host/path)
-    host: 0.0.0.0
-    port: 8080
-    path: /ws
-    # forward mode can use url directly
-    # url: ws://127.0.0.1:3000/ws
-    max_payload_size: 1048576
-    max_connections: 100
-    timeout_seconds: 30
-  tcp-http:
-    enabled: true
-    host: 127.0.0.1
-    port: 8081
-    path: /
-    max_payload_size: 1048576
-    max_connections: 100
-    timeout_seconds: 30
-  sse:
-    enabled: true
-    host: 127.0.0.1
-    port: 8082
-    path: /sse
-    max_payload_size: 1048576
-    max_connections: 100
-    timeout_seconds: 30
-"#;
-
-const DEFAULT_TOML_CONFIG_TEMPLATE: &str = r#"[rust]
-adapters = []
-
-[rust.runtime]
-worker_count = 4
-ingress_queue = 1024
-worker_queue = 256
-
-[rust.log]
-mode = "color"
-level = "info"
-timezone = "local"
-timestamp_format = "custom"
-timestamp_pattern = "%Y-%m-%d %H:%M:%S"
-
-[rust.tui.resume]
-store_path = "./.liteyuki-tui-resumes.json"
-max_sessions = 64
-max_size_mib = 16
-
-[connect.websocket]
-enabled = true
-mode = "reverse" # forward | reverse | both
-host = "0.0.0.0"
-port = 8080
-path = "/ws"
-max_payload_size = 1048576
-max_connections = 100
-timeout_seconds = 30
-
-[connect.tcp-http]
-enabled = true
-host = "127.0.0.1"
-port = 8081
-path = "/"
-max_payload_size = 1048576
-max_connections = 100
-timeout_seconds = 30
-
-[connect.sse]
-enabled = true
-host = "127.0.0.1"
-port = 8082
-path = "/sse"
-max_payload_size = 1048576
-max_connections = 100
-timeout_seconds = 30
-"#;
-
-fn load_app_config_from_path(path: &Path) -> Result<AppConfigDoc, Box<dyn std::error::Error>> {
-    let content = std::fs::read_to_string(path)?;
-    let ext = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase());
-
-    match ext.as_deref() {
-        Some("yaml") | Some("yml") => Ok(serde_yaml::from_str::<AppConfigDoc>(&content)?),
-        Some("toml") => Ok(toml::from_str::<AppConfigDoc>(&content)?),
-        _ => Err(format!("unsupported config extension for {}", path.display()).into()),
-    }
-}
-
-fn config_adapters(doc: &AppConfigDoc) -> Option<&Vec<AdapterConfig>> {
-    doc.rust
-        .as_ref()
-        .and_then(|section| section.adapters.as_ref())
-        .or(doc.adapters.as_ref())
-}
-
-fn config_connect(doc: &AppConfigDoc) -> Option<&ConnectConfigSection> {
-    doc.connect.as_ref()
-}
-
-fn config_tui_resume(doc: &AppConfigDoc) -> Option<&TuiResumeSection> {
-    doc.rust
-        .as_ref()
-        .and_then(|section| section.tui.as_ref())
-        .and_then(|tui| tui.resume.as_ref())
-        .or(doc.tui.as_ref().and_then(|tui| tui.resume.as_ref()))
-}
-
-fn config_runtime(doc: &AppConfigDoc) -> Option<&RuntimeConfigSection> {
-    doc.rust
-        .as_ref()
-        .and_then(|section| section.runtime.as_ref())
-        .or(doc.runtime.as_ref())
-}
-
-fn config_log(doc: &AppConfigDoc) -> Option<&LogConfigSection> {
-    doc.rust
-        .as_ref()
-        .and_then(|section| section.log.as_ref())
-        .or(doc.log.as_ref())
-}
-
-fn load_adapter_configs(
-    app_config: &AppConfigDoc,
-) -> Result<Vec<AdapterConfig>, Box<dyn std::error::Error>> {
-    if let Ok(path) = std::env::var("LY_ADAPTERS_PATH") {
-        let content = std::fs::read_to_string(PathBuf::from(path))?;
-        if let Ok(doc) = serde_json::from_str::<AdapterConfigDoc>(&content) {
-            return Ok(sanitize_adapter_configs(doc.adapters, "LY_ADAPTERS_PATH"));
-        }
-        let list = serde_json::from_str::<Vec<AdapterConfig>>(&content)?;
-        return Ok(sanitize_adapter_configs(list, "LY_ADAPTERS_PATH"));
-    }
-
-    if let Ok(raw) = std::env::var("LY_ADAPTERS_JSON") {
-        if let Ok(doc) = serde_json::from_str::<AdapterConfigDoc>(&raw) {
-            return Ok(sanitize_adapter_configs(doc.adapters, "LY_ADAPTERS_JSON"));
-        }
-        let list = serde_json::from_str::<Vec<AdapterConfig>>(&raw)?;
-        return Ok(sanitize_adapter_configs(list, "LY_ADAPTERS_JSON"));
-    }
-
-    let mut combined = config_adapters(app_config).cloned().unwrap_or_default();
-    combined.extend(connect_to_adapter_configs(app_config));
-    Ok(sanitize_adapter_configs(combined, "config"))
-}
-
-fn resolve_tui_config(app_config: &AppConfigDoc) -> tui::TuiConfig {
-    let mut config = tui::TuiConfig::default();
-
-    if let Some(resume) = config_tui_resume(app_config) {
-        if let Some(path) = resume.store_path.as_deref() {
-            config.resume_store_path = PathBuf::from(path);
-        }
-        if let Some(max_sessions) = resume.max_sessions
-            && max_sessions > 0
-        {
-            config.resume_max_sessions = max_sessions;
-        }
-        if let Some(max_size_mib) = resume.max_size_mib
-            && max_size_mib > 0
-        {
-            config.resume_max_size_mib = max_size_mib;
-        }
-    }
-
-    if let Ok(path) = std::env::var("LY_RESUME_STORE_PATH") {
-        config.resume_store_path = PathBuf::from(path);
-    }
-    if let Ok(raw) = std::env::var("LY_TUI_RESUME_MAX_SESSIONS")
-        && let Ok(value) = raw.trim().parse::<usize>()
-        && value > 0
-    {
-        config.resume_max_sessions = value;
-    }
-    if let Ok(raw) = std::env::var("LY_TUI_RESUME_MAX_SIZE_MIB")
-        && let Ok(value) = raw.trim().parse::<u64>()
-        && value > 0
-    {
-        config.resume_max_size_mib = value;
-    }
-
-    config
-}
-
-fn connect_to_adapter_configs(doc: &AppConfigDoc) -> Vec<AdapterConfig> {
-    let Some(connect) = config_connect(doc) else {
-        return Vec::new();
-    };
-
-    let mut adapters = Vec::new();
-
-    if let Some(ws) = &connect.websocket {
-        let mut has_nested = false;
-        if let Some(forward) = &ws.forward {
-            has_nested = true;
-            if forward.enabled.unwrap_or(false)
-                && let Some(config) =
-                    websocket_endpoint_to_adapter("connect-ws-forward", true, forward, ws)
-            {
-                adapters.push(config);
-            }
-        }
-        if let Some(reverse) = &ws.reverse {
-            has_nested = true;
-            if reverse.enabled.unwrap_or(false)
-                && let Some(config) =
-                    websocket_endpoint_to_adapter("connect-ws-reverse", false, reverse, ws)
-            {
-                adapters.push(config);
-            }
-        }
-
-        if !has_nested && ws.enabled.unwrap_or(false) {
-            let mode = ws.mode.as_deref().unwrap_or_default().to_ascii_lowercase();
-            let resolved_mode = if mode.is_empty() {
-                if ws.port.is_some() && ws.url.is_none() {
-                    "reverse".to_string()
-                } else {
-                    "forward".to_string()
-                }
-            } else {
-                mode
-            };
-
-            if matches!(resolved_mode.as_str(), "forward" | "both" | "all")
-                && let Some(config) = websocket_root_to_adapter("connect-ws-forward", true, ws)
-            {
-                adapters.push(config);
-            }
-            if matches!(resolved_mode.as_str(), "reverse" | "both" | "all")
-                && let Some(config) = websocket_root_to_adapter("connect-ws-reverse", false, ws)
-            {
-                adapters.push(config);
-            }
-        }
-    }
-
-    if let Some(http) = &connect.tcp_http
-        && http.enabled.unwrap_or(false)
-    {
-        adapters.push(http_to_adapter("connect-http", http));
-    }
-
-    if let Some(sse) = &connect.sse
-        && sse.enabled.unwrap_or(false)
-    {
-        adapters.push(sse_to_adapter("connect-sse", sse));
-    }
-
-    adapters
-}
-
-fn websocket_endpoint_to_adapter(
-    id: &str,
-    is_forward: bool,
-    endpoint: &WebSocketEndpointSection,
-    fallback: &WebSocketConnectSection,
-) -> Option<AdapterConfig> {
-    use liteyukibot_core::{AdapterEndpoint, AdapterRoute, AdapterTransport};
-
-    let url = endpoint.url.clone().or_else(|| {
-        build_url(
-            "ws",
-            endpoint
-                .host
-                .as_deref()
-                .or(fallback.host.as_deref())
-                .unwrap_or(if is_forward { "127.0.0.1" } else { "0.0.0.0" }),
-            endpoint.port.or(fallback.port),
-            endpoint
-                .path
-                .as_deref()
-                .or(fallback.path.as_deref())
-                .unwrap_or(if is_forward { "/ws" } else { "/" }),
-        )
-    });
-
-    let url = url?;
-
-    Some(AdapterConfig {
-        id: id.to_string(),
-        enabled: true,
-        transport: if is_forward {
-            AdapterTransport::WebSocketForward
-        } else {
-            AdapterTransport::WebSocketReverse
-        },
-        endpoint: AdapterEndpoint {
-            url,
-            headers: endpoint
-                .headers
-                .clone()
-                .or_else(|| fallback.headers.clone())
-                .unwrap_or_default(),
-            token: endpoint.token.clone().or_else(|| fallback.token.clone()),
-            timeout_ms: seconds_to_timeout_ms(
-                endpoint.timeout_seconds.or(fallback.timeout_seconds),
-            ),
-        },
-        route: AdapterRoute {
-            inbound_topic: endpoint
-                .inbound_topic
-                .clone()
-                .or_else(|| fallback.inbound_topic.clone())
-                .unwrap_or_else(|| "adapter.inbound".to_string()),
-            outbound_topic: endpoint
-                .outbound_topic
-                .clone()
-                .or_else(|| fallback.outbound_topic.clone())
-                .unwrap_or_else(|| "adapter.outbound".to_string()),
-        },
-        queue_capacity: endpoint
-            .queue_capacity
-            .or(fallback.queue_capacity)
-            .unwrap_or(256),
-        max_payload_size: endpoint.max_payload_size.or(fallback.max_payload_size),
-        max_connections: endpoint.max_connections.or(fallback.max_connections),
-    })
-}
-
-fn websocket_root_to_adapter(
-    id: &str,
-    is_forward: bool,
-    ws: &WebSocketConnectSection,
-) -> Option<AdapterConfig> {
-    let endpoint = WebSocketEndpointSection {
-        enabled: Some(true),
-        url: ws.url.clone(),
-        host: ws.host.clone(),
-        port: ws.port,
-        path: ws.path.clone(),
-        headers: ws.headers.clone(),
-        token: ws.token.clone(),
-        timeout_seconds: ws.timeout_seconds,
-        queue_capacity: ws.queue_capacity,
-        max_payload_size: ws.max_payload_size,
-        max_connections: ws.max_connections,
-        inbound_topic: ws.inbound_topic.clone(),
-        outbound_topic: ws.outbound_topic.clone(),
-    };
-    websocket_endpoint_to_adapter(id, is_forward, &endpoint, ws)
-}
-
-fn http_to_adapter(id: &str, section: &HttpConnectSection) -> AdapterConfig {
-    use liteyukibot_core::{AdapterEndpoint, AdapterRoute, AdapterTransport};
-
-    AdapterConfig {
-        id: id.to_string(),
-        enabled: true,
-        transport: AdapterTransport::Http,
-        endpoint: AdapterEndpoint {
-            url: section.url.clone().unwrap_or_else(|| {
-                build_url(
-                    "http",
-                    section.host.as_deref().unwrap_or("127.0.0.1"),
-                    section.port,
-                    section.path.as_deref().unwrap_or("/"),
-                )
-                .unwrap_or_else(|| "http://127.0.0.1:8081/".to_string())
-            }),
-            headers: section.headers.clone().unwrap_or_default(),
-            token: section.token.clone(),
-            timeout_ms: seconds_to_timeout_ms(section.timeout_seconds),
-        },
-        route: AdapterRoute {
-            inbound_topic: section
-                .inbound_topic
-                .clone()
-                .unwrap_or_else(|| "adapter.inbound".to_string()),
-            outbound_topic: section
-                .outbound_topic
-                .clone()
-                .unwrap_or_else(|| "adapter.outbound".to_string()),
-        },
-        queue_capacity: section.queue_capacity.unwrap_or(256),
-        max_payload_size: section.max_payload_size,
-        max_connections: section.max_connections,
-    }
-}
-
-fn sse_to_adapter(id: &str, section: &SseConnectSection) -> AdapterConfig {
-    use liteyukibot_core::{AdapterEndpoint, AdapterRoute, AdapterTransport};
-
-    AdapterConfig {
-        id: id.to_string(),
-        enabled: true,
-        transport: AdapterTransport::Sse,
-        endpoint: AdapterEndpoint {
-            url: section.url.clone().unwrap_or_else(|| {
-                build_url(
-                    "http",
-                    section.host.as_deref().unwrap_or("127.0.0.1"),
-                    section.port,
-                    section.path.as_deref().unwrap_or("/sse"),
-                )
-                .unwrap_or_else(|| "http://127.0.0.1:8082/sse".to_string())
-            }),
-            headers: section.headers.clone().unwrap_or_default(),
-            token: section.token.clone(),
-            timeout_ms: seconds_to_timeout_ms(section.timeout_seconds),
-        },
-        route: AdapterRoute {
-            inbound_topic: section
-                .inbound_topic
-                .clone()
-                .unwrap_or_else(|| "adapter.inbound".to_string()),
-            outbound_topic: section
-                .outbound_topic
-                .clone()
-                .unwrap_or_else(|| "adapter.outbound".to_string()),
-        },
-        queue_capacity: section.queue_capacity.unwrap_or(256),
-        max_payload_size: section.max_payload_size,
-        max_connections: section.max_connections,
-    }
-}
-
-fn build_url(scheme: &str, host: &str, port: Option<u16>, path: &str) -> Option<String> {
-    let port = port?;
-    let normalized_path = if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("/{path}")
-    };
-    Some(format!("{scheme}://{host}:{port}{normalized_path}"))
-}
-
-fn seconds_to_timeout_ms(seconds: Option<u64>) -> u64 {
-    seconds.unwrap_or(5).saturating_mul(1000).max(10)
-}
-
-fn payload_preview(payload: &Value) -> String {
-    let raw = payload.to_string();
-    const MAX: usize = 96;
-    let mut iter = raw.chars();
-    let preview: String = iter.by_ref().take(MAX).collect();
-    if iter.next().is_some() {
-        format!("{preview}...")
-    } else {
-        preview
-    }
 }
 
 fn reload_from_config(bot: &mut LiteyukiBot) -> tui::ReloadFuture<'_> {
@@ -914,421 +446,27 @@ fn reload_from_config(bot: &mut LiteyukiBot) -> tui::ReloadFuture<'_> {
             .await
             .map_err(|err| format!("failed to apply adapter reload: {err}"))?;
         let tui_config = resolve_tui_config(&app_config);
+        let mut help_whitelist: Vec<String> =
+            resolve_help_whitelist(&app_config).into_iter().collect();
+        help_whitelist.sort();
         Ok(tui::ReloadResult {
             adapters,
             adapter_autostart: autostart,
             tui_config,
+            help_whitelist,
             warnings,
         })
     })
 }
 
-fn sanitize_adapter_configs(configs: Vec<AdapterConfig>, source: &str) -> Vec<AdapterConfig> {
-    let mut sanitized = Vec::new();
-    let mut seen = HashSet::new();
-    for config in configs {
-        if let Err(err) = config.validate() {
-            eprintln!(
-                "config warning ({}): skip invalid adapter '{}': {}",
-                source, config.id, err
-            );
-            continue;
-        }
-        if !seen.insert(config.id.clone()) {
-            eprintln!(
-                "config warning ({}): skip duplicated adapter id '{}'",
-                source, config.id
-            );
-            continue;
-        }
-        sanitized.push(config);
-    }
-    sanitized
-}
-
-fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
-    let mut warnings = Vec::new();
-    if let Some(adapters) = config_adapters(doc) {
-        let mut seen = HashSet::new();
-        for adapter in adapters {
-            if let Err(err) = adapter.validate() {
-                warnings.push(format!("invalid adapter '{}': {}", adapter.id, err));
-            }
-            if !seen.insert(adapter.id.clone()) {
-                warnings.push(format!("duplicated adapter id '{}'", adapter.id));
-            }
-        }
-    }
-
-    if let Some(resume) = config_tui_resume(doc) {
-        if let Some(path) = resume.store_path.as_deref()
-            && path.trim().is_empty()
-        {
-            warnings.push("tui.resume.store_path should not be empty".to_string());
-        }
-        if let Some(max_sessions) = resume.max_sessions
-            && max_sessions == 0
-        {
-            warnings.push("tui.resume.max_sessions should be > 0".to_string());
-        }
-        if let Some(max_size_mib) = resume.max_size_mib
-            && max_size_mib == 0
-        {
-            warnings.push("tui.resume.max_size_mib should be > 0".to_string());
-        }
-    }
-
-    if let Some(connect) = config_connect(doc) {
-        if let Some(ws) = &connect.websocket {
-            if ws.max_payload_size.is_some_and(|value| value == 0) {
-                warnings.push("connect.websocket.max_payload_size should be > 0".to_string());
-            }
-            if ws.max_connections.is_some_and(|value| value == 0) {
-                warnings.push("connect.websocket.max_connections should be > 0".to_string());
-            }
-            if ws.enabled.unwrap_or(false) {
-                let has_nested = ws.forward.is_some() || ws.reverse.is_some();
-                if !has_nested && ws.url.is_none() && ws.port.is_none() {
-                    warnings.push(
-                        "connect.websocket enabled but neither url nor port is set".to_string(),
-                    );
-                }
-            }
-            if let Some(forward) = &ws.forward
-                && forward.enabled.unwrap_or(false)
-                && forward.url.is_none()
-                && (forward.port.is_none() || forward.host.as_deref().is_none())
-            {
-                warnings.push(
-                    "connect.websocket.forward enabled but url is missing and host/port is incomplete"
-                        .to_string(),
-                );
-            }
-            if let Some(forward) = &ws.forward
-                && forward.max_payload_size.is_some_and(|value| value == 0)
-            {
-                warnings
-                    .push("connect.websocket.forward.max_payload_size should be > 0".to_string());
-            }
-            if let Some(forward) = &ws.forward
-                && forward.max_connections.is_some_and(|value| value == 0)
-            {
-                warnings
-                    .push("connect.websocket.forward.max_connections should be > 0".to_string());
-            }
-            if let Some(reverse) = &ws.reverse
-                && reverse.enabled.unwrap_or(false)
-                && reverse.url.is_none()
-                && reverse.port.is_none()
-            {
-                warnings
-                    .push("connect.websocket.reverse enabled but url/port is missing".to_string());
-            }
-            if let Some(reverse) = &ws.reverse
-                && reverse.max_payload_size.is_some_and(|value| value == 0)
-            {
-                warnings
-                    .push("connect.websocket.reverse.max_payload_size should be > 0".to_string());
-            }
-            if let Some(reverse) = &ws.reverse
-                && reverse.max_connections.is_some_and(|value| value == 0)
-            {
-                warnings
-                    .push("connect.websocket.reverse.max_connections should be > 0".to_string());
-            }
-        }
-
-        if let Some(http) = &connect.tcp_http {
-            if http.max_payload_size.is_some_and(|value| value == 0) {
-                warnings.push("connect.tcp-http.max_payload_size should be > 0".to_string());
-            }
-            if http.max_connections.is_some_and(|value| value == 0) {
-                warnings.push("connect.tcp-http.max_connections should be > 0".to_string());
-            }
-        }
-
-        if let Some(sse) = &connect.sse {
-            if sse.max_payload_size.is_some_and(|value| value == 0) {
-                warnings.push("connect.sse.max_payload_size should be > 0".to_string());
-            }
-            if sse.max_connections.is_some_and(|value| value == 0) {
-                warnings.push("connect.sse.max_connections should be > 0".to_string());
-            }
-        }
-    }
-
-    warnings
-}
-
-fn prime_reload_warning_state(doc: &AppConfigDoc) {
-    let mut lock = LAST_RELOAD_WARNING_STATE
-        .lock()
-        .expect("reload warning state lock should not be poisoned");
-    *lock = Some(ReloadWarningState::from_doc(doc));
-}
-
-fn collect_runtime_reload_warnings(doc: &AppConfigDoc) -> Vec<String> {
-    let current = ReloadWarningState::from_doc(doc);
-    let mut lock = LAST_RELOAD_WARNING_STATE
-        .lock()
-        .expect("reload warning state lock should not be poisoned");
-    let warnings = runtime_reload_warnings(lock.as_ref(), &current);
-    *lock = Some(current);
-    warnings
-}
-
-fn runtime_reload_warnings(
-    previous: Option<&ReloadWarningState>,
-    current: &ReloadWarningState,
-) -> Vec<String> {
-    let mut warnings = Vec::new();
-
-    let runtime_changed = previous.is_none_or(|prev| prev.runtime != current.runtime);
-    let runtime_sensitive = previous
-        .is_some_and(|prev| runtime_has_hot_reload_sensitive_fields(&prev.runtime))
-        || runtime_has_hot_reload_sensitive_fields(&current.runtime);
-    if runtime_changed && runtime_sensitive {
-        warnings.push(
-            "runtime.worker_count/ingress_queue/worker_queue are low-level parameters; /reload will not hot-apply them. Restart is recommended, hot switching may cause unpredictable behavior.".to_string(),
-        );
-    }
-
-    let log_changed = previous.is_none_or(|prev| prev.log != current.log);
-    let log_sensitive = previous.is_some_and(|prev| log_has_startup_only_fields(&prev.log))
-        || log_has_startup_only_fields(&current.log);
-    if log_changed && log_sensitive {
-        warnings.push(
-            "log mode/level/timestamp parameters are loaded at startup and may not be fully applied by /reload. Restart is recommended for deterministic behavior.".to_string(),
-        );
-    }
-
-    warnings
-}
-
-fn runtime_has_hot_reload_sensitive_fields(runtime: &Option<RuntimeConfigSection>) -> bool {
-    runtime.as_ref().is_some_and(|runtime| {
-        runtime.worker_count.is_some()
-            || runtime.ingress_queue.is_some()
-            || runtime.worker_queue.is_some()
-    })
-}
-
-fn log_has_startup_only_fields(log: &Option<LogConfigSection>) -> bool {
-    log.as_ref().is_some_and(|log| {
-        log.mode.is_some()
-            || log.level.is_some()
-            || log.timezone.is_some()
-            || log.timestamp_format.is_some()
-            || log.timestamp_pattern.is_some()
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_path(name: &str, ext: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0);
-        path.push(format!("rsliteyuki-{name}-{nanos}.{ext}"));
-        path
-    }
-
-    #[test]
-    fn write_default_config_if_missing_creates_yaml_template() {
-        let path = temp_path("config-create", "yaml");
-        let _ = std::fs::remove_file(&path);
-
-        write_default_config_if_missing(&path).expect("config file should be created");
-        let content = std::fs::read_to_string(&path).expect("config file should be readable");
-        assert!(content.contains("rust:"));
-        assert!(content.contains("adapters: []"));
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn validate_app_config_reports_invalid_values() {
-        let mut duplicate = AdapterConfig::default();
-        duplicate.id = "dup".to_string();
-
-        let mut invalid = AdapterConfig::default();
-        invalid.id = "dup".to_string();
-        invalid.endpoint.url = "".to_string();
-
-        let doc = AppConfigDoc {
-            rust: Some(AppRustSection {
-                runtime: None,
-                log: None,
-                adapters: Some(vec![duplicate, invalid]),
-                tui: Some(TuiConfigSection {
-                    resume: Some(TuiResumeSection {
-                        store_path: Some("   ".to_string()),
-                        max_sessions: Some(0),
-                        max_size_mib: Some(0),
-                    }),
-                }),
-            }),
-            runtime: None,
-            log: None,
-            adapters: None,
-            connect: None,
-            tui: None,
-        };
-
-        let warnings = validate_app_config(&doc);
-        assert!(warnings.iter().any(|w| w.contains("duplicated adapter id")));
-        assert!(warnings.iter().any(|w| w.contains("invalid adapter")));
-        assert!(warnings.iter().any(|w| w.contains("store_path")));
-        assert!(warnings.iter().any(|w| w.contains("max_sessions")));
-        assert!(warnings.iter().any(|w| w.contains("max_size_mib")));
-    }
-
-    #[test]
-    fn runtime_reload_warnings_detect_low_level_runtime_fields() {
-        let doc = AppConfigDoc {
-            rust: Some(AppRustSection {
-                runtime: Some(RuntimeConfigSection {
-                    worker_count: Some(8),
-                    ingress_queue: None,
-                    worker_queue: None,
-                }),
-                log: None,
-                adapters: None,
-                tui: None,
-            }),
-            runtime: None,
-            log: None,
-            adapters: None,
-            connect: None,
-            tui: None,
-        };
-
-        let current = ReloadWarningState::from_doc(&doc);
-        let warnings = runtime_reload_warnings(None, &current);
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("hot switching may cause unpredictable behavior"))
-        );
-    }
-
-    #[test]
-    fn runtime_reload_warnings_skip_when_sensitive_fields_unchanged() {
-        let doc = AppConfigDoc {
-            rust: Some(AppRustSection {
-                runtime: Some(RuntimeConfigSection {
-                    worker_count: Some(8),
-                    ingress_queue: Some(1024),
-                    worker_queue: Some(256),
-                }),
-                log: Some(LogConfigSection {
-                    mode: Some("color".to_string()),
-                    level: Some("info".to_string()),
-                    timezone: Some("local".to_string()),
-                    timestamp_format: Some("custom".to_string()),
-                    timestamp_pattern: Some("%Y-%m-%d %H:%M:%S".to_string()),
-                }),
-                adapters: None,
-                tui: None,
-            }),
-            runtime: None,
-            log: None,
-            adapters: None,
-            connect: None,
-            tui: None,
-        };
-
-        let state = ReloadWarningState::from_doc(&doc);
-        let warnings = runtime_reload_warnings(Some(&state), &state);
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn connect_websocket_both_mode_generates_forward_and_reverse_adapters() {
-        let doc = AppConfigDoc {
-            rust: None,
-            runtime: None,
-            log: None,
-            adapters: None,
-            connect: Some(ConnectConfigSection {
-                websocket: Some(WebSocketConnectSection {
-                    enabled: Some(true),
-                    mode: Some("both".to_string()),
-                    url: Some("ws://127.0.0.1:3000/ws".to_string()),
-                    host: Some("0.0.0.0".to_string()),
-                    port: Some(8080),
-                    path: Some("/ws".to_string()),
-                    headers: None,
-                    token: None,
-                    timeout_seconds: Some(30),
-                    queue_capacity: Some(256),
-                    max_payload_size: Some(1024 * 1024),
-                    max_connections: Some(100),
-                    inbound_topic: None,
-                    outbound_topic: None,
-                    forward: None,
-                    reverse: None,
-                }),
-                tcp_http: None,
-                sse: None,
-            }),
-            tui: None,
-        };
-
-        let adapters = load_adapter_configs(&doc).expect("connect adapters should parse");
-        assert!(
-            adapters
-                .iter()
-                .any(|adapter| adapter.id == "connect-ws-forward")
-        );
-        assert!(
-            adapters
-                .iter()
-                .any(|adapter| adapter.id == "connect-ws-reverse")
-        );
-    }
-
-    #[test]
-    fn connect_websocket_port_without_mode_defaults_to_reverse() {
-        let doc = AppConfigDoc {
-            rust: None,
-            runtime: None,
-            log: None,
-            adapters: None,
-            connect: Some(ConnectConfigSection {
-                websocket: Some(WebSocketConnectSection {
-                    enabled: Some(true),
-                    mode: None,
-                    url: None,
-                    host: Some("0.0.0.0".to_string()),
-                    port: Some(8090),
-                    path: Some("/ws".to_string()),
-                    headers: None,
-                    token: None,
-                    timeout_seconds: Some(30),
-                    queue_capacity: None,
-                    max_payload_size: Some(1024 * 1024),
-                    max_connections: Some(100),
-                    inbound_topic: None,
-                    outbound_topic: None,
-                    forward: None,
-                    reverse: None,
-                }),
-                tcp_http: None,
-                sse: None,
-            }),
-            tui: None,
-        };
-
-        let adapters = load_adapter_configs(&doc).expect("connect adapters should parse");
-        assert_eq!(adapters.len(), 1);
-        assert_eq!(adapters[0].id, "connect-ws-reverse");
-        assert_eq!(adapters[0].max_payload_size, Some(1024 * 1024));
-        assert_eq!(adapters[0].max_connections, Some(100));
-    }
+fn persist_help_whitelist(entries: Vec<String>) -> Result<String, String> {
+    let path = resolve_app_config_path().unwrap_or_else(|| PathBuf::from("config.yaml"));
+    write_default_config_if_missing(path.as_path())
+        .map_err(|err| format!("failed to ensure config exists: {err}"))?;
+    config_edit::persist_onebot_v11_whitelist(path.as_path(), &entries)?;
+    Ok(format!(
+        "whitelist persisted to {} (entries={})",
+        path.display(),
+        entries.len()
+    ))
 }

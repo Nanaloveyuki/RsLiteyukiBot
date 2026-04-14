@@ -3,6 +3,7 @@ use std::future::Future;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
@@ -28,7 +29,7 @@ const RESUME_FLUSH_INTERVAL: Duration = Duration::from_millis(800);
 const DEFAULT_LOG_VIEW_ROWS: usize = 12;
 const DEFAULT_RESUME_MAX_SESSIONS: usize = 64;
 const DEFAULT_RESUME_MAX_SIZE_MIB: u64 = 16;
-const TUI_COMMANDS: [&str; 10] = [
+const TUI_COMMANDS: [&str; 11] = [
     "/help",
     "/reload",
     "/log",
@@ -37,6 +38,7 @@ const TUI_COMMANDS: [&str; 10] = [
     "/resumes",
     "/history",
     "/resume",
+    "/whitelist",
     "/quit",
     "/exit",
 ];
@@ -63,6 +65,14 @@ pub enum UiEvent {
         topic: String,
         payload_preview: String,
     },
+    ExternalStats {
+        command_hits: u64,
+        api_requests: u64,
+        api_success: u64,
+        api_failed: u64,
+        api_timeouts: u64,
+        api_inflight: u64,
+    },
     Log {
         level: UiLevel,
         message: String,
@@ -79,6 +89,7 @@ enum CommandOutcome {
     None,
     Quit,
     Reload,
+    PersistWhitelist(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,11 +118,13 @@ pub struct ReloadResult {
     pub adapters: Vec<AdapterConfig>,
     pub adapter_autostart: bool,
     pub tui_config: TuiConfig,
+    pub help_whitelist: Vec<String>,
     pub warnings: Vec<String>,
 }
 
 pub type ReloadFuture<'a> = Pin<Box<dyn Future<Output = Result<ReloadResult, String>> + 'a>>;
 pub type ReloadHandler = for<'a> fn(&'a mut LiteyukiBot) -> ReloadFuture<'a>;
+pub type PersistWhitelistHandler = fn(Vec<String>) -> Result<String, String>;
 
 pub struct RunOptions {
     pub target: RuntimeTarget,
@@ -120,6 +133,8 @@ pub struct RunOptions {
     pub adapter_autostart: bool,
     pub tui_config: TuiConfig,
     pub reload_handler: ReloadHandler,
+    pub whitelist_persist_handler: PersistWhitelistHandler,
+    pub help_whitelist: Arc<RwLock<HashSet<String>>>,
 }
 
 impl Default for TuiConfig {
@@ -226,6 +241,12 @@ struct AppState {
     logs: VecDeque<UiLog>,
     total_events: u64,
     adapter_events: u64,
+    external_command_hits: u64,
+    external_api_requests: u64,
+    external_api_success: u64,
+    external_api_failed: u64,
+    external_api_timeouts: u64,
+    external_api_inflight: u64,
     adapter_inbound_topics: HashSet<String>,
     adapters: Vec<AdapterConfig>,
     adapter_running: HashMap<String, bool>,
@@ -244,6 +265,7 @@ struct AppState {
     last_resume_flush: Instant,
     view_mode: UiViewMode,
     completion_state: Option<CompletionState>,
+    help_whitelist: Option<Arc<RwLock<HashSet<String>>>>,
 }
 
 impl AppState {
@@ -270,6 +292,12 @@ impl AppState {
             logs: VecDeque::with_capacity(UI_LOG_CAPACITY),
             total_events: 0,
             adapter_events: 0,
+            external_command_hits: 0,
+            external_api_requests: 0,
+            external_api_success: 0,
+            external_api_failed: 0,
+            external_api_timeouts: 0,
+            external_api_inflight: 0,
             adapter_inbound_topics,
             adapters,
             adapter_running,
@@ -288,6 +316,7 @@ impl AppState {
             last_resume_flush: Instant::now(),
             view_mode: UiViewMode::Dashboard,
             completion_state: None,
+            help_whitelist: None,
         };
         state.enforce_resume_limits();
         state
@@ -349,6 +378,27 @@ impl AppState {
         self.enforce_resume_limits();
         self.resume_dirty = true;
 
+        let mut whitelist_sync_failed = false;
+        if let Some(shared) = self.help_whitelist.clone() {
+            match shared.write() {
+                Ok(mut lock) => {
+                    lock.clear();
+                    for entry in result.help_whitelist {
+                        lock.insert(entry);
+                    }
+                }
+                Err(_) => {
+                    whitelist_sync_failed = true;
+                }
+            }
+        }
+        if whitelist_sync_failed {
+            self.push_log(
+                UiLevel::Error,
+                "failed to sync whitelist from reloaded config",
+            );
+        }
+
         self.push_log(
             UiLevel::Info,
             format!(
@@ -393,6 +443,21 @@ impl AppState {
                     self.adapter_events += 1;
                 }
                 self.push_log(UiLevel::Event, format!("#{id} [{topic}] {payload_preview}"));
+            }
+            UiEvent::ExternalStats {
+                command_hits,
+                api_requests,
+                api_success,
+                api_failed,
+                api_timeouts,
+                api_inflight,
+            } => {
+                self.external_command_hits = command_hits;
+                self.external_api_requests = api_requests;
+                self.external_api_success = api_success;
+                self.external_api_failed = api_failed;
+                self.external_api_timeouts = api_timeouts;
+                self.external_api_inflight = api_inflight;
             }
             UiEvent::Log { level, message } => {
                 self.push_log(level, message);
@@ -579,6 +644,152 @@ impl AppState {
 
     fn set_view_mode(&mut self, view_mode: UiViewMode) {
         self.view_mode = view_mode;
+    }
+
+    fn bind_help_whitelist(&mut self, whitelist: Arc<RwLock<HashSet<String>>>) {
+        self.help_whitelist = Some(whitelist);
+    }
+
+    fn show_whitelist_usage(&mut self) {
+        self.push_log(
+            UiLevel::Warn,
+            "usage: /whitelist list | /whitelist add <id|scope:id|scope id> | /whitelist remove <id|scope:id|scope id>",
+        );
+    }
+
+    fn parse_whitelist_scope(scope: &str) -> Option<&'static str> {
+        match scope.trim().to_ascii_lowercase().as_str() {
+            "private" => Some("private"),
+            "group" | "gourp" => Some("group"),
+            "session" => Some("session"),
+            "user" => Some("user"),
+            _ => None,
+        }
+    }
+
+    fn parse_whitelist_scoped_entry(scope: &str, id: &str) -> Result<String, String> {
+        let Some(scope) = Self::parse_whitelist_scope(scope) else {
+            return Err("scope should be private|group|session|user".to_string());
+        };
+        let id = id.trim();
+        if id.is_empty() {
+            return Err("id should not be empty".to_string());
+        }
+        Ok(format!("{scope}:{id}"))
+    }
+
+    fn parse_whitelist_entry(raw: &str) -> Result<String, String> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err("entry should not be empty".to_string());
+        }
+        if let Some((scope, id)) = raw.split_once(':') {
+            return Self::parse_whitelist_scoped_entry(scope, id);
+        }
+        Ok(raw.to_string())
+    }
+
+    fn with_whitelist_read<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&HashSet<String>, &mut Self),
+    {
+        let Some(shared) = self.help_whitelist.clone() else {
+            self.push_log(
+                UiLevel::Warn,
+                "whitelist bridge unavailable in current runtime",
+            );
+            return;
+        };
+        let Ok(lock) = shared.read() else {
+            self.push_log(UiLevel::Error, "failed to lock whitelist (poisoned)");
+            return;
+        };
+        f(&lock, self);
+    }
+
+    fn handle_whitelist_command(&mut self, args: &[&str]) -> CommandOutcome {
+        let Some(subcommand) = args.first().copied() else {
+            self.show_whitelist_usage();
+            return CommandOutcome::None;
+        };
+        match subcommand {
+            "list" => {
+                if args.len() != 1 {
+                    self.show_whitelist_usage();
+                    return CommandOutcome::None;
+                }
+                self.with_whitelist_read(|set, app| {
+                    if set.is_empty() {
+                        app.push_log(
+                            UiLevel::Info,
+                            "external /help whitelist empty (allow all sessions)",
+                        );
+                        return;
+                    }
+                    let mut entries: Vec<String> = set.iter().cloned().collect();
+                    entries.sort();
+                    app.push_log(
+                        UiLevel::Info,
+                        format!("external /help whitelist entries ({}):", entries.len()),
+                    );
+                    for entry in entries {
+                        app.push_log(UiLevel::Info, format!("  - {entry}"));
+                    }
+                });
+                CommandOutcome::None
+            }
+            "add" | "remove" => {
+                let entry = match args {
+                    [_, value] => Self::parse_whitelist_entry(value),
+                    [_, scope, id] => Self::parse_whitelist_scoped_entry(scope, id),
+                    _ => {
+                        self.show_whitelist_usage();
+                        return CommandOutcome::None;
+                    }
+                };
+                let Ok(entry) = entry else {
+                    self.show_whitelist_usage();
+                    return CommandOutcome::None;
+                };
+                let Some(shared) = self.help_whitelist.clone() else {
+                    self.push_log(
+                        UiLevel::Warn,
+                        "whitelist bridge unavailable in current runtime",
+                    );
+                    return CommandOutcome::None;
+                };
+                let Ok(mut lock) = shared.write() else {
+                    self.push_log(UiLevel::Error, "failed to lock whitelist (poisoned)");
+                    return CommandOutcome::None;
+                };
+
+                if subcommand == "add" {
+                    if lock.insert(entry.clone()) {
+                        let mut entries: Vec<String> = lock.iter().cloned().collect();
+                        entries.sort();
+                        self.push_log(UiLevel::Info, format!("whitelist added: {entry}"));
+                        self.push_log(UiLevel::Info, "persisting whitelist and auto reloading...");
+                        return CommandOutcome::PersistWhitelist(entries);
+                    }
+                    self.push_log(UiLevel::Info, format!("whitelist already exists: {entry}"));
+                    CommandOutcome::None
+                } else {
+                    if lock.remove(entry.as_str()) {
+                        let mut entries: Vec<String> = lock.iter().cloned().collect();
+                        entries.sort();
+                        self.push_log(UiLevel::Info, format!("whitelist removed: {entry}"));
+                        self.push_log(UiLevel::Info, "persisting whitelist and auto reloading...");
+                        return CommandOutcome::PersistWhitelist(entries);
+                    }
+                    self.push_log(UiLevel::Info, format!("whitelist not found: {entry}"));
+                    CommandOutcome::None
+                }
+            }
+            _ => {
+                self.show_whitelist_usage();
+                CommandOutcome::None
+            }
+        }
     }
 
     fn log_window_bounds(&self) -> (usize, usize) {
@@ -827,7 +1038,11 @@ impl AppState {
             "/help" => {
                 self.push_log(
                     UiLevel::Info,
-                    "commands: /help /reload /log [on|off] /clear /adapters /resumes /history /resume <uid> /quit /exit",
+                    "commands: /help /reload /log [on|off] /clear /adapters /resumes /history /resume <uid> /whitelist ... /quit /exit",
+                );
+                self.push_log(
+                    UiLevel::Info,
+                    "whitelist: /whitelist list | /whitelist add <id|scope:id|scope id> | /whitelist remove <id|scope:id|scope id>",
                 );
                 self.push_log(
                     UiLevel::Info,
@@ -949,6 +1164,10 @@ impl AppState {
                 }
                 CommandOutcome::None
             }
+            "/whitelist" => {
+                let args: Vec<&str> = parts.collect();
+                self.handle_whitelist_command(&args)
+            }
             _ => {
                 self.push_log(UiLevel::Warn, format!("unknown command: {cmd}. try /help"));
                 CommandOutcome::None
@@ -969,8 +1188,11 @@ pub async fn run(
         adapter_autostart,
         tui_config,
         reload_handler,
+        whitelist_persist_handler,
+        help_whitelist,
     } = options;
     let mut app = AppState::new(target, settings_desc, adapter_configs, tui_config);
+    app.bind_help_whitelist(help_whitelist);
     app.push_log(
         UiLevel::Info,
         "TUI ready: type /help in console, Ctrl+C or /quit to exit",
@@ -992,7 +1214,15 @@ pub async fn run(
     }
 
     let mut terminal = init_terminal()?;
-    let loop_result = run_tui_loop(&mut terminal, bot, &mut app, reload_handler, ui_rx).await;
+    let loop_result = run_tui_loop(
+        &mut terminal,
+        bot,
+        &mut app,
+        reload_handler,
+        whitelist_persist_handler,
+        ui_rx,
+    )
+    .await;
 
     let _ = restore_terminal(&mut terminal);
     app.flush_resume_if_needed(true);
@@ -1004,6 +1234,7 @@ async fn run_tui_loop(
     bot: &mut LiteyukiBot,
     app: &mut AppState,
     reload_handler: ReloadHandler,
+    whitelist_persist_handler: PersistWhitelistHandler,
     ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut tick = tokio::time::interval(Duration::from_millis(120));
@@ -1031,6 +1262,33 @@ async fn run_tui_loop(
                                 }
                             }
                         }
+                        CommandOutcome::PersistWhitelist(entries) => {
+                            match whitelist_persist_handler(entries) {
+                                Ok(message) => {
+                                    app.push_log(UiLevel::Info, message);
+                                    app.push_log(UiLevel::Info, "reloading config...");
+                                    match reload_handler(bot).await {
+                                        Ok(result) => {
+                                            app.apply_reload_result(result);
+                                            app.refresh_adapter_state(bot);
+                                        }
+                                        Err(err) => {
+                                            app.push_log(
+                                                UiLevel::Warn,
+                                                format!("reload failed: {err}"),
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    app.push_log(UiLevel::Warn, format!("persist whitelist failed: {err}"));
+                                    app.push_log(
+                                        UiLevel::Warn,
+                                        "runtime whitelist changed but config was not persisted",
+                                    );
+                                }
+                            }
+                        }
                         CommandOutcome::None => {}
                     }
                 }
@@ -1039,6 +1297,11 @@ async fn run_tui_loop(
             }
             Some(event) = ui_rx.recv() => {
                 app.apply_event(event);
+                while let Ok(next) = ui_rx.try_recv() {
+                    app.apply_event(next);
+                }
+                app.flush_resume_if_needed(false);
+                terminal.draw(|frame| draw_ui(frame, app))?;
             }
             signal = tokio::signal::ctrl_c() => {
                 if signal.is_ok() {
@@ -1072,8 +1335,14 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &mut AppState) {
             Style::default().fg(Color::Black).bg(Color::Cyan),
         ),
         Span::raw(format!(
-            " target={:?}  uptime={}s  events={}  adapter_events={}  resume={} ",
-            app.target, uptime, app.total_events, app.adapter_events, app.active_resume_uid
+            " target={:?}  uptime={}s  events={}  adapter_events={}  ext_cmd={}  api_inflight={}  resume={} ",
+            app.target,
+            uptime,
+            app.total_events,
+            app.adapter_events,
+            app.external_command_hits,
+            app.external_api_inflight,
+            app.active_resume_uid
         )),
     ]))
     .block(rounded_block("Runtime"));
@@ -1141,13 +1410,18 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &mut AppState) {
 
     let console = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(4), Constraint::Length(3)])
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Min(3),
+            Constraint::Length(3),
+        ])
         .split(mid[1]);
-    render_logs_panel(frame, app, console[0], "Console");
-    render_command_panel(frame, app, console[1]);
+    render_external_panel(frame, app, console[0]);
+    render_logs_panel(frame, app, console[1], "Console");
+    render_command_panel(frame, app, console[2]);
 
     let footer = Paragraph::new(Line::from(vec![
-        Span::raw("/help /reload /log /clear /adapters /resumes /resume <uid> /quit"),
+        Span::raw("/help"),
         Span::raw("  |  "),
         Span::raw("Up/Down history, Tab cycle-complete, PgUp/PgDn/Home/End scroll"),
         Span::raw("  |  "),
@@ -1173,7 +1447,7 @@ fn draw_log_console_view(
     render_command_panel(frame, app, content[1]);
 
     let footer = Paragraph::new(Line::from(vec![
-        Span::raw("/log off to return dashboard"),
+        Span::raw("/help for commands"),
         Span::raw("  |  "),
         Span::raw("Empty input + Up/Down or PgUp/PgDn/Home/End scroll logs"),
         Span::raw("  |  "),
@@ -1181,6 +1455,71 @@ fn draw_log_console_view(
     ]))
     .wrap(Wrap { trim: true });
     frame.render_widget(footer, footer_area);
+}
+
+fn render_external_panel(frame: &mut ratatui::Frame<'_>, app: &AppState, area: Rect) {
+    let success_rate = if app.external_api_requests == 0 {
+        0.0
+    } else {
+        (app.external_api_success as f64) / (app.external_api_requests as f64) * 100.0
+    };
+
+    let line1 = Line::from(vec![
+        Span::styled("commands=", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            app.external_command_hits.to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled("inflight=", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            app.external_api_inflight.to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let line2 = Line::from(vec![
+        Span::styled("api req=", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            app.external_api_requests.to_string(),
+            Style::default().fg(Color::White),
+        ),
+        Span::raw("  "),
+        Span::styled("ok=", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            app.external_api_success.to_string(),
+            Style::default().fg(Color::Green),
+        ),
+        Span::raw("  "),
+        Span::styled("fail=", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            app.external_api_failed.to_string(),
+            Style::default().fg(Color::Red),
+        ),
+        Span::raw("  "),
+        Span::styled("timeout=", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            app.external_api_timeouts.to_string(),
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::raw("  "),
+        Span::styled("rate=", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{success_rate:.1}%"),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let widget = Paragraph::new(Text::from(vec![line1, line2]))
+        .block(rounded_block("External EventHandle"))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(widget, area);
 }
 
 fn render_logs_panel(frame: &mut ratatui::Frame<'_>, app: &mut AppState, area: Rect, title: &str) {
@@ -1737,6 +2076,51 @@ mod tests {
             app.logs
                 .iter()
                 .any(|log| log.message.contains("usage: /reload"))
+        );
+
+        remove_file_if_exists(&path);
+    }
+
+    #[test]
+    fn whitelist_command_can_add_remove_and_list_entries() {
+        let path = temp_resume_path("whitelist-command");
+        remove_file_if_exists(&path);
+
+        let mut app = AppState::new(
+            RuntimeTarget::Cli,
+            "test".to_string(),
+            Vec::new(),
+            test_tui_config(path.clone()),
+        );
+        let shared = Arc::new(RwLock::new(HashSet::new()));
+        app.bind_help_whitelist(shared.clone());
+
+        let outcome = app.handle_console_command("/whitelist add private 3541766758");
+        assert!(matches!(outcome, CommandOutcome::PersistWhitelist(_)));
+        let outcome = app.handle_console_command("/whitelist add gourp:699493240");
+        assert!(matches!(outcome, CommandOutcome::PersistWhitelist(_)));
+        app.handle_console_command("/whitelist list");
+
+        let lock = shared
+            .read()
+            .expect("whitelist lock should be readable in test");
+        assert!(lock.contains("private:3541766758"));
+        assert!(lock.contains("group:699493240"));
+        drop(lock);
+
+        let outcome = app.handle_console_command("/whitelist remove group:699493240");
+        assert!(matches!(outcome, CommandOutcome::PersistWhitelist(_)));
+        let lock = shared
+            .read()
+            .expect("whitelist lock should be readable in test");
+        assert!(!lock.contains("group:699493240"));
+        assert!(lock.contains("private:3541766758"));
+        drop(lock);
+
+        assert!(
+            app.logs
+                .iter()
+                .any(|log| log.message.contains("whitelist entries"))
         );
 
         remove_file_if_exists(&path);
