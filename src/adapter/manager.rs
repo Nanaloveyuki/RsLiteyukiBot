@@ -119,6 +119,40 @@ impl AdapterManager {
         Ok(())
     }
 
+    pub fn replace_configs<I>(&self, configs: I) -> Result<(), AdapterError>
+    where
+        I: IntoIterator<Item = AdapterConfig>,
+    {
+        let mut next = HashMap::new();
+        for config in configs {
+            config
+                .validate()
+                .map_err(|err| AdapterError::Config(err.to_string()))?;
+            if next.insert(config.id.clone(), config).is_some() {
+                return Err(AdapterError::Config(
+                    "duplicated adapter id in reload".to_string(),
+                ));
+            }
+        }
+
+        let mut lock = self
+            .configs
+            .write()
+            .expect("adapter config lock should not be poisoned");
+        lock.clear();
+        for (id, config) in next {
+            lock.insert(id, config);
+        }
+
+        if let Some(logger) = &self.logger {
+            logger.info_in(
+                MODULE_ADAPTER,
+                format!("adapter configs replaced, total={}", lock.len()),
+            );
+        }
+        Ok(())
+    }
+
     pub fn get(&self, id: &str) -> Option<AdapterConfig> {
         self.configs
             .read()
@@ -276,7 +310,9 @@ impl AdapterManager {
             .ok_or_else(|| AdapterError::Config(format!("adapter '{}' not found", id)))?;
 
         if matches!(config.transport, AdapterTransport::Http) {
-            self.http_client.post_packet(&config.endpoint, &packet).await?;
+            self.http_client
+                .post_packet(&config.endpoint, &packet)
+                .await?;
             return Ok(());
         }
 

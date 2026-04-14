@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     BotEvent, BotHandle, BotRuntime, BotRuntimeConfig, HookFilter, LifecycleContext,
@@ -234,10 +234,7 @@ impl LiteyukiBotBuilder {
 
         for config in self.adapter_configs {
             if let Err(err) = adapter_manager.register(config) {
-                logger.warn_in(
-                    MODULE_BOT,
-                    format!("skip adapter registration: {}", err),
-                );
+                logger.warn_in(MODULE_BOT, format!("skip adapter registration: {}", err));
             }
         }
 
@@ -616,6 +613,24 @@ impl LiteyukiBot {
             .shutdown_all()
             .await
             .map_err(LiteyukiBotError::Adapter)
+    }
+
+    pub async fn reload_adapters<I>(
+        &self,
+        adapter_configs: I,
+        autostart: bool,
+    ) -> Result<(), LiteyukiBotError>
+    where
+        I: IntoIterator<Item = AdapterConfig>,
+    {
+        self.stop_adapters().await?;
+        self.adapter_manager
+            .replace_configs(adapter_configs)
+            .map_err(LiteyukiBotError::Adapter)?;
+        if autostart {
+            self.start_adapters().await?;
+        }
+        Ok(())
     }
 
     fn plugin_context(&self) -> PluginContext {

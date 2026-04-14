@@ -24,6 +24,10 @@ struct AppConfigDoc {
     #[serde(default)]
     rust: Option<AppRustSection>,
     #[serde(default)]
+    runtime: Option<RuntimeConfigSection>,
+    #[serde(default)]
+    log: Option<LogConfigSection>,
+    #[serde(default)]
     adapters: Option<Vec<AdapterConfig>>,
     #[serde(default)]
     tui: Option<TuiConfigSection>,
@@ -32,9 +36,37 @@ struct AppConfigDoc {
 #[derive(Debug, Deserialize, Default)]
 struct AppRustSection {
     #[serde(default)]
+    runtime: Option<RuntimeConfigSection>,
+    #[serde(default)]
+    log: Option<LogConfigSection>,
+    #[serde(default)]
     adapters: Option<Vec<AdapterConfig>>,
     #[serde(default)]
     tui: Option<TuiConfigSection>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct RuntimeConfigSection {
+    #[serde(default)]
+    worker_count: Option<usize>,
+    #[serde(default)]
+    ingress_queue: Option<usize>,
+    #[serde(default)]
+    worker_queue: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct LogConfigSection {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    level: Option<String>,
+    #[serde(default)]
+    timezone: Option<String>,
+    #[serde(default)]
+    timestamp_format: Option<String>,
+    #[serde(default)]
+    timestamp_pattern: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -142,6 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         adapter_configs,
         adapter_autostart,
         tui_config,
+        reload_from_config,
         &mut ui_rx,
     )
     .await;
@@ -301,6 +334,20 @@ fn config_tui_resume(doc: &AppConfigDoc) -> Option<&TuiResumeSection> {
         .or(doc.tui.as_ref().and_then(|tui| tui.resume.as_ref()))
 }
 
+fn config_runtime(doc: &AppConfigDoc) -> Option<&RuntimeConfigSection> {
+    doc.rust
+        .as_ref()
+        .and_then(|section| section.runtime.as_ref())
+        .or(doc.runtime.as_ref())
+}
+
+fn config_log(doc: &AppConfigDoc) -> Option<&LogConfigSection> {
+    doc.rust
+        .as_ref()
+        .and_then(|section| section.log.as_ref())
+        .or(doc.log.as_ref())
+}
+
 fn load_adapter_configs(
     app_config: &AppConfigDoc,
 ) -> Result<Vec<AdapterConfig>, Box<dyn std::error::Error>> {
@@ -377,6 +424,26 @@ fn payload_preview(payload: &Value) -> String {
     }
 }
 
+fn reload_from_config(bot: &mut LiteyukiBot) -> tui::ReloadFuture<'_> {
+    Box::pin(async move {
+        let app_config = load_app_config();
+        let warnings = runtime_reload_warnings(&app_config);
+        let adapters = load_adapter_configs(&app_config)
+            .map_err(|err| format!("failed to load adapter configs: {err}"))?;
+        let autostart = !adapters.is_empty();
+        bot.reload_adapters(adapters.clone(), autostart)
+            .await
+            .map_err(|err| format!("failed to apply adapter reload: {err}"))?;
+        let tui_config = resolve_tui_config(&app_config);
+        Ok(tui::ReloadResult {
+            adapters,
+            adapter_autostart: autostart,
+            tui_config,
+            warnings,
+        })
+    })
+}
+
 fn sanitize_adapter_configs(configs: Vec<AdapterConfig>, source: &str) -> Vec<AdapterConfig> {
     let mut sanitized = Vec::new();
     let mut seen = HashSet::new();
@@ -432,6 +499,36 @@ fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
         }
     }
 
+    warnings.extend(runtime_reload_warnings(doc));
+
+    warnings
+}
+
+fn runtime_reload_warnings(doc: &AppConfigDoc) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if let Some(runtime) = config_runtime(doc)
+        && (runtime.worker_count.is_some()
+            || runtime.ingress_queue.is_some()
+            || runtime.worker_queue.is_some())
+    {
+        warnings.push(
+            "runtime.worker_count/ingress_queue/worker_queue are low-level parameters; /reload will not hot-apply them. Restart is recommended, hot switching may cause unpredictable behavior.".to_string(),
+        );
+    }
+
+    if let Some(log) = config_log(doc)
+        && (log.mode.is_some()
+            || log.level.is_some()
+            || log.timezone.is_some()
+            || log.timestamp_format.is_some()
+            || log.timestamp_pattern.is_some())
+    {
+        warnings.push(
+            "log mode/level/timestamp parameters are loaded at startup and may not be fully applied by /reload. Restart is recommended for deterministic behavior.".to_string(),
+        );
+    }
+
     warnings
 }
 
@@ -474,6 +571,8 @@ mod tests {
 
         let doc = AppConfigDoc {
             rust: Some(AppRustSection {
+                runtime: None,
+                log: None,
                 adapters: Some(vec![duplicate, invalid]),
                 tui: Some(TuiConfigSection {
                     resume: Some(TuiResumeSection {
@@ -483,6 +582,8 @@ mod tests {
                     }),
                 }),
             }),
+            runtime: None,
+            log: None,
             adapters: None,
             tui: None,
         };
@@ -493,5 +594,32 @@ mod tests {
         assert!(warnings.iter().any(|w| w.contains("store_path")));
         assert!(warnings.iter().any(|w| w.contains("max_sessions")));
         assert!(warnings.iter().any(|w| w.contains("max_size_mib")));
+    }
+
+    #[test]
+    fn runtime_reload_warnings_detect_low_level_runtime_fields() {
+        let doc = AppConfigDoc {
+            rust: Some(AppRustSection {
+                runtime: Some(RuntimeConfigSection {
+                    worker_count: Some(8),
+                    ingress_queue: None,
+                    worker_queue: None,
+                }),
+                log: None,
+                adapters: None,
+                tui: None,
+            }),
+            runtime: None,
+            log: None,
+            adapters: None,
+            tui: None,
+        };
+
+        let warnings = runtime_reload_warnings(&doc);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("hot switching may cause unpredictable behavior"))
+        );
     }
 }

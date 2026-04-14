@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use chrono::Local;
@@ -26,8 +28,9 @@ const RESUME_FLUSH_INTERVAL: Duration = Duration::from_millis(800);
 const DEFAULT_LOG_VIEW_ROWS: usize = 12;
 const DEFAULT_RESUME_MAX_SESSIONS: usize = 64;
 const DEFAULT_RESUME_MAX_SIZE_MIB: u64 = 16;
-const TUI_COMMANDS: [&str; 9] = [
+const TUI_COMMANDS: [&str; 10] = [
     "/help",
+    "/reload",
     "/log",
     "/clear",
     "/adapters",
@@ -72,6 +75,12 @@ enum UiViewMode {
     LogConsole,
 }
 
+enum CommandOutcome {
+    None,
+    Quit,
+    Reload,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CompletionMode {
     Command,
@@ -92,6 +101,17 @@ pub struct TuiConfig {
     pub resume_max_sessions: usize,
     pub resume_max_size_mib: u64,
 }
+
+#[derive(Debug, Clone)]
+pub struct ReloadResult {
+    pub adapters: Vec<AdapterConfig>,
+    pub adapter_autostart: bool,
+    pub tui_config: TuiConfig,
+    pub warnings: Vec<String>,
+}
+
+pub type ReloadFuture<'a> = Pin<Box<dyn Future<Output = Result<ReloadResult, String>> + 'a>>;
+pub type ReloadHandler = for<'a> fn(&'a mut LiteyukiBot) -> ReloadFuture<'a>;
 
 impl Default for TuiConfig {
     fn default() -> Self {
@@ -299,6 +319,40 @@ impl AppState {
 
     fn active_resume_uid(&self) -> &str {
         &self.active_resume_uid
+    }
+
+    fn apply_reload_result(&mut self, result: ReloadResult) {
+        self.adapters = result.adapters;
+        self.adapter_inbound_topics = self
+            .adapters
+            .iter()
+            .map(|adapter| adapter.route.inbound_topic.clone())
+            .collect();
+        self.adapter_running = self
+            .adapters
+            .iter()
+            .map(|adapter| (adapter.id.clone(), false))
+            .collect();
+
+        self.resume_store_path = result.tui_config.resume_store_path;
+        self.resume_max_sessions = result.tui_config.resume_max_sessions.max(1);
+        self.resume_max_size_bytes = mib_to_bytes(result.tui_config.resume_max_size_mib.max(1));
+        self.enforce_resume_limits();
+        self.resume_dirty = true;
+
+        self.push_log(
+            UiLevel::Info,
+            format!(
+                "reload applied: adapters={} autostart={} resume_max_sessions={} resume_max_size={} MiB",
+                self.adapters.len(),
+                result.adapter_autostart,
+                self.resume_max_sessions,
+                bytes_to_mib(self.resume_max_size_bytes),
+            ),
+        );
+        for warning in result.warnings {
+            self.push_log(UiLevel::Warn, format!("reload notice: {warning}"));
+        }
     }
 
     fn push_log(&mut self, level: UiLevel, message: impl Into<String>) {
@@ -707,19 +761,19 @@ impl AppState {
         Ok(())
     }
 
-    fn handle_console_command(&mut self, command: &str) -> bool {
+    fn handle_console_command(&mut self, command: &str) -> CommandOutcome {
         let cmd = command.trim();
         let mut parts = cmd.split_whitespace();
         let command_name = parts.next().unwrap_or_default();
         match command_name {
             "/quit" | "/exit" => {
                 self.push_log(UiLevel::Warn, "shutdown requested by console command");
-                true
+                CommandOutcome::Quit
             }
             "/help" => {
                 self.push_log(
                     UiLevel::Info,
-                    "commands: /help /log [on|off] /clear /adapters /resumes /history /resume <uid> /quit /exit",
+                    "commands: /help /reload /log [on|off] /clear /adapters /resumes /history /resume <uid> /quit /exit",
                 );
                 self.push_log(
                     UiLevel::Info,
@@ -733,7 +787,15 @@ impl AppState {
                     UiLevel::Info,
                     format!("active resume: {}", self.active_resume_uid),
                 );
-                false
+                CommandOutcome::None
+            }
+            "/reload" => {
+                if parts.next().is_some() {
+                    self.push_log(UiLevel::Warn, "usage: /reload");
+                    return CommandOutcome::None;
+                }
+                self.push_log(UiLevel::Info, "reload requested");
+                CommandOutcome::Reload
             }
             "/log" => {
                 let Some(mode_arg) = parts.next() else {
@@ -749,11 +811,11 @@ impl AppState {
                         "returned to dashboard view"
                     };
                     self.push_log(UiLevel::Info, label);
-                    return false;
+                    return CommandOutcome::None;
                 };
                 if parts.next().is_some() {
                     self.push_log(UiLevel::Warn, "usage: /log [on|off]");
-                    return false;
+                    return CommandOutcome::None;
                 }
                 match mode_arg {
                     "on" => {
@@ -771,18 +833,18 @@ impl AppState {
                         self.push_log(UiLevel::Warn, "usage: /log [on|off]");
                     }
                 }
-                false
+                CommandOutcome::None
             }
             "/clear" => {
                 self.logs.clear();
                 self.scroll_logs_bottom();
                 self.push_log(UiLevel::Info, "console cleared");
-                false
+                CommandOutcome::None
             }
             "/adapters" => {
                 if self.adapters.is_empty() {
                     self.push_log(UiLevel::Info, "no adapters configured");
-                    return false;
+                    return CommandOutcome::None;
                 }
                 let lines: Vec<String> = self
                     .adapters
@@ -807,11 +869,11 @@ impl AppState {
                 for line in lines {
                     self.push_log(UiLevel::Info, line);
                 }
-                false
+                CommandOutcome::None
             }
             "/resumes" | "/history" => {
                 self.show_resume_list();
-                false
+                CommandOutcome::None
             }
             "/resume" => {
                 let Some(uid) = parts.next() else {
@@ -822,20 +884,20 @@ impl AppState {
                             self.active_resume_uid
                         ),
                     );
-                    return false;
+                    return CommandOutcome::None;
                 };
                 if parts.next().is_some() {
                     self.push_log(UiLevel::Warn, "usage: /resume <uid>");
-                    return false;
+                    return CommandOutcome::None;
                 }
                 if let Err(err) = self.switch_resume(uid) {
                     self.push_log(UiLevel::Warn, err);
                 }
-                false
+                CommandOutcome::None
             }
             _ => {
                 self.push_log(UiLevel::Warn, format!("unknown command: {cmd}. try /help"));
-                false
+                CommandOutcome::None
             }
         }
     }
@@ -848,6 +910,7 @@ pub async fn run(
     adapter_configs: Vec<AdapterConfig>,
     adapter_autostart: bool,
     tui_config: TuiConfig,
+    reload_handler: ReloadHandler,
     ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = AppState::new(target, settings_desc, adapter_configs, tui_config);
@@ -872,7 +935,7 @@ pub async fn run(
     }
 
     let mut terminal = init_terminal()?;
-    let loop_result = run_tui_loop(&mut terminal, bot, &mut app, ui_rx).await;
+    let loop_result = run_tui_loop(&mut terminal, bot, &mut app, reload_handler, ui_rx).await;
 
     let _ = restore_terminal(&mut terminal);
     app.flush_resume_if_needed(true);
@@ -883,6 +946,7 @@ async fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     bot: &mut LiteyukiBot,
     app: &mut AppState,
+    reload_handler: ReloadHandler,
     ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut tick = tokio::time::interval(Duration::from_millis(120));
@@ -892,7 +956,27 @@ async fn run_tui_loop(
         tokio::select! {
             _ = tick.tick() => {
                 app.refresh_adapter_state(bot);
-                poll_key_events(&mut should_quit, app)?;
+                let submitted_commands = poll_key_events(&mut should_quit, app)?;
+                for command in submitted_commands {
+                    match app.handle_console_command(&command) {
+                        CommandOutcome::Quit => {
+                            should_quit = true;
+                        }
+                        CommandOutcome::Reload => {
+                            app.push_log(UiLevel::Info, "reloading config...");
+                            match reload_handler(bot).await {
+                                Ok(result) => {
+                                    app.apply_reload_result(result);
+                                    app.refresh_adapter_state(bot);
+                                }
+                                Err(err) => {
+                                    app.push_log(UiLevel::Warn, format!("reload failed: {err}"));
+                                }
+                            }
+                        }
+                        CommandOutcome::None => {}
+                    }
+                }
                 app.flush_resume_if_needed(false);
                 terminal.draw(|frame| draw_ui(frame, app))?;
             }
@@ -945,7 +1029,7 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &mut AppState) {
 
     let mid = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .constraints([Constraint::Percentage(24), Constraint::Percentage(76)])
         .split(root[1]);
 
     let adapter_items: Vec<ListItem<'_>> = if app.adapters.is_empty() {
@@ -985,7 +1069,7 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &mut AppState) {
     render_command_panel(frame, app, console[1]);
 
     let footer = Paragraph::new(Line::from(vec![
-        Span::raw("/help /log /clear /adapters /resumes /resume <uid> /quit"),
+        Span::raw("/help /reload /log /clear /adapters /resumes /resume <uid> /quit"),
         Span::raw("  |  "),
         Span::raw("Up/Down history, Tab cycle-complete, PgUp/PgDn/Home/End scroll"),
         Span::raw("  |  "),
@@ -1071,7 +1155,8 @@ fn render_command_panel(frame: &mut ratatui::Frame<'_>, app: &AppState, area: Re
 fn poll_key_events(
     should_quit: &mut bool,
     app: &mut AppState,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut submitted = Vec::new();
     while event::poll(Duration::from_millis(0))? {
         let CEvent::Key(key) = event::read()? else {
             continue;
@@ -1093,11 +1178,8 @@ fn poll_key_events(
                 let input = app.console_input.trim().to_string();
                 if !input.is_empty() {
                     app.push_log(UiLevel::Info, format!("> {}", input));
-                    let should_exit = app.handle_console_command(&input);
                     app.record_command(&input);
-                    if should_exit {
-                        *should_quit = true;
-                    }
+                    submitted.push(input);
                 }
                 app.console_input.clear();
                 app.reset_history_navigation();
@@ -1168,7 +1250,7 @@ fn poll_key_events(
             _ => {}
         }
     }
-    Ok(())
+    Ok(submitted)
 }
 
 fn init_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, Box<dyn std::error::Error>> {
@@ -1314,10 +1396,10 @@ mod tests {
         assert_eq!(app.console_input, "/help");
 
         app.autocomplete_console_input();
-        assert_eq!(app.console_input, "/log");
+        assert_eq!(app.console_input, "/reload");
 
         app.autocomplete_console_input();
-        assert_eq!(app.console_input, "/clear");
+        assert_eq!(app.console_input, "/log");
 
         remove_file_if_exists(&path);
     }
@@ -1459,6 +1541,32 @@ mod tests {
         assert!(!app.is_log_console_view());
         app.handle_console_command("/log on");
         assert!(app.is_log_console_view());
+
+        remove_file_if_exists(&path);
+    }
+
+    #[test]
+    fn reload_command_is_recognized() {
+        let path = temp_resume_path("reload-command");
+        remove_file_if_exists(&path);
+
+        let mut app = AppState::new(
+            RuntimeTarget::Cli,
+            "test".to_string(),
+            Vec::new(),
+            test_tui_config(path.clone()),
+        );
+
+        let outcome = app.handle_console_command("/reload");
+        assert!(matches!(outcome, CommandOutcome::Reload));
+
+        let outcome = app.handle_console_command("/reload now");
+        assert!(matches!(outcome, CommandOutcome::None));
+        assert!(
+            app.logs
+                .iter()
+                .any(|log| log.message.contains("usage: /reload"))
+        );
 
         remove_file_if_exists(&path);
     }

@@ -1,3 +1,3 @@
 mod app;
 
-pub use app::{TuiConfig, UiEvent, UiLevel, run};
+pub use app::{ReloadFuture, ReloadResult, TuiConfig, UiEvent, UiLevel, run};
