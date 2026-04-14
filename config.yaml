@@ -24,6 +24,8 @@ connect:
     host: 0.0.0.0
     port: 8080
     path: /ws
+    max_payload_size: 1048576
+    max_connections: 100
     # url: ws://127.0.0.1:3000/ws
     timeout_seconds: 30
     # optional split config; when set, forward/reverse can be enabled together
@@ -40,10 +42,14 @@ connect:
     host: 127.0.0.1
     port: 8081
     path: /
+    max_payload_size: 1048576
+    max_connections: 100
     timeout_seconds: 30
   sse:
     enabled: true
     host: 127.0.0.1
     port: 8082
     path: /sse
+    max_payload_size: 1048576
+    max_connections: 100
     timeout_seconds: 30

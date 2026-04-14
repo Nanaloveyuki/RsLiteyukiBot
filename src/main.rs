@@ -104,6 +104,10 @@ struct WebSocketConnectSection {
     #[serde(default)]
     queue_capacity: Option<usize>,
     #[serde(default)]
+    max_payload_size: Option<usize>,
+    #[serde(default)]
+    max_connections: Option<usize>,
+    #[serde(default)]
     inbound_topic: Option<String>,
     #[serde(default)]
     outbound_topic: Option<String>,
@@ -134,6 +138,10 @@ struct WebSocketEndpointSection {
     #[serde(default)]
     queue_capacity: Option<usize>,
     #[serde(default)]
+    max_payload_size: Option<usize>,
+    #[serde(default)]
+    max_connections: Option<usize>,
+    #[serde(default)]
     inbound_topic: Option<String>,
     #[serde(default)]
     outbound_topic: Option<String>,
@@ -160,6 +168,10 @@ struct HttpConnectSection {
     #[serde(default)]
     queue_capacity: Option<usize>,
     #[serde(default)]
+    max_payload_size: Option<usize>,
+    #[serde(default)]
+    max_connections: Option<usize>,
+    #[serde(default)]
     inbound_topic: Option<String>,
     #[serde(default)]
     outbound_topic: Option<String>,
@@ -185,6 +197,10 @@ struct SseConnectSection {
     timeout_seconds: Option<u64>,
     #[serde(default)]
     queue_capacity: Option<usize>,
+    #[serde(default)]
+    max_payload_size: Option<usize>,
+    #[serde(default)]
+    max_connections: Option<usize>,
     #[serde(default)]
     inbound_topic: Option<String>,
     #[serde(default)]
@@ -416,18 +432,24 @@ connect:
     path: /ws
     # forward mode can use url directly
     # url: ws://127.0.0.1:3000/ws
+    max_payload_size: 1048576
+    max_connections: 100
     timeout_seconds: 30
   tcp-http:
     enabled: true
     host: 127.0.0.1
     port: 8081
     path: /
+    max_payload_size: 1048576
+    max_connections: 100
     timeout_seconds: 30
   sse:
     enabled: true
     host: 127.0.0.1
     port: 8082
     path: /sse
+    max_payload_size: 1048576
+    max_connections: 100
     timeout_seconds: 30
 "#;
 
@@ -457,6 +479,8 @@ mode = "reverse" # forward | reverse | both
 host = "0.0.0.0"
 port = 8080
 path = "/ws"
+max_payload_size = 1048576
+max_connections = 100
 timeout_seconds = 30
 
 [connect.tcp-http]
@@ -464,6 +488,8 @@ enabled = true
 host = "127.0.0.1"
 port = 8081
 path = "/"
+max_payload_size = 1048576
+max_connections = 100
 timeout_seconds = 30
 
 [connect.sse]
@@ -471,6 +497,8 @@ enabled = true
 host = "127.0.0.1"
 port = 8082
 path = "/sse"
+max_payload_size = 1048576
+max_connections = 100
 timeout_seconds = 30
 "#;
 
@@ -717,6 +745,8 @@ fn websocket_endpoint_to_adapter(
             .queue_capacity
             .or(fallback.queue_capacity)
             .unwrap_or(256),
+        max_payload_size: endpoint.max_payload_size.or(fallback.max_payload_size),
+        max_connections: endpoint.max_connections.or(fallback.max_connections),
     })
 }
 
@@ -735,6 +765,8 @@ fn websocket_root_to_adapter(
         token: ws.token.clone(),
         timeout_seconds: ws.timeout_seconds,
         queue_capacity: ws.queue_capacity,
+        max_payload_size: ws.max_payload_size,
+        max_connections: ws.max_connections,
         inbound_topic: ws.inbound_topic.clone(),
         outbound_topic: ws.outbound_topic.clone(),
     };
@@ -773,6 +805,8 @@ fn http_to_adapter(id: &str, section: &HttpConnectSection) -> AdapterConfig {
                 .unwrap_or_else(|| "adapter.outbound".to_string()),
         },
         queue_capacity: section.queue_capacity.unwrap_or(256),
+        max_payload_size: section.max_payload_size,
+        max_connections: section.max_connections,
     }
 }
 
@@ -808,6 +842,8 @@ fn sse_to_adapter(id: &str, section: &SseConnectSection) -> AdapterConfig {
                 .unwrap_or_else(|| "adapter.outbound".to_string()),
         },
         queue_capacity: section.queue_capacity.unwrap_or(256),
+        max_payload_size: section.max_payload_size,
+        max_connections: section.max_connections,
     }
 }
 
@@ -914,6 +950,12 @@ fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
 
     if let Some(connect) = config_connect(doc) {
         if let Some(ws) = &connect.websocket {
+            if ws.max_payload_size.is_some_and(|value| value == 0) {
+                warnings.push("connect.websocket.max_payload_size should be > 0".to_string());
+            }
+            if ws.max_connections.is_some_and(|value| value == 0) {
+                warnings.push("connect.websocket.max_connections should be > 0".to_string());
+            }
             if ws.enabled.unwrap_or(false) {
                 let has_nested = ws.forward.is_some() || ws.reverse.is_some();
                 if !has_nested && ws.url.is_none() && ws.port.is_none() {
@@ -932,6 +974,18 @@ fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
                         .to_string(),
                 );
             }
+            if let Some(forward) = &ws.forward
+                && forward.max_payload_size.is_some_and(|value| value == 0)
+            {
+                warnings
+                    .push("connect.websocket.forward.max_payload_size should be > 0".to_string());
+            }
+            if let Some(forward) = &ws.forward
+                && forward.max_connections.is_some_and(|value| value == 0)
+            {
+                warnings
+                    .push("connect.websocket.forward.max_connections should be > 0".to_string());
+            }
             if let Some(reverse) = &ws.reverse
                 && reverse.enabled.unwrap_or(false)
                 && reverse.url.is_none()
@@ -939,6 +993,36 @@ fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
             {
                 warnings
                     .push("connect.websocket.reverse enabled but url/port is missing".to_string());
+            }
+            if let Some(reverse) = &ws.reverse
+                && reverse.max_payload_size.is_some_and(|value| value == 0)
+            {
+                warnings
+                    .push("connect.websocket.reverse.max_payload_size should be > 0".to_string());
+            }
+            if let Some(reverse) = &ws.reverse
+                && reverse.max_connections.is_some_and(|value| value == 0)
+            {
+                warnings
+                    .push("connect.websocket.reverse.max_connections should be > 0".to_string());
+            }
+        }
+
+        if let Some(http) = &connect.tcp_http {
+            if http.max_payload_size.is_some_and(|value| value == 0) {
+                warnings.push("connect.tcp-http.max_payload_size should be > 0".to_string());
+            }
+            if http.max_connections.is_some_and(|value| value == 0) {
+                warnings.push("connect.tcp-http.max_connections should be > 0".to_string());
+            }
+        }
+
+        if let Some(sse) = &connect.sse {
+            if sse.max_payload_size.is_some_and(|value| value == 0) {
+                warnings.push("connect.sse.max_payload_size should be > 0".to_string());
+            }
+            if sse.max_connections.is_some_and(|value| value == 0) {
+                warnings.push("connect.sse.max_connections should be > 0".to_string());
             }
         }
     }
@@ -1088,6 +1172,8 @@ mod tests {
                     token: None,
                     timeout_seconds: Some(30),
                     queue_capacity: Some(256),
+                    max_payload_size: Some(1024 * 1024),
+                    max_connections: Some(100),
                     inbound_topic: None,
                     outbound_topic: None,
                     forward: None,
@@ -1131,6 +1217,8 @@ mod tests {
                     token: None,
                     timeout_seconds: Some(30),
                     queue_capacity: None,
+                    max_payload_size: Some(1024 * 1024),
+                    max_connections: Some(100),
                     inbound_topic: None,
                     outbound_topic: None,
                     forward: None,
@@ -1145,5 +1233,7 @@ mod tests {
         let adapters = load_adapter_configs(&doc).expect("connect adapters should parse");
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].id, "connect-ws-reverse");
+        assert_eq!(adapters[0].max_payload_size, Some(1024 * 1024));
+        assert_eq!(adapters[0].max_connections, Some(100));
     }
 }

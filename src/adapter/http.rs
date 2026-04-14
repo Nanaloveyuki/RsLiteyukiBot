@@ -29,6 +29,7 @@ impl HttpTransportClient {
         method: HttpMethod,
         endpoint: &AdapterEndpoint,
         body: Option<&T>,
+        max_payload_size: Option<usize>,
     ) -> Result<Value, AdapterError> {
         let mut request = self
             .client
@@ -44,7 +45,13 @@ impl HttpTransportClient {
         }
 
         if let Some(payload) = body {
-            request = request.json(payload);
+            let payload = serde_json::to_vec(payload).map_err(|err| {
+                AdapterError::Serialize(format!("failed to encode request json: {}", err))
+            })?;
+            enforce_payload_limit(payload.len(), max_payload_size, "http request")?;
+            request = request
+                .header("content-type", "application/json")
+                .body(payload);
         }
 
         let response = request
@@ -61,9 +68,11 @@ impl HttpTransportClient {
             )));
         }
 
-        response
-            .json::<Value>()
-            .await
+        let bytes = response.bytes().await.map_err(|err| {
+            AdapterError::Http(format!("failed to read http response body: {}", err))
+        })?;
+        enforce_payload_limit(bytes.len(), max_payload_size, "http response")?;
+        serde_json::from_slice::<Value>(&bytes)
             .map_err(|err| AdapterError::Serialize(format!("failed to decode json: {}", err)))
     }
 
@@ -71,7 +80,25 @@ impl HttpTransportClient {
         &self,
         endpoint: &AdapterEndpoint,
         packet: &AdapterPacket,
+        max_payload_size: Option<usize>,
     ) -> Result<Value, AdapterError> {
-        self.request_json(HttpMethod::POST, endpoint, Some(packet)).await
+        self.request_json(HttpMethod::POST, endpoint, Some(packet), max_payload_size)
+            .await
     }
+}
+
+fn enforce_payload_limit(
+    payload_len: usize,
+    max_payload_size: Option<usize>,
+    direction: &str,
+) -> Result<(), AdapterError> {
+    if let Some(limit) = max_payload_size
+        && payload_len > limit
+    {
+        return Err(AdapterError::Http(format!(
+            "{} payload exceeded limit: {} > {} bytes",
+            direction, payload_len, limit
+        )));
+    }
+    Ok(())
 }

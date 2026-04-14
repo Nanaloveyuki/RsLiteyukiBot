@@ -124,8 +124,12 @@ impl SseTransportClient {
         &self,
         endpoint: &AdapterEndpoint,
         channel_size: usize,
+        max_payload_size: Option<usize>,
     ) -> Result<mpsc::Receiver<SseEvent>, AdapterError> {
-        let mut request = self.client.get(endpoint.url.clone()).timeout(endpoint.timeout());
+        let mut request = self
+            .client
+            .get(endpoint.url.clone())
+            .timeout(endpoint.timeout());
         for (key, value) in &endpoint.headers {
             request = request.header(key, value);
         }
@@ -152,8 +156,14 @@ impl SseTransportClient {
                 let Ok(chunk) = next else {
                     break;
                 };
+                if exceeds_limit(chunk.len(), max_payload_size) {
+                    break;
+                }
                 let text = String::from_utf8_lossy(&chunk);
                 for event in parser.push_chunk(&text) {
+                    if exceeds_limit(event.data.len(), max_payload_size) {
+                        continue;
+                    }
                     if tx.send(event).await.is_err() {
                         return;
                     }
@@ -163,6 +173,10 @@ impl SseTransportClient {
 
         Ok(rx)
     }
+}
+
+fn exceeds_limit(payload_len: usize, max_payload_size: Option<usize>) -> bool {
+    max_payload_size.is_some_and(|limit| payload_len > limit)
 }
 
 fn find_separator(input: &str) -> Option<(usize, usize)> {

@@ -51,9 +51,9 @@ Top-level schema:
 - `log.timestamp_format`
 - `log.timestamp_pattern`
 - `adapters[]` (可同时配置多个：`http` / `sse` / `web_socket_forward` / `web_socket_reverse`，并兼容 `websocket_forward` / `websocket_reverse`)
-- `connect.websocket` (`mode: forward/reverse/both`，支持 `url` 或 `host+port+path`，支持 `forward`/`reverse` 分块同时启用)
-- `connect.tcp-http`
-- `connect.sse`
+- `connect.websocket` (`mode: forward/reverse/both`，支持 `url` 或 `host+port+path`，支持 `forward`/`reverse` 分块同时启用，支持 `max_payload_size`、`max_connections`)
+- `connect.tcp-http`（支持 `max_payload_size`、`max_connections`）
+- `connect.sse`（支持 `max_payload_size`）
 - `tui.resume.store_path`
 - `tui.resume.max_sessions`
 - `tui.resume.max_size_mib`

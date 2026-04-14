@@ -52,6 +52,8 @@ fn adapter_config_validate_checks_required_fields() {
         },
         route: AdapterRoute::default(),
         queue_capacity: 16,
+        max_payload_size: None,
+        max_connections: None,
     };
     assert!(valid.validate().is_ok());
 
@@ -77,10 +79,13 @@ fn adapter_manager_register_and_get() {
         },
         route: AdapterRoute::default(),
         queue_capacity: 32,
+        max_payload_size: None,
+        max_connections: None,
     };
-    manager.register(config.clone()).expect("register should succeed");
+    manager
+        .register(config.clone())
+        .expect("register should succeed");
     let got = manager.get("ws-forward-1").expect("config should exist");
     assert_eq!(got.id, config.id);
     assert_eq!(got.transport, AdapterTransport::WebSocketForward);
 }
-

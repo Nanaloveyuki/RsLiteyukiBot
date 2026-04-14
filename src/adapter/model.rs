@@ -58,6 +58,10 @@ pub struct AdapterConfig {
     pub route: AdapterRoute,
     #[serde(default = "default_queue_capacity")]
     pub queue_capacity: usize,
+    #[serde(default)]
+    pub max_payload_size: Option<usize>,
+    #[serde(default)]
+    pub max_connections: Option<usize>,
 }
 
 impl AdapterConfig {
@@ -71,6 +75,18 @@ impl AdapterConfig {
         if self.queue_capacity == 0 {
             return Err(format!(
                 "adapter '{}' queue_capacity must be greater than zero",
+                self.id
+            ));
+        }
+        if self.max_payload_size.is_some_and(|value| value == 0) {
+            return Err(format!(
+                "adapter '{}' max_payload_size must be greater than zero",
+                self.id
+            ));
+        }
+        if self.max_connections.is_some_and(|value| value == 0) {
+            return Err(format!(
+                "adapter '{}' max_connections must be greater than zero",
                 self.id
             ));
         }
@@ -92,6 +108,8 @@ impl Default for AdapterConfig {
             },
             route: AdapterRoute::default(),
             queue_capacity: default_queue_capacity(),
+            max_payload_size: None,
+            max_connections: None,
         }
     }
 }
@@ -125,5 +143,16 @@ mod tests {
         let reverse: AdapterTransport =
             serde_json::from_str("\"websocket_reverse\"").expect("reverse alias should parse");
         assert_eq!(reverse, AdapterTransport::WebSocketReverse);
+    }
+
+    #[test]
+    fn adapter_config_validate_rejects_zero_limits() {
+        let mut config = AdapterConfig::default();
+        config.max_payload_size = Some(0);
+        assert!(config.validate().is_err());
+
+        config.max_payload_size = Some(1024);
+        config.max_connections = Some(0);
+        assert!(config.validate().is_err());
     }
 }

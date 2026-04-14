@@ -3,7 +3,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::{Value, json};
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinHandle;
 
 use crate::observability::Logger;
@@ -62,6 +62,7 @@ impl RunningAdapter {
 pub struct AdapterManager {
     configs: Arc<RwLock<HashMap<String, AdapterConfig>>>,
     running: Arc<Mutex<HashMap<String, RunningAdapter>>>,
+    http_limiters: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     http_client: HttpTransportClient,
     sse_client: SseTransportClient,
     logger: Option<Logger>,
@@ -72,6 +73,7 @@ impl Default for AdapterManager {
         Self {
             configs: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(Mutex::new(HashMap::new())),
+            http_limiters: Arc::new(Mutex::new(HashMap::new())),
             http_client: HttpTransportClient::default(),
             sse_client: SseTransportClient::default(),
             logger: None,
@@ -119,6 +121,16 @@ impl AdapterManager {
         Ok(())
     }
 
+    fn http_limiter(&self, id: &str, max_connections: usize) -> Arc<Semaphore> {
+        let mut lock = self
+            .http_limiters
+            .lock()
+            .expect("adapter http limiter lock should not be poisoned");
+        lock.entry(id.to_string())
+            .or_insert_with(|| Arc::new(Semaphore::new(max_connections.max(1))))
+            .clone()
+    }
+
     pub fn replace_configs<I>(&self, configs: I) -> Result<(), AdapterError>
     where
         I: IntoIterator<Item = AdapterConfig>,
@@ -150,6 +162,12 @@ impl AdapterManager {
                 format!("adapter configs replaced, total={}", lock.len()),
             );
         }
+
+        let mut limiter_lock = self
+            .http_limiters
+            .lock()
+            .expect("adapter http limiter lock should not be poisoned");
+        limiter_lock.retain(|id, _| lock.contains_key(id));
         Ok(())
     }
 
@@ -198,21 +216,34 @@ impl AdapterManager {
 
         let running = match config.transport {
             AdapterTransport::WebSocketForward => {
-                let handle =
-                    start_forward_adapter(config.endpoint.clone(), config.queue_capacity, sink)
-                        .await?;
+                let handle = start_forward_adapter(
+                    config.endpoint.clone(),
+                    config.queue_capacity,
+                    config.max_payload_size,
+                    sink,
+                )
+                .await?;
                 RunningAdapter::WebSocket(handle)
             }
             AdapterTransport::WebSocketReverse => {
-                let handle =
-                    start_reverse_adapter(config.endpoint.clone(), config.queue_capacity, sink)
-                        .await?;
+                let handle = start_reverse_adapter(
+                    config.endpoint.clone(),
+                    config.queue_capacity,
+                    config.max_payload_size,
+                    config.max_connections,
+                    sink,
+                )
+                .await?;
                 RunningAdapter::WebSocket(handle)
             }
             AdapterTransport::Sse => {
                 let mut rx = self
                     .sse_client
-                    .open_stream(&config.endpoint, config.queue_capacity)
+                    .open_stream(
+                        &config.endpoint,
+                        config.queue_capacity,
+                        config.max_payload_size,
+                    )
                     .await?;
                 let inbound_topic = config.route.inbound_topic.clone();
                 let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -310,8 +341,23 @@ impl AdapterManager {
             .ok_or_else(|| AdapterError::Config(format!("adapter '{}' not found", id)))?;
 
         if matches!(config.transport, AdapterTransport::Http) {
+            let _permit = if let Some(max_connections) = config.max_connections {
+                Some(
+                    self.http_limiter(id, max_connections)
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| {
+                            AdapterError::Http(format!(
+                                "http adapter '{}' limiter is closed unexpectedly",
+                                id
+                            ))
+                        })?,
+                )
+            } else {
+                None
+            };
             self.http_client
-                .post_packet(&config.endpoint, &packet)
+                .post_packet(&config.endpoint, &packet, config.max_payload_size)
                 .await?;
             return Ok(());
         }
@@ -345,8 +391,23 @@ impl AdapterManager {
                 id
             )));
         }
+        let _permit = if let Some(max_connections) = config.max_connections {
+            Some(
+                self.http_limiter(id, max_connections)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| {
+                        AdapterError::Http(format!(
+                            "http adapter '{}' limiter is closed unexpectedly",
+                            id
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
         self.http_client
-            .request_json(method, &config.endpoint, body)
+            .request_json(method, &config.endpoint, body, config.max_payload_size)
             .await
     }
 }
