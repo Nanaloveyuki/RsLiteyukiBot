@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use liteyukibot_core::{
-    ChannelRegistry, LifecycleContext, Plugin, PluginContext, PluginManager, PluginMetadata,
-    PluginSdk, PluginType, RuntimeTarget, SessionRouter, SharedStore, PluginHostBridge,
-    PluginLoadState, PluginRuntimeKind, PluginAbiMethod,
+    ChannelRegistry, LifecycleContext, Plugin, PluginAbiMethod, PluginContext, PluginHostBridge,
+    PluginLoadState, PluginManager, PluginMetadata, PluginRuntimeKind, PluginSdk, PluginType,
+    RuntimeTarget, SessionRouter, SharedStore,
 };
 use liteyukibot_core::{Logger, LoggerConfig};
 use liteyukibot_core::{RuntimeCapabilities, RuntimeFlavor};
@@ -36,10 +36,7 @@ impl Plugin for CountingPlugin {
         }
     }
 
-    fn on_load(
-        &self,
-        _context: PluginContext,
-    ) -> liteyukibot_core::PluginFuture {
+    fn on_load(&self, _context: PluginContext) -> liteyukibot_core::PluginFuture {
         let loaded = Arc::clone(&self.loaded);
         Box::pin(async move {
             loaded.fetch_add(1, Ordering::SeqCst);
@@ -106,9 +103,15 @@ async fn plugin_manager_register_and_load_plugin() {
     assert_eq!(loaded.load(Ordering::SeqCst), 1);
     let loaded_plugins = manager.loaded_plugins();
     assert_eq!(loaded_plugins.len(), 1);
-    assert_eq!(loaded_plugins[0].load_plan.runtime_kind, PluginRuntimeKind::Native);
+    assert_eq!(
+        loaded_plugins[0].load_plan.runtime_kind,
+        PluginRuntimeKind::Native
+    );
     assert_eq!(loaded_plugins[0].load_plan.state, PluginLoadState::Deferred);
-    assert_eq!(loaded_plugins[0].load_plan.contract.abi_name, "liteyuki-native");
+    assert_eq!(
+        loaded_plugins[0].load_plan.contract.abi_name,
+        "liteyuki-native"
+    );
     assert!(
         loaded_plugins[0]
             .load_plan
@@ -196,11 +199,16 @@ struct TempDir {
 
 impl TempDir {
     fn create() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("liteyuki-rs-plugin-test-{nanos}"));
+        let unique = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "liteyuki-rs-plugin-test-{nanos}-{}-{unique}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&path).expect("temp dir should be created");
         Self { path }
     }
