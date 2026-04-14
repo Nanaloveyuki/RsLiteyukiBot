@@ -533,26 +533,26 @@ impl LiteyukiBot {
             first_error = Some(err.into());
         }
 
-        if let Err(err) = self.adapter_manager.shutdown_all().await {
-            if first_error.is_none() {
-                first_error = Some(err.into());
-            }
+        if let Err(err) = self.adapter_manager.shutdown_all().await
+            && first_error.is_none()
+        {
+            first_error = Some(err.into());
         }
 
-        if let Err(err) = self.process_manager.terminate_all().await {
-            if first_error.is_none() {
-                first_error = Some(err.into());
-            }
+        if let Err(err) = self.process_manager.terminate_all().await
+            && first_error.is_none()
+        {
+            first_error = Some(err.into());
         }
 
         if let Some(handle) = self.runtime_handle.take() {
             handle.shutdown().await;
         }
 
-        if let Err(err) = self.lifespan.after_shutdown(self.lifecycle.clone()).await {
-            if first_error.is_none() {
-                first_error = Some(err.into());
-            }
+        if let Err(err) = self.lifespan.after_shutdown(self.lifecycle.clone()).await
+            && first_error.is_none()
+        {
+            first_error = Some(err.into());
         }
 
         self.logger.info_in(MODULE_BOT, "bot shutdown complete");

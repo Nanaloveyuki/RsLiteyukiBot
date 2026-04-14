@@ -261,17 +261,9 @@ impl ConfigManager {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RuntimeSettings {
     pub runtime_config: BotRuntimeConfig,
-}
-
-impl Default for RuntimeSettings {
-    fn default() -> Self {
-        Self {
-            runtime_config: BotRuntimeConfig::default(),
-        }
-    }
 }
 
 impl RuntimeSettings {
@@ -367,22 +359,22 @@ fn resolve_non_zero_usize(manager: &ConfigManager, setting: &ConfigSetting<usize
 fn logger_config_from_manager(manager: &ConfigManager) -> LoggerConfig {
     let mut logger = LoggerConfig::default();
 
-    if let Some(raw) = manager.get("LY_LOG_MODE") {
-        if let Some(mode) = LogMode::parse(raw) {
-            logger.mode = mode;
-        }
+    if let Some(raw) = manager.get("LY_LOG_MODE")
+        && let Some(mode) = LogMode::parse(raw)
+    {
+        logger.mode = mode;
     }
 
-    if let Some(raw) = manager.get("LY_LOG_LEVEL") {
-        if let Some(level) = LogLevel::parse(raw) {
-            logger.min_level = level;
-        }
+    if let Some(raw) = manager.get("LY_LOG_LEVEL")
+        && let Some(level) = LogLevel::parse(raw)
+    {
+        logger.min_level = level;
     }
 
-    if let Some(raw) = manager.get("LY_LOG_TZ") {
-        if let Some(tz) = TimeZone::parse(raw) {
-            logger.timezone = tz;
-        }
+    if let Some(raw) = manager.get("LY_LOG_TZ")
+        && let Some(tz) = TimeZone::parse(raw)
+    {
+        logger.timezone = tz;
     }
 
     if let Some(raw) = manager.get("LY_LOG_TS_FORMAT") {

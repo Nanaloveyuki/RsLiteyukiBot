@@ -1,7 +1,8 @@
 use super::{BotRuntimeConfig, RuntimeCapabilities, RuntimeFlavor};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuntimeTarget {
+    #[default]
     Cli,
     Web,
     Tauri2,
@@ -95,12 +96,6 @@ impl RuntimeTarget {
         }
 
         config
-    }
-}
-
-impl Default for RuntimeTarget {
-    fn default() -> Self {
-        Self::Cli
     }
 }
 

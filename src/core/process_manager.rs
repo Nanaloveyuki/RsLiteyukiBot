@@ -95,9 +95,10 @@ impl ProcessManager {
     }
 
     pub fn with_logger(logger: Logger) -> Self {
-        let mut manager = Self::default();
-        manager.logger = Some(logger);
-        manager
+        Self {
+            logger: Some(logger),
+            ..Self::default()
+        }
     }
 
     pub fn set_logger(&mut self, logger: Logger) {
@@ -182,10 +183,10 @@ impl ProcessManager {
             .collect();
 
         for name in names {
-            if let Err(err) = self.start(&name) {
-                if !matches!(err, ProcessManagerError::AlreadyRunning(_)) {
-                    return Err(err);
-                }
+            if let Err(err) = self.start(&name)
+                && !matches!(err, ProcessManagerError::AlreadyRunning(_))
+            {
+                return Err(err);
             }
         }
         Ok(())
@@ -208,15 +209,16 @@ impl ProcessManager {
     }
 
     pub async fn terminate(&self, name: &str) -> Result<(), ProcessManagerError> {
-        let mut running = self
-            .running
-            .lock()
-            .expect("process running lock should not be poisoned");
-        prune_finished(&mut running);
-        let process = running
-            .remove(name)
-            .ok_or_else(|| ProcessManagerError::NotRunning(name.to_string()))?;
-        drop(running);
+        let process = {
+            let mut running = self
+                .running
+                .lock()
+                .expect("process running lock should not be poisoned");
+            prune_finished(&mut running);
+            running
+                .remove(name)
+                .ok_or_else(|| ProcessManagerError::NotRunning(name.to_string()))?
+        };
 
         process
             .command_tx
@@ -276,57 +278,51 @@ async fn supervise_process(
             );
         }
 
-        let pending_restart;
-        loop {
-            tokio::select! {
-                command = command_rx.recv() => {
-                    match command {
-                        Some(SupervisorCommand::Restart) => {
-                            pending_restart = true;
-                            if let Some(logger) = &logger {
-                                logger.warn_in(MODULE_PROCESS_MANAGER, format!("process '{}' restarting by command", name));
-                            }
-                            let _ = shutdown_tx.send(true);
-                            shutdown_worker(&mut worker, registration.spec.shutdown_timeout, &logger, name.as_ref()).await;
-                            break;
+        let pending_restart = tokio::select! {
+            command = command_rx.recv() => {
+                match command {
+                    Some(SupervisorCommand::Restart) => {
+                        if let Some(logger) = &logger {
+                            logger.warn_in(MODULE_PROCESS_MANAGER, format!("process '{}' restarting by command", name));
                         }
-                        Some(SupervisorCommand::Shutdown) | None => {
-                            if let Some(logger) = &logger {
-                                logger.info_in(MODULE_PROCESS_MANAGER, format!("process '{}' shutdown requested", name));
-                            }
-                            let _ = shutdown_tx.send(true);
-                            shutdown_worker(&mut worker, registration.spec.shutdown_timeout, &logger, name.as_ref()).await;
-                            return;
+                        let _ = shutdown_tx.send(true);
+                        shutdown_worker(&mut worker, registration.spec.shutdown_timeout, &logger, name.as_ref()).await;
+                        true
+                    }
+                    Some(SupervisorCommand::Shutdown) | None => {
+                        if let Some(logger) = &logger {
+                            logger.info_in(MODULE_PROCESS_MANAGER, format!("process '{}' shutdown requested", name));
                         }
+                        let _ = shutdown_tx.send(true);
+                        shutdown_worker(&mut worker, registration.spec.shutdown_timeout, &logger, name.as_ref()).await;
+                        return;
                     }
                 }
-                worker_result = &mut worker => {
-                    let failed = match worker_result {
-                        Ok(Ok(())) => false,
-                        Ok(Err(reason)) => {
-                            if let Some(logger) = &logger {
-                                logger.warn_in(MODULE_PROCESS_MANAGER, format!("process '{}' failed: {}", name, reason));
-                            }
-                            true
+            }
+            worker_result = &mut worker => {
+                let failed = match worker_result {
+                    Ok(Ok(())) => false,
+                    Ok(Err(reason)) => {
+                        if let Some(logger) = &logger {
+                            logger.warn_in(MODULE_PROCESS_MANAGER, format!("process '{}' failed: {}", name, reason));
                         }
-                        Err(err) => {
-                            if let Some(logger) = &logger {
-                                logger.warn_in(MODULE_PROCESS_MANAGER, format!("process '{}' join error: {}", name, err));
-                            }
-                            true
+                        true
+                    }
+                    Err(err) => {
+                        if let Some(logger) = &logger {
+                            logger.warn_in(MODULE_PROCESS_MANAGER, format!("process '{}' join error: {}", name, err));
                         }
-                    };
+                        true
+                    }
+                };
 
-                    pending_restart = match registration.spec.restart_policy {
-                        RestartPolicy::Never => false,
-                        RestartPolicy::OnFailure => failed,
-                        RestartPolicy::Always => true,
-                    };
-
-                    break;
+                match registration.spec.restart_policy {
+                    RestartPolicy::Never => false,
+                    RestartPolicy::OnFailure => failed,
+                    RestartPolicy::Always => true,
                 }
             }
-        }
+        };
 
         if !pending_restart {
             if let Some(logger) = &logger {

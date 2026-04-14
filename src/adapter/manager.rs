@@ -85,9 +85,10 @@ impl AdapterManager {
     }
 
     pub fn with_logger(logger: Logger) -> Self {
-        let mut manager = Self::default();
-        manager.logger = Some(logger);
-        manager
+        Self {
+            logger: Some(logger),
+            ..Self::default()
+        }
     }
 
     pub fn set_logger(&mut self, logger: Logger) {
@@ -321,4 +322,3 @@ where
 {
     Arc::new(move |packet| Box::pin(handler(packet)))
 }
-

@@ -26,9 +26,10 @@ impl SessionRouter {
     }
 
     pub fn with_logger(logger: Logger) -> Self {
-        let mut router = Self::default();
-        router.logger = Some(logger);
-        router
+        Self {
+            logger: Some(logger),
+            ..Self::default()
+        }
     }
 
     pub fn set_logger(&mut self, logger: Logger) {
@@ -127,4 +128,3 @@ impl SessionRouter {
         report
     }
 }
-

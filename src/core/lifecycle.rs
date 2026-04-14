@@ -344,9 +344,10 @@ impl Lifespan {
     }
 
     pub fn with_logger(logger: Logger) -> Self {
-        let mut lifespan = Self::default();
-        lifespan.logger = Some(logger);
-        lifespan
+        Self {
+            logger: Some(logger),
+            ..Self::default()
+        }
     }
 
     pub fn set_logger(&mut self, logger: Logger) {

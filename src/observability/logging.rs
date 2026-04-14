@@ -152,22 +152,22 @@ impl LoggerConfig {
     pub fn from_env() -> Self {
         let mut config = Self::default();
 
-        if let Ok(value) = env::var("LY_LOG_MODE") {
-            if let Some(mode) = LogMode::parse(&value) {
-                config.mode = mode;
-            }
+        if let Ok(value) = env::var("LY_LOG_MODE")
+            && let Some(mode) = LogMode::parse(&value)
+        {
+            config.mode = mode;
         }
 
-        if let Ok(value) = env::var("LY_LOG_LEVEL") {
-            if let Some(level) = LogLevel::parse(&value) {
-                config.min_level = level;
-            }
+        if let Ok(value) = env::var("LY_LOG_LEVEL")
+            && let Some(level) = LogLevel::parse(&value)
+        {
+            config.min_level = level;
         }
 
-        if let Ok(value) = env::var("LY_LOG_TZ") {
-            if let Some(tz) = TimeZone::parse(&value) {
-                config.timezone = tz;
-            }
+        if let Ok(value) = env::var("LY_LOG_TZ")
+            && let Some(tz) = TimeZone::parse(&value)
+        {
+            config.timezone = tz;
         }
 
         if let Ok(value) = env::var("LY_LOG_TS_FORMAT") {

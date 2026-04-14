@@ -4,35 +4,25 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginType {
     Application,
     Service,
     Module,
+    #[default]
     Unclassified,
     Test,
 }
 
-impl Default for PluginType {
-    fn default() -> Self {
-        Self::Unclassified
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginRuntimeKind {
+    #[default]
     Native,
     Python,
     Lua,
     External,
-}
-
-impl Default for PluginRuntimeKind {
-    fn default() -> Self {
-        Self::Native
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

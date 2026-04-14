@@ -95,9 +95,10 @@ impl PluginManager {
     }
 
     pub fn with_logger(logger: Logger) -> Self {
-        let mut manager = Self::default();
-        manager.logger = Some(logger);
-        manager
+        Self {
+            logger: Some(logger),
+            ..Self::default()
+        }
     }
 
     pub fn set_logger(&mut self, logger: Logger) {
@@ -291,4 +292,3 @@ fn now_millis() -> u128 {
         .unwrap_or_default()
         .as_millis()
 }
-
