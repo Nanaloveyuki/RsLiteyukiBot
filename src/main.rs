@@ -384,10 +384,30 @@ fn install_external_event_handlers(
             let ui_tx = ui_tx.clone();
             let help_whitelist = help_whitelist.clone();
             async move {
-                let allowed = help_whitelist
+                let debug_mode = whitelist_debug_enabled();
+                let (allowed, matched_entry, whitelist_size) = help_whitelist
                     .read()
-                    .map(|set| is_help_session_allowed(event.as_ref(), &set))
-                    .unwrap_or(false);
+                    .map(|set| {
+                        let matched = matched_help_whitelist_entry(event.as_ref(), &set);
+                        let allowed = is_help_session_allowed(event.as_ref(), &set);
+                        (allowed, matched, set.len())
+                    })
+                    .unwrap_or_else(|_| (false, None, 0));
+                if debug_mode {
+                    let _ = ui_tx.send(tui::UiEvent::Log {
+                        level: tui::UiLevel::Info,
+                        message: format!(
+                            "[debug.whitelist] /help text={:?} scope={:?} session={} user={} whitelist_size={} matched={:?} allowed={}",
+                            event.message.as_ref(),
+                            event.scope,
+                            event.session_id.as_ref(),
+                            event.user_id.as_ref(),
+                            whitelist_size,
+                            matched_entry,
+                            allowed
+                        ),
+                    });
+                }
                 if !allowed {
                     return Ok(());
                 }

@@ -60,4 +60,5 @@ onebot-v11:
   # - "3541766758"
   # - "private:3541766758"
   # - "group:699493240"
-  whitelist: []
+  whitelist:
+    - 'private:3541766758'

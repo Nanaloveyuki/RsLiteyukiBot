@@ -22,6 +22,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthStr;
 
 const UI_LOG_CAPACITY: usize = 300;
 const COMMAND_HISTORY_CAPACITY: usize = 200;
@@ -42,6 +43,9 @@ const TUI_COMMANDS: [&str; 11] = [
     "/quit",
     "/exit",
 ];
+const LOG_SUBCOMMANDS: [&str; 2] = ["on", "off"];
+const WHITELIST_SUBCOMMANDS: [&str; 3] = ["add", "remove", "list"];
+const WHITELIST_SCOPE_HINTS: [&str; 4] = ["private", "group", "session", "user"];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum UiLevel {
@@ -96,6 +100,7 @@ enum CommandOutcome {
 enum CompletionMode {
     Command,
     ResumeUid,
+    Rendered,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -816,6 +821,36 @@ impl AppState {
             .collect()
     }
 
+    fn log_completion_candidates(prefix: &str) -> Vec<String> {
+        LOG_SUBCOMMANDS
+            .iter()
+            .filter(|candidate| candidate.starts_with(prefix))
+            .map(|candidate| format!("/log {candidate}"))
+            .collect()
+    }
+
+    fn whitelist_subcommand_candidates(prefix: &str) -> Vec<String> {
+        WHITELIST_SUBCOMMANDS
+            .iter()
+            .filter(|candidate| candidate.starts_with(prefix))
+            .map(|candidate| {
+                if *candidate == "list" {
+                    "/whitelist list".to_string()
+                } else {
+                    format!("/whitelist {candidate} ")
+                }
+            })
+            .collect()
+    }
+
+    fn whitelist_scope_candidates(verb: &str, prefix: &str) -> Vec<String> {
+        WHITELIST_SCOPE_HINTS
+            .iter()
+            .filter(|candidate| candidate.starts_with(prefix))
+            .map(|candidate| format!("/whitelist {verb} {candidate} "))
+            .collect()
+    }
+
     fn resume_completion_candidates(&self, prefix: &str) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut candidates = Vec::new();
@@ -833,8 +868,88 @@ impl AppState {
         candidates
     }
 
+    fn whitelist_completion_context(
+        &self,
+        input: &str,
+    ) -> Option<(String, CompletionMode, Vec<String>)> {
+        let rest = input.strip_prefix("/whitelist ")?;
+        let rest = rest.trim_start();
+        if rest.is_empty() {
+            let candidates = Self::whitelist_subcommand_candidates("");
+            return Some((
+                "whitelist:subcommand:".to_string(),
+                CompletionMode::Rendered,
+                candidates,
+            ));
+        }
+
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        let trailing_space = input.ends_with(' ');
+
+        if tokens.len() == 1 {
+            let verb = tokens[0];
+            if trailing_space && matches!(verb, "add" | "remove") {
+                let candidates = Self::whitelist_scope_candidates(verb, "");
+                return Some((
+                    format!("whitelist:{verb}:scope:"),
+                    CompletionMode::Rendered,
+                    candidates,
+                ));
+            }
+            let candidates = Self::whitelist_subcommand_candidates(verb);
+            return Some((
+                format!("whitelist:subcommand:{verb}"),
+                CompletionMode::Rendered,
+                candidates,
+            ));
+        }
+
+        if tokens.len() == 2 && matches!(tokens[0], "add" | "remove") {
+            let verb = tokens[0];
+            let scope_prefix = if trailing_space { "" } else { tokens[1] };
+            if scope_prefix.contains(':') {
+                return None;
+            }
+            let candidates = Self::whitelist_scope_candidates(verb, scope_prefix);
+            return Some((
+                format!("whitelist:{verb}:scope:{scope_prefix}"),
+                CompletionMode::Rendered,
+                candidates,
+            ));
+        }
+
+        None
+    }
+
+    fn log_completion_context(&self, input: &str) -> Option<(String, CompletionMode, Vec<String>)> {
+        let rest = input.strip_prefix("/log ")?;
+        let rest = rest.trim_start();
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        if tokens.len() > 1 {
+            return None;
+        }
+        let trailing_space = input.ends_with(' ');
+        let prefix = if trailing_space {
+            ""
+        } else {
+            tokens.first().copied().unwrap_or("")
+        };
+        let candidates = Self::log_completion_candidates(prefix);
+        Some((
+            format!("log:mode:{prefix}"),
+            CompletionMode::Rendered,
+            candidates,
+        ))
+    }
+
     fn completion_context(&self) -> Option<(String, CompletionMode, Vec<String>)> {
         let input = self.console_input.trim_start();
+        if let Some(ctx) = self.whitelist_completion_context(input) {
+            return Some(ctx);
+        }
+        if let Some(ctx) = self.log_completion_context(input) {
+            return Some(ctx);
+        }
         if let Some(prefix) = input.strip_prefix("/resume ") {
             let candidates = self.resume_completion_candidates(prefix);
             return Some((
@@ -859,24 +974,25 @@ impl AppState {
     fn apply_completion_candidate(mode: CompletionMode, candidate: &str) -> String {
         match mode {
             CompletionMode::Command => {
-                if candidate == "/resume" {
+                if matches!(candidate, "/resume" | "/whitelist") {
                     format!("{candidate} ")
                 } else {
                     candidate.to_string()
                 }
             }
             CompletionMode::ResumeUid => format!("/resume {candidate}"),
+            CompletionMode::Rendered => candidate.to_string(),
         }
     }
 
     fn autocomplete_console_input(&mut self) {
         if let Some(state) = self.completion_state.clone() {
-            if state.mode == CompletionMode::Command
-                && state.candidates.len() == 1
-                && state.candidates[0].as_str() == "/resume"
-                && self.console_input.trim_start() == "/resume "
-            {
-                self.clear_completion_state();
+            if state.mode == CompletionMode::Command && state.candidates.len() == 1 {
+                let rendered =
+                    Self::apply_completion_candidate(state.mode.clone(), &state.candidates[0]);
+                if self.console_input == rendered && rendered.ends_with(' ') {
+                    self.clear_completion_state();
+                }
             } else if let Some(current) = state.candidates.get(state.index) {
                 let rendered = Self::apply_completion_candidate(state.mode.clone(), current);
                 if self.console_input == rendered {
@@ -1590,6 +1706,19 @@ fn render_command_panel(frame: &mut ratatui::Frame<'_>, app: &AppState, area: Re
 
     let input_widget = Paragraph::new(Line::from(spans)).block(rounded_block("Command"));
     frame.render_widget(input_widget, area);
+    let (cursor_x, cursor_y) = command_cursor_position(area, app.console_input.as_str());
+    frame.set_cursor_position((cursor_x, cursor_y));
+}
+
+fn command_cursor_position(area: Rect, input: &str) -> (u16, u16) {
+    let inner_x = area.x.saturating_add(1);
+    let inner_y = area.y.saturating_add(1);
+    let available_width = area.width.saturating_sub(2) as usize;
+    let prompt_width = UnicodeWidthStr::width("> ");
+    let input_width = UnicodeWidthStr::width(input);
+    let max_offset = available_width.saturating_sub(1);
+    let offset = (prompt_width + input_width).min(max_offset) as u16;
+    (inner_x.saturating_add(offset), inner_y)
 }
 
 fn adapter_transport_label(transport: AdapterTransport) -> &'static str {
@@ -1937,6 +2066,65 @@ mod tests {
         assert_eq!(app.console_input, "/help");
 
         remove_file_if_exists(&path);
+    }
+
+    #[test]
+    fn autocomplete_whitelist_subcommands_and_scope() {
+        let path = temp_resume_path("autocomplete-whitelist");
+        remove_file_if_exists(&path);
+
+        let mut app = AppState::new(
+            RuntimeTarget::Cli,
+            "test".to_string(),
+            Vec::new(),
+            test_tui_config(path.clone()),
+        );
+
+        app.console_input = "/whitelist ".to_string();
+        app.autocomplete_console_input();
+        assert_eq!(app.console_input, "/whitelist add ");
+
+        app.autocomplete_console_input();
+        assert_eq!(app.console_input, "/whitelist remove ");
+
+        app.autocomplete_console_input();
+        assert_eq!(app.console_input, "/whitelist list");
+
+        app.console_input = "/whitelist add ".to_string();
+        app.autocomplete_console_input();
+        assert_eq!(app.console_input, "/whitelist add private ");
+
+        remove_file_if_exists(&path);
+    }
+
+    #[test]
+    fn autocomplete_log_subcommands() {
+        let path = temp_resume_path("autocomplete-log");
+        remove_file_if_exists(&path);
+
+        let mut app = AppState::new(
+            RuntimeTarget::Cli,
+            "test".to_string(),
+            Vec::new(),
+            test_tui_config(path.clone()),
+        );
+
+        app.console_input = "/log ".to_string();
+        app.autocomplete_console_input();
+        assert_eq!(app.console_input, "/log on");
+
+        app.autocomplete_console_input();
+        assert_eq!(app.console_input, "/log off");
+
+        remove_file_if_exists(&path);
+    }
+
+    #[test]
+    fn command_cursor_position_tracks_input_width() {
+        let area = Rect::new(0, 0, 20, 3);
+        let (x, y) = command_cursor_position(area, "/help");
+        assert_eq!(y, 1);
+        assert_eq!(x, 1 + 2 + 5);
     }
 
     #[test]

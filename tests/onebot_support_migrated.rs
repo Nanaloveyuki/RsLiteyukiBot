@@ -107,6 +107,56 @@ fn help_session_whitelist_matches_private_and_group_rules() {
 }
 
 #[test]
+fn private_prefix_match_is_tolerant_to_scope_drift() {
+    let event = SessionEvent {
+        event_id: 7,
+        topic: Arc::from("adapter.inbound"),
+        message: Arc::from("/help"),
+        payload: serde_json::json!({
+            "message_type": "private",
+            "user_id": "3541766758"
+        }),
+        timestamp_ms: 0,
+        bot_id: Arc::from("1"),
+        session_id: Arc::from("3541766758"),
+        user_id: Arc::from("3541766758"),
+        scope: liteyukibot_core::SessionScope::Other(Arc::from("unknown")),
+    };
+
+    let whitelist: HashSet<String> = ["private:3541766758"]
+        .iter()
+        .map(|entry| entry.to_string())
+        .collect();
+    assert!(is_help_session_allowed(&event, &whitelist));
+}
+
+#[test]
+fn private_prefix_does_not_match_group_message_with_same_user_id() {
+    let event = SessionEvent {
+        event_id: 8,
+        topic: Arc::from("adapter.inbound"),
+        message: Arc::from("/help"),
+        payload: serde_json::json!({
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": "758234884",
+            "user_id": "3541766758"
+        }),
+        timestamp_ms: 0,
+        bot_id: Arc::from("1"),
+        session_id: Arc::from("758234884"),
+        user_id: Arc::from("3541766758"),
+        scope: liteyukibot_core::SessionScope::Group,
+    };
+
+    let whitelist: HashSet<String> = ["private:3541766758"]
+        .iter()
+        .map(|entry| entry.to_string())
+        .collect();
+    assert!(!is_help_session_allowed(&event, &whitelist));
+}
+
+#[test]
 fn render_group_preview_for_cq_image_without_summary_mode() {
     let payload = serde_json::json!({
         "post_type": "message",

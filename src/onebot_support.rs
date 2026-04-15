@@ -8,18 +8,29 @@ use serde_json::Value;
 const EXTERNAL_HELP_TEXT: &str = "Liteyuki 外部命令:\n/help - 显示当前帮助\n\n说明:\n/log 与 /reload 属于控制台管理命令，推荐在 TUI（或未来 Tauri/Web 终端）执行。";
 static OB11_LOG_IMAGE_SUMMARY: LazyLock<bool> =
     LazyLock::new(|| parse_env_bool("LY_OB11_LOG_IMAGE_SUMMARY", false));
+static HELP_WHITELIST_DEBUG: LazyLock<bool> =
+    LazyLock::new(|| parse_env_bool("LY_HELP_WHITELIST_DEBUG", false));
+
+pub(crate) fn whitelist_debug_enabled() -> bool {
+    *HELP_WHITELIST_DEBUG
+}
 
 pub(crate) fn is_help_command(message: &str) -> bool {
     matches!(message.trim(), "/help" | "help")
 }
 
 pub(crate) fn is_help_session_allowed(event: &SessionEvent, whitelist: &HashSet<String>) -> bool {
-    if whitelist.is_empty() {
-        return true;
-    }
+    whitelist.is_empty() || matched_help_whitelist_entry(event, whitelist).is_some()
+}
+
+pub(crate) fn matched_help_whitelist_entry(
+    event: &SessionEvent,
+    whitelist: &HashSet<String>,
+) -> Option<String> {
     whitelist
         .iter()
-        .any(|entry| whitelist_entry_matches(event, entry))
+        .find(|entry| whitelist_entry_matches(event, entry))
+        .cloned()
 }
 
 pub(crate) fn whitelist_entry_matches(event: &SessionEvent, entry: &str) -> bool {
@@ -38,19 +49,44 @@ pub(crate) fn whitelist_entry_matches(event: &SessionEvent, entry: &str) -> bool
         return match scope.as_str() {
             "session" => event.session_id.as_ref() == id,
             "user" => event.user_id.as_ref() == id,
+            // Keep private/group rules tolerant to scope drift, but never cross-match each other.
             "private" => {
-                matches!(event.scope, liteyukibot_core::SessionScope::Private)
-                    && (event.session_id.as_ref() == id || event.user_id.as_ref() == id)
+                is_private_semantic(event)
+                    && (event.user_id.as_ref() == id || event.session_id.as_ref() == id)
             }
             "group" => {
-                matches!(event.scope, liteyukibot_core::SessionScope::Group)
-                    && event.session_id.as_ref() == id
+                is_group_semantic(event)
+                    && (event_group_id(event).as_deref() == Some(id)
+                        || event.session_id.as_ref() == id)
             }
             _ => false,
         };
     }
 
     event.session_id.as_ref() == entry
+}
+
+fn payload_message_type(event: &SessionEvent) -> Option<&str> {
+    event.payload.get("message_type").and_then(Value::as_str)
+}
+
+fn event_group_id(event: &SessionEvent) -> Option<String> {
+    event.payload.get("group_id").and_then(value_to_string)
+}
+
+fn is_group_semantic(event: &SessionEvent) -> bool {
+    matches!(event.scope, liteyukibot_core::SessionScope::Group)
+        || payload_message_type(event).is_some_and(|ty| ty.eq_ignore_ascii_case("group"))
+        || event_group_id(event).is_some()
+}
+
+fn is_private_semantic(event: &SessionEvent) -> bool {
+    if is_group_semantic(event) {
+        return false;
+    }
+    matches!(event.scope, liteyukibot_core::SessionScope::Private)
+        || payload_message_type(event).is_some_and(|ty| ty.eq_ignore_ascii_case("private"))
+        || event.session_id == event.user_id
 }
 
 pub(crate) fn is_onebot_v11_payload(payload: &Value) -> bool {
