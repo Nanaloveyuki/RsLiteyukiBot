@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 #[path = "../src/onebot_support.rs"]
 mod onebot_support;
 

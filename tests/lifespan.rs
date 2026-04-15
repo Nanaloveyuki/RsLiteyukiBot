@@ -1,11 +1,11 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use liteyukibot_core::{
     HookFilter, LifecycleContext, LifecycleFailurePolicy, LifecyclePhase, Lifespan, RuntimeFlavor,
 };
 use tokio::sync::Barrier;
-use tokio::time::{Duration, sleep, timeout};
+use tokio::time::{sleep, timeout, Duration};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lifecycle_hooks_share_context_state() {
@@ -95,6 +95,7 @@ async fn hook_filter_respects_runtime_capabilities() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hooks_in_same_phase_run_concurrently() {
     let mut lifespan = Lifespan::new();
+    lifespan.set_failure_policy(LifecycleFailurePolicy::Continue);
     let barrier = Arc::new(Barrier::new(2));
 
     let barrier_a = Arc::clone(&barrier);
@@ -138,18 +139,15 @@ async fn fail_fast_stops_at_first_error() {
 
     let second_hook_hits = Arc::new(AtomicU32::new(0));
 
-    lifespan.on_before_start_sync("first-fail", HookFilter::default(), |_context| {
+    lifespan.on_before_start("first-fail", HookFilter::default(), |_context| async move {
+        sleep(Duration::from_millis(100)).await;
         Err("first failed".to_string())
     });
 
     let second_hook_hits_clone = Arc::clone(&second_hook_hits);
-    lifespan.on_before_start("second", HookFilter::default(), move |_context| {
-        let second_hook_hits_clone = Arc::clone(&second_hook_hits_clone);
-        async move {
-            sleep(Duration::from_millis(500)).await;
-            second_hook_hits_clone.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
+    lifespan.on_before_start_sync("second", HookFilter::default(), move |_context| {
+        second_hook_hits_clone.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     });
 
     let context = Arc::new(LifecycleContext::new(
@@ -166,6 +164,36 @@ async fn fail_fast_stops_at_first_error() {
     assert_eq!(err.failures.len(), 1);
     assert_eq!(err.failures[0].hook_name, "first-fail");
     assert_eq!(second_hook_hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_timeout_is_reported_as_failure() {
+    let mut lifespan = Lifespan::new();
+    lifespan.set_failure_policy(LifecycleFailurePolicy::FailFast);
+    lifespan.set_hook_timeout(Some(Duration::from_millis(50)));
+
+    lifespan.on_before_start("slow-hook", HookFilter::default(), |_context| async move {
+        sleep(Duration::from_millis(200)).await;
+        Ok(())
+    });
+
+    let context = Arc::new(LifecycleContext::new(
+        "liteyuki",
+        "0.1.0",
+        RuntimeFlavor::Cli,
+    ));
+    let err = lifespan
+        .before_start(context)
+        .await
+        .expect_err("timeout should be reported as lifecycle failure");
+
+    assert_eq!(err.phase, LifecyclePhase::BeforeStart);
+    assert_eq!(err.failures.len(), 1);
+    assert_eq!(err.failures[0].hook_name, "slow-hook");
+    assert!(
+        err.failures[0].reason.contains("timed out"),
+        "timeout reason should mention timeout"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

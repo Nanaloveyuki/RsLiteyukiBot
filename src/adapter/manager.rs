@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::{Value, json};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, watch};
 use tokio::task::JoinHandle;
 
 use crate::observability::Logger;
@@ -58,10 +58,75 @@ impl RunningAdapter {
     }
 }
 
+struct RunningAdapterSlot {
+    inner: AsyncMutex<Option<RunningAdapter>>,
+}
+
+impl RunningAdapterSlot {
+    fn new(adapter: RunningAdapter) -> Self {
+        Self {
+            inner: AsyncMutex::new(Some(adapter)),
+        }
+    }
+
+    async fn send(&self, packet: AdapterPacket) -> Result<(), AdapterError> {
+        let lock = self.inner.lock().await;
+        let running = lock
+            .as_ref()
+            .ok_or_else(|| AdapterError::Config("adapter is stopping".to_string()))?;
+        running.send(packet).await
+    }
+
+    async fn shutdown(&self) -> Result<(), AdapterError> {
+        let running = {
+            let mut lock = self.inner.lock().await;
+            lock.take()
+        };
+        if let Some(running) = running {
+            running.shutdown().await
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct StartGuard {
+    id: String,
+    starting: Arc<Mutex<HashSet<String>>>,
+}
+
+impl StartGuard {
+    fn acquire(starting: Arc<Mutex<HashSet<String>>>, id: &str) -> Option<Self> {
+        {
+            let mut lock = starting
+                .lock()
+                .expect("adapter start-inflight lock should not be poisoned");
+            if !lock.insert(id.to_string()) {
+                return None;
+            }
+        }
+        Some(Self {
+            id: id.to_string(),
+            starting,
+        })
+    }
+}
+
+impl Drop for StartGuard {
+    fn drop(&mut self) {
+        let mut lock = self
+            .starting
+            .lock()
+            .expect("adapter start-inflight lock should not be poisoned");
+        lock.remove(&self.id);
+    }
+}
+
 #[derive(Clone)]
 pub struct AdapterManager {
     configs: Arc<RwLock<HashMap<String, AdapterConfig>>>,
-    running: Arc<Mutex<HashMap<String, RunningAdapter>>>,
+    running: Arc<RwLock<HashMap<String, Arc<RunningAdapterSlot>>>>,
+    starting: Arc<Mutex<HashSet<String>>>,
     http_limiters: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     http_client: HttpTransportClient,
     sse_client: SseTransportClient,
@@ -72,7 +137,8 @@ impl Default for AdapterManager {
     fn default() -> Self {
         Self {
             configs: Arc::new(RwLock::new(HashMap::new())),
-            running: Arc::new(Mutex::new(HashMap::new())),
+            running: Arc::new(RwLock::new(HashMap::new())),
+            starting: Arc::new(Mutex::new(HashSet::new())),
             http_limiters: Arc::new(Mutex::new(HashMap::new())),
             http_client: HttpTransportClient::default(),
             sse_client: SseTransportClient::default(),
@@ -190,21 +256,21 @@ impl AdapterManager {
 
     pub fn is_running(&self, id: &str) -> bool {
         self.running
-            .lock()
+            .read()
             .expect("adapter running lock should not be poisoned")
             .contains_key(id)
     }
 
     pub async fn start(&self, id: &str, sink: ManagedAdapterSink) -> Result<(), AdapterError> {
-        {
-            if self
-                .running
-                .lock()
-                .expect("adapter running lock should not be poisoned")
-                .contains_key(id)
-            {
-                return Ok(());
-            }
+        if self.is_running(id) {
+            return Ok(());
+        }
+        let _start_guard = match StartGuard::acquire(Arc::clone(&self.starting), id) {
+            Some(guard) => guard,
+            None => return Ok(()),
+        };
+        if self.is_running(id) {
+            return Ok(());
         }
 
         let config = self
@@ -295,9 +361,9 @@ impl AdapterManager {
         };
 
         self.running
-            .lock()
+            .write()
             .expect("adapter running lock should not be poisoned")
-            .insert(id.to_string(), running);
+            .insert(id.to_string(), Arc::new(RunningAdapterSlot::new(running)));
 
         if let Some(logger) = &self.logger {
             logger.info_in(MODULE_ADAPTER, format!("adapter '{}' started", id));
@@ -323,7 +389,7 @@ impl AdapterManager {
     pub async fn shutdown(&self, id: &str) -> Result<(), AdapterError> {
         let running = self
             .running
-            .lock()
+            .write()
             .expect("adapter running lock should not be poisoned")
             .remove(id);
         let Some(running) = running else {
@@ -339,7 +405,7 @@ impl AdapterManager {
     pub async fn shutdown_all(&self) -> Result<(), AdapterError> {
         let ids: Vec<String> = self
             .running
-            .lock()
+            .read()
             .expect("adapter running lock should not be poisoned")
             .keys()
             .cloned()
@@ -379,16 +445,12 @@ impl AdapterManager {
 
         let running = self
             .running
-            .lock()
+            .read()
             .expect("adapter running lock should not be poisoned")
-            .remove(id)
+            .get(id)
+            .cloned()
             .ok_or_else(|| AdapterError::Config(format!("adapter '{}' is not running", id)))?;
-        let result = running.send(packet).await;
-        self.running
-            .lock()
-            .expect("adapter running lock should not be poisoned")
-            .insert(id.to_string(), running);
-        result
+        running.send(packet).await
     }
 
     pub async fn request_http_json(

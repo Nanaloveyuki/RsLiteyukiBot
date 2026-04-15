@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use liteyukibot_core::{
-    BotEvent, BotRuntimeConfig, HookFilter, LiteyukiBot, ManagedProcessSpec, RuntimeTarget,
+    AdapterConfig, AdapterEndpoint, AdapterRoute, AdapterTransport, BotEvent, BotRuntimeConfig,
+    HookFilter, LiteyukiBot, LiteyukiBotError, ManagedProcessSpec, RuntimeTarget,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -105,4 +106,70 @@ async fn liteyuki_bot_orchestrates_runtime_and_managed_processes() {
     .expect("managed process should restart");
 
     bot.shutdown().await.expect("shutdown should succeed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bot_start_adapter_failure_rolls_back_runtime_and_processes() {
+    let process_name = "rollback-heartbeat";
+    let mut ws_invalid = AdapterConfig::default();
+    ws_invalid.id = "ws-invalid".to_string();
+    ws_invalid.transport = AdapterTransport::WebSocketForward;
+    ws_invalid.endpoint = AdapterEndpoint {
+        url: "not-a-valid-ws-url".to_string(),
+        headers: Default::default(),
+        token: None,
+        timeout_ms: 500,
+    };
+    ws_invalid.route = AdapterRoute::default();
+    ws_invalid.queue_capacity = 4;
+    ws_invalid.max_payload_size = None;
+    ws_invalid.max_connections = None;
+
+    let mut bot = LiteyukiBot::builder("rs-liteyuki", "0.2.0")
+        .with_target(RuntimeTarget::CliWeb)
+        .with_adapter_configs(vec![ws_invalid])
+        .with_adapter_autostart(true)
+        .build();
+
+    bot.register_process(
+        process_name,
+        ManagedProcessSpec::new(process_name),
+        move |mut shutdown_rx| async move {
+            loop {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+                if shutdown_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+            Ok(())
+        },
+    )
+    .expect("register process should succeed");
+
+    let start_err = bot
+        .start()
+        .await
+        .expect_err("invalid adapter should fail startup");
+    assert!(
+        matches!(start_err, LiteyukiBotError::Adapter(_)),
+        "expected adapter error, got {start_err}"
+    );
+
+    let send_err = bot
+        .send(BotEvent::new(11, "integration.rollback", json!({ "ok": true })))
+        .await
+        .expect_err("runtime should be rolled back");
+    assert!(matches!(send_err, LiteyukiBotError::NotStarted));
+    assert!(
+        !bot.process_manager().is_running(process_name),
+        "process should be terminated by rollback"
+    );
+
+    let shutdown_err = bot
+        .shutdown()
+        .await
+        .expect_err("shutdown after rollback should report not started");
+    assert!(matches!(shutdown_err, LiteyukiBotError::NotStarted));
 }

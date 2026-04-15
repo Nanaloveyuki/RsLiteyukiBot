@@ -3,8 +3,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use tokio::task::JoinSet;
+use tokio::time::timeout;
 
 use crate::observability::Logger;
 
@@ -320,6 +322,7 @@ pub struct Lifespan {
     before_process_restart_hooks: Vec<ProcessHookRegistration>,
     after_restart_hooks: Vec<HookRegistration>,
     failure_policy: LifecycleFailurePolicy,
+    hook_timeout: Option<Duration>,
     logger: Option<Logger>,
 }
 
@@ -333,6 +336,7 @@ impl Default for Lifespan {
             before_process_restart_hooks: Vec::new(),
             after_restart_hooks: Vec::new(),
             failure_policy: LifecycleFailurePolicy::FailFast,
+            hook_timeout: None,
             logger: None,
         }
     }
@@ -356,6 +360,10 @@ impl Lifespan {
 
     pub fn set_failure_policy(&mut self, policy: LifecycleFailurePolicy) {
         self.failure_policy = policy;
+    }
+
+    pub fn set_hook_timeout(&mut self, timeout: Option<Duration>) {
+        self.hook_timeout = timeout;
     }
 
     pub fn on_before_start<F, Fut>(&mut self, name: impl Into<String>, filter: HookFilter, hook: F)
@@ -634,6 +642,72 @@ impl Lifespan {
         hooks: &[HookRegistration],
         context: Arc<LifecycleContext>,
     ) -> Result<(), LifecycleExecutionError> {
+        match self.failure_policy {
+            LifecycleFailurePolicy::FailFast => {
+                self.run_phase_fail_fast(phase, hooks, context).await
+            }
+            LifecycleFailurePolicy::Continue => {
+                self.run_phase_continue(phase, hooks, context).await
+            }
+        }
+    }
+
+    async fn run_process_phase(
+        &self,
+        phase: LifecyclePhase,
+        hooks: &[ProcessHookRegistration],
+        context: Arc<LifecycleContext>,
+        process_name: Arc<str>,
+    ) -> Result<(), LifecycleExecutionError> {
+        match self.failure_policy {
+            LifecycleFailurePolicy::FailFast => {
+                self.run_process_phase_fail_fast(phase, hooks, context, process_name)
+                    .await
+            }
+            LifecycleFailurePolicy::Continue => {
+                self.run_process_phase_continue(phase, hooks, context, process_name)
+                    .await
+            }
+        }
+    }
+
+    async fn run_phase_fail_fast(
+        &self,
+        phase: LifecyclePhase,
+        hooks: &[HookRegistration],
+        context: Arc<LifecycleContext>,
+    ) -> Result<(), LifecycleExecutionError> {
+        for hook in hooks {
+            if !hook.filter.matches(context.as_ref()) {
+                continue;
+            }
+
+            let result = self
+                .execute_hook(
+                    phase,
+                    hook.name.clone(),
+                    Arc::clone(&hook.handler),
+                    context.clone(),
+                )
+                .await;
+            if let Err(failure) = result {
+                self.log_hook_failure(phase, &failure);
+                return Err(LifecycleExecutionError {
+                    phase,
+                    failures: vec![failure],
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn run_phase_continue(
+        &self,
+        phase: LifecyclePhase,
+        hooks: &[HookRegistration],
+        context: Arc<LifecycleContext>,
+    ) -> Result<(), LifecycleExecutionError> {
         let mut join_set: JoinSet<Result<(), HookFailure>> = JoinSet::new();
 
         for hook in hooks {
@@ -644,30 +718,59 @@ impl Lifespan {
             let name = hook.name.clone();
             let handler = Arc::clone(&hook.handler);
             let hook_context = context.clone();
+            let hook_timeout = self.hook_timeout;
             let logger = self.logger.clone();
 
             join_set.spawn(async move {
-                if let Some(logger) = &logger {
-                    logger.debug_in(
-                        MODULE_LIFECYCLE,
-                        format!("phase={phase:?} hook={name} start"),
-                    );
-                }
-
-                match (handler)(hook_context).await {
-                    Ok(()) => Ok(()),
-                    Err(reason) => Err(HookFailure {
-                        hook_name: name,
-                        reason,
-                    }),
-                }
+                Self::execute_hook_impl(
+                    phase,
+                    name,
+                    "start".to_string(),
+                    logger,
+                    hook_timeout,
+                    (handler)(hook_context),
+                )
+                .await
             });
         }
 
-        self.collect_phase_outcome(phase, join_set).await
+        self.collect_continue_phase_outcome(phase, join_set).await
     }
 
-    async fn run_process_phase(
+    async fn run_process_phase_fail_fast(
+        &self,
+        phase: LifecyclePhase,
+        hooks: &[ProcessHookRegistration],
+        context: Arc<LifecycleContext>,
+        process_name: Arc<str>,
+    ) -> Result<(), LifecycleExecutionError> {
+        for hook in hooks {
+            if !hook.filter.matches(context.as_ref()) {
+                continue;
+            }
+
+            let result = self
+                .execute_process_hook(
+                    phase,
+                    hook.name.clone(),
+                    Arc::clone(&hook.handler),
+                    context.clone(),
+                    Arc::clone(&process_name),
+                )
+                .await;
+            if let Err(failure) = result {
+                self.log_hook_failure(phase, &failure);
+                return Err(LifecycleExecutionError {
+                    phase,
+                    failures: vec![failure],
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn run_process_phase_continue(
         &self,
         phase: LifecyclePhase,
         hooks: &[ProcessHookRegistration],
@@ -685,33 +788,26 @@ impl Lifespan {
             let handler = Arc::clone(&hook.handler);
             let hook_context = context.clone();
             let hook_process_name = Arc::clone(&process_name);
+            let hook_timeout = self.hook_timeout;
             let logger = self.logger.clone();
 
             join_set.spawn(async move {
-                if let Some(logger) = &logger {
-                    logger.debug_in(
-                        MODULE_LIFECYCLE,
-                        format!(
-                            "phase={phase:?} hook={name} process={} start",
-                            hook_process_name
-                        ),
-                    );
-                }
-
-                match (handler)(hook_context, hook_process_name).await {
-                    Ok(()) => Ok(()),
-                    Err(reason) => Err(HookFailure {
-                        hook_name: name,
-                        reason,
-                    }),
-                }
+                Self::execute_hook_impl(
+                    phase,
+                    name,
+                    format!("process={} start", hook_process_name),
+                    logger,
+                    hook_timeout,
+                    (handler)(hook_context, hook_process_name),
+                )
+                .await
             });
         }
 
-        self.collect_phase_outcome(phase, join_set).await
+        self.collect_continue_phase_outcome(phase, join_set).await
     }
 
-    async fn collect_phase_outcome(
+    async fn collect_continue_phase_outcome(
         &self,
         phase: LifecyclePhase,
         mut join_set: JoinSet<Result<(), HookFailure>>,
@@ -722,21 +818,8 @@ impl Lifespan {
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(failure)) => {
-                    if let Some(logger) = &self.logger {
-                        logger.warn_in(
-                            MODULE_LIFECYCLE,
-                            format!(
-                                "phase={phase:?} hook={} failed: {}",
-                                failure.hook_name, failure.reason
-                            ),
-                        );
-                    }
-
+                    self.log_hook_failure(phase, &failure);
                     failures.push(failure);
-                    if self.failure_policy == LifecycleFailurePolicy::FailFast {
-                        join_set.abort_all();
-                        break;
-                    }
                 }
                 Err(err) => {
                     let reason = if err.is_cancelled() {
@@ -749,21 +832,8 @@ impl Lifespan {
                         reason,
                     };
 
-                    if let Some(logger) = &self.logger {
-                        logger.warn_in(
-                            MODULE_LIFECYCLE,
-                            format!(
-                                "phase={phase:?} hook={} failed: {}",
-                                failure.hook_name, failure.reason
-                            ),
-                        );
-                    }
-
+                    self.log_hook_failure(phase, &failure);
                     failures.push(failure);
-                    if self.failure_policy == LifecycleFailurePolicy::FailFast {
-                        join_set.abort_all();
-                        break;
-                    }
                 }
             }
         }
@@ -772,6 +842,92 @@ impl Lifespan {
             Ok(())
         } else {
             Err(LifecycleExecutionError { phase, failures })
+        }
+    }
+
+    async fn execute_hook(
+        &self,
+        phase: LifecyclePhase,
+        name: String,
+        handler: HookHandler,
+        context: Arc<LifecycleContext>,
+    ) -> Result<(), HookFailure> {
+        Self::execute_hook_impl(
+            phase,
+            name,
+            "start".to_string(),
+            self.logger.clone(),
+            self.hook_timeout,
+            (handler)(context),
+        )
+        .await
+    }
+
+    async fn execute_process_hook(
+        &self,
+        phase: LifecyclePhase,
+        name: String,
+        handler: ProcessHookHandler,
+        context: Arc<LifecycleContext>,
+        process_name: Arc<str>,
+    ) -> Result<(), HookFailure> {
+        Self::execute_hook_impl(
+            phase,
+            name,
+            format!("process={} start", process_name),
+            self.logger.clone(),
+            self.hook_timeout,
+            (handler)(context, process_name),
+        )
+        .await
+    }
+
+    async fn execute_hook_impl(
+        phase: LifecyclePhase,
+        name: String,
+        start_suffix: String,
+        logger: Option<Logger>,
+        hook_timeout: Option<Duration>,
+        future: HookFuture,
+    ) -> Result<(), HookFailure> {
+        if let Some(logger) = &logger {
+            logger.debug_in(
+                MODULE_LIFECYCLE,
+                format!("phase={phase:?} hook={name} {start_suffix}"),
+            );
+        }
+
+        let result = match hook_timeout {
+            Some(timeout_duration) => match timeout(timeout_duration, future).await {
+                Ok(result) => result,
+                Err(_) => {
+                    return Err(HookFailure {
+                        hook_name: name,
+                        reason: format!("hook timed out after {} ms", timeout_duration.as_millis()),
+                    });
+                }
+            },
+            None => future.await,
+        };
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(reason) => Err(HookFailure {
+                hook_name: name,
+                reason,
+            }),
+        }
+    }
+
+    fn log_hook_failure(&self, phase: LifecyclePhase, failure: &HookFailure) {
+        if let Some(logger) = &self.logger {
+            logger.warn_in(
+                MODULE_LIFECYCLE,
+                format!(
+                    "phase={phase:?} hook={} failed: {}",
+                    failure.hook_name, failure.reason
+                ),
+            );
         }
     }
 }

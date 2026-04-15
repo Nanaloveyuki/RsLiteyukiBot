@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::comm::{ChannelRegistry, SharedStore};
@@ -51,6 +51,7 @@ pub enum PluginLoadError {
     AlreadyRegistered(String),
     NotFound(String),
     AlreadyLoaded(String),
+    Loading(String),
     Hook { id: String, reason: String },
     Sdk { id: String, reason: String },
     Io(String),
@@ -63,6 +64,7 @@ impl std::fmt::Display for PluginLoadError {
             Self::AlreadyRegistered(id) => write!(f, "plugin '{}' already registered", id),
             Self::NotFound(id) => write!(f, "plugin '{}' not found", id),
             Self::AlreadyLoaded(id) => write!(f, "plugin '{}' already loaded", id),
+            Self::Loading(id) => write!(f, "plugin '{}' is currently loading", id),
             Self::Hook { id, reason } => write!(f, "plugin '{}' load hook failed: {}", id, reason),
             Self::Sdk { id, reason } => {
                 write!(f, "plugin '{}' sdk planning failed: {}", id, reason)
@@ -88,6 +90,7 @@ impl From<PluginManifestError> for PluginLoadError {
 pub struct PluginManager {
     registry: Arc<RwLock<HashMap<String, Arc<dyn Plugin>>>>,
     loaded: Arc<RwLock<HashMap<String, LoadedPlugin>>>,
+    loading: Arc<Mutex<HashSet<String>>>,
     logger: Option<Logger>,
 }
 
@@ -142,9 +145,7 @@ impl PluginManager {
         id: &str,
         context: PluginContext,
     ) -> Result<LoadedPlugin, PluginLoadError> {
-        if self.is_loaded(id) {
-            return Err(PluginLoadError::AlreadyLoaded(id.to_string()));
-        }
+        let _loading_guard = self.begin_loading(id)?;
 
         let plugin = self
             .registry
@@ -250,6 +251,42 @@ impl PluginManager {
             ids.push(id);
         }
         Ok(ids)
+    }
+
+    fn begin_loading(&self, id: &str) -> Result<PluginLoadGuard, PluginLoadError> {
+        if self.is_loaded(id) {
+            return Err(PluginLoadError::AlreadyLoaded(id.to_string()));
+        }
+
+        let mut loading = self
+            .loading
+            .lock()
+            .expect("plugin loading lock should not be poisoned");
+        if loading.contains(id) {
+            return Err(PluginLoadError::Loading(id.to_string()));
+        }
+        if self.is_loaded(id) {
+            return Err(PluginLoadError::AlreadyLoaded(id.to_string()));
+        }
+        loading.insert(id.to_string());
+        Ok(PluginLoadGuard {
+            id: id.to_string(),
+            loading: Arc::clone(&self.loading),
+        })
+    }
+}
+
+struct PluginLoadGuard {
+    id: String,
+    loading: Arc<Mutex<HashSet<String>>>,
+}
+
+impl Drop for PluginLoadGuard {
+    fn drop(&mut self) {
+        self.loading
+            .lock()
+            .expect("plugin loading lock should not be poisoned")
+            .remove(&self.id);
     }
 }
 

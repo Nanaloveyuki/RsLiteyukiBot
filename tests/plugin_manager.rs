@@ -6,17 +6,87 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use liteyukibot_core::{
     ChannelRegistry, LifecycleContext, Plugin, PluginAbiMethod, PluginContext, PluginHostBridge,
-    PluginLoadState, PluginManager, PluginMetadata, PluginRuntimeKind, PluginSdk, PluginType,
-    RuntimeTarget, SessionRouter, SharedStore,
+    PluginLoadError, PluginLoadState, PluginManager, PluginMetadata, PluginRuntimeKind, PluginSdk,
+    PluginType, RuntimeTarget, SessionRouter, SharedStore,
 };
 use liteyukibot_core::{Logger, LoggerConfig};
 use liteyukibot_core::{RuntimeCapabilities, RuntimeFlavor};
+use tokio::sync::Notify;
 use tokio::time::{Duration, timeout};
 
 struct CountingPlugin {
     id: String,
     name: String,
     loaded: Arc<AtomicUsize>,
+}
+
+struct BlockingPlugin {
+    id: String,
+    name: String,
+    loaded: Arc<AtomicUsize>,
+    release: Arc<Notify>,
+}
+
+impl Plugin for BlockingPlugin {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn metadata(&self) -> PluginMetadata {
+        PluginMetadata {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            description: "blocking".to_string(),
+            plugin_type: PluginType::Service,
+            author: "".to_string(),
+            homepage: "".to_string(),
+            extra: HashMap::new(),
+        }
+    }
+
+    fn on_load(&self, _context: PluginContext) -> liteyukibot_core::PluginFuture {
+        let loaded = Arc::clone(&self.loaded);
+        let release = Arc::clone(&self.release);
+        Box::pin(async move {
+            loaded.fetch_add(1, Ordering::SeqCst);
+            release.notified().await;
+            Ok(())
+        })
+    }
+}
+
+struct FailingPlugin {
+    id: String,
+    name: String,
+    attempts: Arc<AtomicUsize>,
+    reason: String,
+}
+
+impl Plugin for FailingPlugin {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn metadata(&self) -> PluginMetadata {
+        PluginMetadata {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            description: "failing".to_string(),
+            plugin_type: PluginType::Service,
+            author: "".to_string(),
+            homepage: "".to_string(),
+            extra: HashMap::new(),
+        }
+    }
+
+    fn on_load(&self, _context: PluginContext) -> liteyukibot_core::PluginFuture {
+        let attempts = Arc::clone(&self.attempts);
+        let reason = self.reason.clone();
+        Box::pin(async move {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err(reason)
+        })
+    }
 }
 
 impl Plugin for CountingPlugin {
@@ -191,6 +261,105 @@ async fn plugin_manager_marks_python_runtime_as_deferred_plan() {
         loaded[0].load_plan.contract.abi_name,
         "liteyuki-python-bridge"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_manager_prevents_reentrant_load_for_same_id() {
+    let manager = PluginManager::new();
+    let loaded = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(Notify::new());
+
+    manager
+        .register_plugin(BlockingPlugin {
+            id: "reentrant".to_string(),
+            name: "Reentrant Plugin".to_string(),
+            loaded: Arc::clone(&loaded),
+            release: Arc::clone(&release),
+        })
+        .expect("register should succeed");
+
+    let manager_clone = manager.clone();
+    let first_handle = tokio::spawn(async move {
+        manager_clone
+            .load_plugin("reentrant", plugin_context())
+            .await
+    });
+
+    timeout(Duration::from_secs(1), async {
+        while loaded.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first load should enter on_load");
+
+    let second = timeout(
+        Duration::from_secs(1),
+        manager.load_plugin("reentrant", plugin_context()),
+    )
+    .await
+    .expect("second load should not timeout");
+
+    match second {
+        Err(PluginLoadError::Loading(id)) => assert_eq!(id, "reentrant"),
+        other => panic!("expected Loading error, got {:?}", other),
+    }
+    assert_eq!(loaded.load(Ordering::SeqCst), 1);
+
+    release.notify_waiters();
+    let first = timeout(Duration::from_secs(1), first_handle)
+        .await
+        .expect("first load task should not timeout")
+        .expect("first load task should join");
+    first.expect("first load should succeed");
+
+    assert!(manager.is_loaded("reentrant"));
+    assert_eq!(loaded.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_manager_clears_loading_state_after_hook_error() {
+    let manager = PluginManager::new();
+    let attempts = Arc::new(AtomicUsize::new(0));
+
+    manager
+        .register_plugin(FailingPlugin {
+            id: "failing".to_string(),
+            name: "Failing Plugin".to_string(),
+            attempts: Arc::clone(&attempts),
+            reason: "intentional failure".to_string(),
+        })
+        .expect("register should succeed");
+
+    let first = manager
+        .load_plugin("failing", plugin_context())
+        .await
+        .expect_err("first load should fail");
+    match &first {
+        PluginLoadError::Hook { id, reason } => {
+            assert_eq!(id, "failing");
+            assert_eq!(reason, "intentional failure");
+        }
+        other => panic!("expected Hook error, got {:?}", other),
+    }
+    assert_eq!(
+        first.to_string(),
+        "plugin 'failing' load hook failed: intentional failure"
+    );
+    assert!(!manager.is_loaded("failing"));
+
+    let second = manager
+        .load_plugin("failing", plugin_context())
+        .await
+        .expect_err("second load should fail again");
+    match second {
+        PluginLoadError::Hook { id, reason } => {
+            assert_eq!(id, "failing");
+            assert_eq!(reason, "intentional failure");
+        }
+        other => panic!("expected Hook error, got {:?}", other),
+    }
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
 struct TempDir {

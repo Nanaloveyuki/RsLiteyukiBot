@@ -217,7 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_config = load_app_config();
     prime_reload_warning_state(&app_config);
     let target = resolve_runtime_target();
-    let adapter_configs = load_adapter_configs(&app_config).unwrap_or_default();
+    let adapter_configs = load_adapter_configs(&app_config)?;
     let adapter_autostart = !adapter_configs.is_empty();
     let help_whitelist = Arc::new(RwLock::new(resolve_help_whitelist(&app_config)));
     let tui_config = resolve_tui_config(&app_config);
