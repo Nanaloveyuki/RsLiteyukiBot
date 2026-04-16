@@ -22,7 +22,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const UI_LOG_CAPACITY: usize = 300;
 const COMMAND_HISTORY_CAPACITY: usize = 200;
@@ -102,6 +102,16 @@ enum CommandOutcome {
     PersistWhitelist(Vec<String>),
     Llm(LlmCommandRequest),
     Ask(String),
+}
+
+enum AsyncCommandResult {
+    Llm(Result<String, String>),
+    Ask(Result<String, String>),
+}
+
+struct PollKeyEventsOutput {
+    submitted_commands: Vec<String>,
+    had_ui_change: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -495,7 +505,7 @@ impl AppState {
         }
     }
 
-    fn refresh_adapter_state(&mut self, bot: &LiteyukiBot) {
+    fn refresh_adapter_state(&mut self, bot: &LiteyukiBot) -> bool {
         let mut state_changes = Vec::new();
         for adapter in &self.adapters {
             let next_running = bot.adapter_manager().is_running(&adapter.id);
@@ -508,6 +518,7 @@ impl AppState {
             }
         }
 
+        let has_state_change = !state_changes.is_empty();
         for (id, transport, running) in state_changes {
             if running {
                 self.push_log(
@@ -522,6 +533,7 @@ impl AppState {
                 self.push_log(UiLevel::Warn, format!("adapter '{}' disconnected", id));
             }
         }
+        has_state_change
     }
 
     fn sync_active_resume_snapshot(&mut self) {
@@ -1586,27 +1598,47 @@ async fn run_tui_loop(
     ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut tick = tokio::time::interval(Duration::from_millis(120));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut should_quit = false;
+    let mut needs_redraw = true;
+    let mut last_uptime_sec = app.started_at.elapsed().as_secs();
+    let (async_result_tx, mut async_result_rx) = mpsc::unbounded_channel::<AsyncCommandResult>();
 
     while !should_quit {
         tokio::select! {
             _ = tick.tick() => {
-                app.refresh_adapter_state(bot);
-                let submitted_commands = poll_key_events(&mut should_quit, app)?;
-                for command in submitted_commands {
+                let mut ui_changed = false;
+                let uptime_sec = app.started_at.elapsed().as_secs();
+                if uptime_sec != last_uptime_sec {
+                    last_uptime_sec = uptime_sec;
+                    ui_changed = true;
+                }
+
+                if app.refresh_adapter_state(bot) {
+                    ui_changed = true;
+                }
+
+                let poll_output = poll_key_events(&mut should_quit, app)?;
+                ui_changed |= poll_output.had_ui_change;
+                for command in poll_output.submitted_commands {
                     match app.handle_console_command(&command) {
                         CommandOutcome::Quit => {
                             should_quit = true;
+                            ui_changed = true;
                         }
                         CommandOutcome::Reload => {
                             app.push_log(UiLevel::Info, "reloading config...");
+                            ui_changed = true;
                             match reload_handler(bot).await {
                                 Ok(result) => {
                                     app.apply_reload_result(result);
-                                    app.refresh_adapter_state(bot);
+                                    if app.refresh_adapter_state(bot) {
+                                        ui_changed = true;
+                                    }
                                 }
                                 Err(err) => {
                                     app.push_log(UiLevel::Warn, format!("reload failed: {err}"));
+                                    ui_changed = true;
                                 }
                             }
                         }
@@ -1615,16 +1647,20 @@ async fn run_tui_loop(
                                 Ok(message) => {
                                     app.push_log(UiLevel::Info, message);
                                     app.push_log(UiLevel::Info, "reloading config...");
+                                    ui_changed = true;
                                     match reload_handler(bot).await {
                                         Ok(result) => {
                                             app.apply_reload_result(result);
-                                            app.refresh_adapter_state(bot);
+                                            if app.refresh_adapter_state(bot) {
+                                                ui_changed = true;
+                                            }
                                         }
                                         Err(err) => {
                                             app.push_log(
                                                 UiLevel::Warn,
                                                 format!("reload failed: {err}"),
                                             );
+                                            ui_changed = true;
                                         }
                                     }
                                 }
@@ -1634,42 +1670,52 @@ async fn run_tui_loop(
                                         UiLevel::Warn,
                                         "runtime whitelist changed but config was not persisted",
                                     );
+                                    ui_changed = true;
                                 }
                             }
                         }
                         CommandOutcome::Llm(request) => {
-                            match llm_command_handler(request).await {
-                                Ok(message) => {
-                                    app.push_log(UiLevel::Info, message);
-                                }
-                                Err(err) => {
-                                    app.push_log(UiLevel::Warn, format!("llm command failed: {err}"));
-                                }
-                            }
+                            let tx = async_result_tx.clone();
+                            tokio::spawn(async move {
+                                let result = llm_command_handler(request).await;
+                                let _ = tx.send(AsyncCommandResult::Llm(result));
+                            });
+                            ui_changed = true;
                         }
                         CommandOutcome::Ask(prompt) => {
-                            match ask_handler(prompt).await {
-                                Ok(message) => {
-                                    app.push_log(UiLevel::Info, message);
-                                }
-                                Err(err) => {
-                                    app.push_log(UiLevel::Warn, format!("ask failed: {err}"));
-                                }
-                            }
+                            let tx = async_result_tx.clone();
+                            tokio::spawn(async move {
+                                let result = ask_handler(prompt).await;
+                                let _ = tx.send(AsyncCommandResult::Ask(result));
+                            });
+                            ui_changed = true;
                         }
-                        CommandOutcome::None => {}
+                        CommandOutcome::None => {
+                            ui_changed = true;
+                        }
                     }
                 }
-                app.flush_resume_if_needed(false);
-                terminal.draw(|frame| draw_ui(frame, app))?;
+                needs_redraw |= ui_changed;
             }
             Some(event) = ui_rx.recv() => {
                 app.apply_event(event);
                 while let Ok(next) = ui_rx.try_recv() {
                     app.apply_event(next);
                 }
-                app.flush_resume_if_needed(false);
-                terminal.draw(|frame| draw_ui(frame, app))?;
+                needs_redraw = true;
+            }
+            Some(async_result) = async_result_rx.recv() => {
+                match async_result {
+                    AsyncCommandResult::Llm(result) => match result {
+                        Ok(message) => app.push_log(UiLevel::Info, message),
+                        Err(err) => app.push_log(UiLevel::Warn, format!("llm command failed: {err}")),
+                    },
+                    AsyncCommandResult::Ask(result) => match result {
+                        Ok(message) => app.push_log(UiLevel::Info, message),
+                        Err(err) => app.push_log(UiLevel::Warn, format!("ask failed: {err}")),
+                    },
+                }
+                needs_redraw = true;
             }
             signal = tokio::signal::ctrl_c() => {
                 if signal.is_ok() {
@@ -1678,7 +1724,14 @@ async fn run_tui_loop(
                     app.push_log(UiLevel::Error, "failed to listen Ctrl+C signal");
                 }
                 should_quit = true;
+                needs_redraw = true;
             }
+        }
+
+        app.flush_resume_if_needed(false);
+        if needs_redraw {
+            terminal.draw(|frame| draw_ui(frame, app))?;
+            needs_redraw = false;
         }
     }
 
@@ -1910,7 +1963,7 @@ fn render_logs_panel(frame: &mut ratatui::Frame<'_>, app: &mut AppState, area: R
                 UiLevel::Event => ("EVT ", Style::default().fg(Color::Green)),
             };
             let prefix = format!("{} [{}] ", log.timestamp, tag);
-            let prefix_width = prefix.chars().count();
+            let prefix_width = UnicodeWidthStr::width(prefix.as_str());
             let message_width = log_text_width.saturating_sub(prefix_width).max(1);
             let wrapped_message = wrap_text_hard(log.message.as_str(), message_width);
             let first_line = wrapped_message.first().cloned().unwrap_or_default();
@@ -1995,8 +2048,14 @@ fn wrap_text_hard(text: &str, max_width: usize) -> Vec<String> {
         let mut chunk = String::new();
         let mut chunk_width = 0usize;
         for ch in source_line.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if !chunk.is_empty() && chunk_width + ch_width > width {
+                lines.push(chunk);
+                chunk = String::new();
+                chunk_width = 0;
+            }
             chunk.push(ch);
-            chunk_width += 1;
+            chunk_width += ch_width;
             if chunk_width >= width {
                 lines.push(chunk);
                 chunk = String::new();
@@ -2017,8 +2076,9 @@ fn wrap_text_hard(text: &str, max_width: usize) -> Vec<String> {
 fn poll_key_events(
     should_quit: &mut bool,
     app: &mut AppState,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+) -> Result<PollKeyEventsOutput, Box<dyn std::error::Error>> {
     let mut submitted = Vec::new();
+    let mut had_ui_change = false;
     while event::poll(Duration::from_millis(0))? {
         let CEvent::Key(key) = event::read()? else {
             continue;
@@ -2032,11 +2092,13 @@ fn poll_key_events(
         {
             app.push_log(UiLevel::Warn, "Ctrl+C key event received");
             *should_quit = true;
+            had_ui_change = true;
             continue;
         }
 
         match key.code {
             KeyCode::Enter => {
+                had_ui_change = true;
                 let input = app.console_input.trim().to_string();
                 if !input.is_empty() {
                     app.push_log(UiLevel::Info, format!("> {}", input));
@@ -2047,10 +2109,12 @@ fn poll_key_events(
                 app.reset_history_navigation();
             }
             KeyCode::Backspace => {
+                had_ui_change = true;
                 app.detach_from_history_cursor();
                 app.console_input.pop();
             }
             KeyCode::Up => {
+                had_ui_change = true;
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                     app.recall_previous_command();
                 } else if app.is_log_console_view()
@@ -2064,6 +2128,7 @@ fn poll_key_events(
                 }
             }
             KeyCode::Down => {
+                had_ui_change = true;
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                     app.recall_next_command();
                 } else if app.is_log_console_view()
@@ -2077,21 +2142,26 @@ fn poll_key_events(
                 }
             }
             KeyCode::Tab => {
+                had_ui_change = true;
                 app.autocomplete_console_input();
             }
             KeyCode::PageUp => {
+                had_ui_change = true;
                 app.clear_completion_state();
                 app.scroll_logs_page_up();
             }
             KeyCode::PageDown => {
+                had_ui_change = true;
                 app.clear_completion_state();
                 app.scroll_logs_page_down();
             }
             KeyCode::Home => {
+                had_ui_change = true;
                 app.clear_completion_state();
                 app.scroll_logs_top();
             }
             KeyCode::End => {
+                had_ui_change = true;
                 app.clear_completion_state();
                 app.scroll_logs_bottom();
             }
@@ -2102,17 +2172,22 @@ fn poll_key_events(
                 {
                     continue;
                 }
+                had_ui_change = true;
                 app.detach_from_history_cursor();
                 app.console_input.push(ch);
             }
             KeyCode::Esc => {
+                had_ui_change = true;
                 app.console_input.clear();
                 app.reset_history_navigation();
             }
             _ => {}
         }
     }
-    Ok(submitted)
+    Ok(PollKeyEventsOutput {
+        submitted_commands: submitted,
+        had_ui_change,
+    })
 }
 
 fn init_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, Box<dyn std::error::Error>> {
@@ -2377,6 +2452,19 @@ mod tests {
         let (x, y) = command_cursor_position(area, "/help");
         assert_eq!(y, 1);
         assert_eq!(x, 1 + 2 + 5);
+
+        let (x_cjk, y_cjk) = command_cursor_position(area, "你好");
+        assert_eq!(y_cjk, 1);
+        assert_eq!(x_cjk, 1 + 2 + 4);
+    }
+
+    #[test]
+    fn wrap_text_hard_respects_display_width_for_cjk() {
+        let wrapped = wrap_text_hard("你好世界", 4);
+        assert_eq!(wrapped, vec!["你好".to_string(), "世界".to_string()]);
+
+        let wrapped_mixed = wrap_text_hard("ab你好cd", 4);
+        assert_eq!(wrapped_mixed, vec!["ab你".to_string(), "好cd".to_string()]);
     }
 
     #[test]
