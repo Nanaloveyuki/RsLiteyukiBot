@@ -19,6 +19,26 @@ pub(crate) fn is_help_command(message: &str) -> bool {
     matches!(message.trim(), "/help" | "help")
 }
 
+pub(crate) fn parse_command_argument(message: &str, command_prefix: &str) -> Option<String> {
+    let command_prefix = command_prefix.trim();
+    if command_prefix.is_empty() {
+        return None;
+    }
+
+    let message = message.trim();
+    if message == command_prefix {
+        return Some(String::new());
+    }
+
+    let remainder = message.strip_prefix(command_prefix)?;
+    let mut chars = remainder.chars();
+    if !chars.next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+
+    Some(remainder.trim().to_string())
+}
+
 pub(crate) fn is_help_session_allowed(event: &SessionEvent, whitelist: &HashSet<String>) -> bool {
     whitelist.is_empty() || matched_help_whitelist_entry(event, whitelist).is_some()
 }
@@ -107,6 +127,14 @@ pub(crate) fn build_onebot_v11_help_reply_payload(
     event: &SessionEvent,
     echo: &str,
 ) -> Option<Value> {
+    build_onebot_v11_text_reply_payload(event, echo, EXTERNAL_HELP_TEXT)
+}
+
+pub(crate) fn build_onebot_v11_text_reply_payload(
+    event: &SessionEvent,
+    echo: &str,
+    text: &str,
+) -> Option<Value> {
     let object = event.payload.as_object()?;
     if object.get("post_type").and_then(Value::as_str) != Some("message") {
         return None;
@@ -122,10 +150,7 @@ pub(crate) fn build_onebot_v11_help_reply_payload(
         "message_type".to_string(),
         Value::String(message_type.to_string()),
     );
-    params.insert(
-        "message".to_string(),
-        Value::String(EXTERNAL_HELP_TEXT.to_string()),
-    );
+    params.insert("message".to_string(), Value::String(text.to_string()));
 
     if message_type.eq_ignore_ascii_case("group") {
         params.insert("group_id".to_string(), object.get("group_id")?.clone());

@@ -30,15 +30,17 @@ const RESUME_FLUSH_INTERVAL: Duration = Duration::from_millis(800);
 const DEFAULT_LOG_VIEW_ROWS: usize = 12;
 const DEFAULT_RESUME_MAX_SESSIONS: usize = 64;
 const DEFAULT_RESUME_MAX_SIZE_MIB: u64 = 16;
-const TUI_COMMANDS: [&str; 11] = [
+const TUI_COMMANDS: [&str; 13] = [
     "/help",
     "/reload",
     "/log",
     "/clear",
     "/adapters",
+    "/ask",
     "/resumes",
     "/history",
     "/resume",
+    "/llm",
     "/whitelist",
     "/quit",
     "/exit",
@@ -46,6 +48,10 @@ const TUI_COMMANDS: [&str; 11] = [
 const LOG_SUBCOMMANDS: [&str; 2] = ["on", "off"];
 const WHITELIST_SUBCOMMANDS: [&str; 3] = ["add", "remove", "list"];
 const WHITELIST_SCOPE_HINTS: [&str; 4] = ["private", "group", "session", "user"];
+const LLM_SUBCOMMANDS: [&str; 7] = [
+    "model", "apikey", "provider", "enable", "disable", "on", "off",
+];
+const LLM_PROVIDER_HINTS: [&str; 1] = ["openai"];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum UiLevel {
@@ -94,6 +100,19 @@ enum CommandOutcome {
     Quit,
     Reload,
     PersistWhitelist(Vec<String>),
+    Llm(LlmCommandRequest),
+    Ask(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LlmCommandRequest {
+    SetModel(String),
+    AddApiKeys(Vec<String>),
+    ProbeProvider(Option<String>),
+    SetEnabled {
+        enabled: bool,
+        provider: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +149,10 @@ pub struct ReloadResult {
 pub type ReloadFuture<'a> = Pin<Box<dyn Future<Output = Result<ReloadResult, String>> + 'a>>;
 pub type ReloadHandler = for<'a> fn(&'a mut LiteyukiBot) -> ReloadFuture<'a>;
 pub type PersistWhitelistHandler = fn(Vec<String>) -> Result<String, String>;
+pub type LlmCommandFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
+pub type LlmCommandHandler = fn(LlmCommandRequest) -> LlmCommandFuture<'static>;
+pub type AskFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
+pub type AskHandler = fn(String) -> AskFuture<'static>;
 
 pub struct RunOptions {
     pub target: RuntimeTarget,
@@ -139,6 +162,8 @@ pub struct RunOptions {
     pub tui_config: TuiConfig,
     pub reload_handler: ReloadHandler,
     pub whitelist_persist_handler: PersistWhitelistHandler,
+    pub llm_command_handler: LlmCommandHandler,
+    pub ask_handler: AskHandler,
     pub help_whitelist: Arc<RwLock<HashSet<String>>>,
 }
 
@@ -797,6 +822,120 @@ impl AppState {
         }
     }
 
+    fn show_llm_usage(&mut self) {
+        self.push_log(
+            UiLevel::Warn,
+            "usage: /llm model <name> | /llm apikey <k1> [k2 ...] | /llm provider [name] | /llm on|off|enable|disable [provider]",
+        );
+    }
+
+    fn parse_llm_provider(raw: &str) -> Option<String> {
+        let provider = raw.trim().to_ascii_lowercase();
+        if provider.is_empty() {
+            None
+        } else {
+            Some(provider)
+        }
+    }
+
+    fn parse_llm_api_keys(args: &[&str]) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut keys = Vec::new();
+        for value in args {
+            let key = value.trim().to_string();
+            if key.is_empty() {
+                continue;
+            }
+            if seen.insert(key.clone()) {
+                keys.push(key);
+            }
+        }
+        keys
+    }
+
+    fn handle_llm_command(&mut self, args: &[&str]) -> CommandOutcome {
+        let Some(subcommand) = args.first().copied() else {
+            self.show_llm_usage();
+            return CommandOutcome::None;
+        };
+
+        match subcommand {
+            "model" => {
+                let model = match args {
+                    [_, model] => model.trim(),
+                    _ => {
+                        self.show_llm_usage();
+                        return CommandOutcome::None;
+                    }
+                };
+                if model.is_empty() {
+                    self.show_llm_usage();
+                    return CommandOutcome::None;
+                }
+                self.push_log(UiLevel::Info, format!("updating llm.model -> {model}"));
+                CommandOutcome::Llm(LlmCommandRequest::SetModel(model.to_string()))
+            }
+            "apikey" => {
+                let keys = Self::parse_llm_api_keys(&args[1..]);
+                if keys.is_empty() {
+                    self.show_llm_usage();
+                    return CommandOutcome::None;
+                }
+                self.push_log(
+                    UiLevel::Info,
+                    format!("adding {} api key(s) to llm.api_keys", keys.len()),
+                );
+                CommandOutcome::Llm(LlmCommandRequest::AddApiKeys(keys))
+            }
+            "provider" => {
+                let provider = match args {
+                    [_] => None,
+                    [_, provider] => Self::parse_llm_provider(provider),
+                    _ => {
+                        self.show_llm_usage();
+                        return CommandOutcome::None;
+                    }
+                };
+                if let Some(provider) = provider.as_deref() {
+                    self.push_log(
+                        UiLevel::Info,
+                        format!("probing llm provider (override={provider}) ..."),
+                    );
+                } else {
+                    self.push_log(UiLevel::Info, "probing current llm provider ...");
+                }
+                CommandOutcome::Llm(LlmCommandRequest::ProbeProvider(provider))
+            }
+            "enable" | "on" | "disable" | "off" => {
+                let enabled = matches!(subcommand, "enable" | "on");
+                let provider = match args {
+                    [_] => None,
+                    [_, provider] => Self::parse_llm_provider(provider),
+                    _ => {
+                        self.show_llm_usage();
+                        return CommandOutcome::None;
+                    }
+                };
+                self.push_log(
+                    UiLevel::Info,
+                    format!(
+                        "setting llm {}{}",
+                        if enabled { "enabled" } else { "disabled" },
+                        provider
+                            .as_deref()
+                            .map(|provider| format!(" (provider={provider})"))
+                            .unwrap_or_default()
+                    ),
+                );
+                CommandOutcome::Llm(LlmCommandRequest::SetEnabled { enabled, provider })
+            }
+            _ => {
+                self.show_llm_usage();
+                CommandOutcome::None
+            }
+        }
+    }
+
     fn log_window_bounds(&self) -> (usize, usize) {
         let len = self.logs.len();
         if len == 0 {
@@ -848,6 +987,25 @@ impl AppState {
             .iter()
             .filter(|candidate| candidate.starts_with(prefix))
             .map(|candidate| format!("/whitelist {verb} {candidate} "))
+            .collect()
+    }
+
+    fn llm_subcommand_candidates(prefix: &str) -> Vec<String> {
+        LLM_SUBCOMMANDS
+            .iter()
+            .filter(|candidate| candidate.starts_with(prefix))
+            .map(|candidate| match *candidate {
+                "provider" => "/llm provider".to_string(),
+                _ => format!("/llm {candidate} "),
+            })
+            .collect()
+    }
+
+    fn llm_provider_candidates(verb: &str, prefix: &str) -> Vec<String> {
+        LLM_PROVIDER_HINTS
+            .iter()
+            .filter(|candidate| candidate.starts_with(prefix))
+            .map(|candidate| format!("/llm {verb} {candidate}"))
             .collect()
     }
 
@@ -942,12 +1100,63 @@ impl AppState {
         ))
     }
 
+    fn llm_completion_context(&self, input: &str) -> Option<(String, CompletionMode, Vec<String>)> {
+        let rest = input.strip_prefix("/llm ")?;
+        let rest = rest.trim_start();
+        if rest.is_empty() {
+            let candidates = Self::llm_subcommand_candidates("");
+            return Some((
+                "llm:subcommand:".to_string(),
+                CompletionMode::Rendered,
+                candidates,
+            ));
+        }
+
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        let trailing_space = input.ends_with(' ');
+        if tokens.len() == 1 {
+            let verb = tokens[0];
+            if trailing_space && matches!(verb, "provider" | "enable" | "on" | "disable" | "off") {
+                let candidates = Self::llm_provider_candidates(verb, "");
+                return Some((
+                    format!("llm:{verb}:provider:"),
+                    CompletionMode::Rendered,
+                    candidates,
+                ));
+            }
+            let candidates = Self::llm_subcommand_candidates(verb);
+            return Some((
+                format!("llm:subcommand:{verb}"),
+                CompletionMode::Rendered,
+                candidates,
+            ));
+        }
+
+        if tokens.len() == 2
+            && matches!(tokens[0], "provider" | "enable" | "on" | "disable" | "off")
+        {
+            let verb = tokens[0];
+            let prefix = if trailing_space { "" } else { tokens[1] };
+            let candidates = Self::llm_provider_candidates(verb, prefix);
+            return Some((
+                format!("llm:{verb}:provider:{prefix}"),
+                CompletionMode::Rendered,
+                candidates,
+            ));
+        }
+
+        None
+    }
+
     fn completion_context(&self) -> Option<(String, CompletionMode, Vec<String>)> {
         let input = self.console_input.trim_start();
         if let Some(ctx) = self.whitelist_completion_context(input) {
             return Some(ctx);
         }
         if let Some(ctx) = self.log_completion_context(input) {
+            return Some(ctx);
+        }
+        if let Some(ctx) = self.llm_completion_context(input) {
             return Some(ctx);
         }
         if let Some(prefix) = input.strip_prefix("/resume ") {
@@ -974,7 +1183,7 @@ impl AppState {
     fn apply_completion_candidate(mode: CompletionMode, candidate: &str) -> String {
         match mode {
             CompletionMode::Command => {
-                if matches!(candidate, "/resume" | "/whitelist") {
+                if matches!(candidate, "/resume" | "/whitelist" | "/llm" | "/ask") {
                     format!("{candidate} ")
                 } else {
                     candidate.to_string()
@@ -1154,11 +1363,15 @@ impl AppState {
             "/help" => {
                 self.push_log(
                     UiLevel::Info,
-                    "commands: /help /reload /log [on|off] /clear /adapters /resumes /history /resume <uid> /whitelist ... /quit /exit",
+                    "commands: /help /reload /log [on|off] /clear /adapters /ask <prompt> /resumes /history /resume <uid> /llm ... /whitelist ... /quit /exit",
                 );
                 self.push_log(
                     UiLevel::Info,
                     "whitelist: /whitelist list | /whitelist add <id|scope:id|scope id> | /whitelist remove <id|scope:id|scope id>",
+                );
+                self.push_log(
+                    UiLevel::Info,
+                    "llm: /llm model <name> | /llm apikey <k1> [k2 ...] | /llm provider [name] | /llm on|off|enable|disable [provider]",
                 );
                 self.push_log(
                     UiLevel::Info,
@@ -1256,6 +1469,15 @@ impl AppState {
                 }
                 CommandOutcome::None
             }
+            "/ask" => {
+                let prompt = parts.collect::<Vec<&str>>().join(" ").trim().to_string();
+                if prompt.is_empty() {
+                    self.push_log(UiLevel::Warn, "usage: /ask <prompt>");
+                    return CommandOutcome::None;
+                }
+                self.push_log(UiLevel::Info, "sending /ask request...");
+                CommandOutcome::Ask(prompt)
+            }
             "/resumes" | "/history" => {
                 self.show_resume_list();
                 CommandOutcome::None
@@ -1284,6 +1506,10 @@ impl AppState {
                 let args: Vec<&str> = parts.collect();
                 self.handle_whitelist_command(&args)
             }
+            "/llm" => {
+                let args: Vec<&str> = parts.collect();
+                self.handle_llm_command(&args)
+            }
             _ => {
                 self.push_log(UiLevel::Warn, format!("unknown command: {cmd}. try /help"));
                 CommandOutcome::None
@@ -1305,6 +1531,8 @@ pub async fn run(
         tui_config,
         reload_handler,
         whitelist_persist_handler,
+        llm_command_handler,
+        ask_handler,
         help_whitelist,
     } = options;
     let mut app = AppState::new(target, settings_desc, adapter_configs, tui_config);
@@ -1336,6 +1564,8 @@ pub async fn run(
         &mut app,
         reload_handler,
         whitelist_persist_handler,
+        llm_command_handler,
+        ask_handler,
         ui_rx,
     )
     .await;
@@ -1351,6 +1581,8 @@ async fn run_tui_loop(
     app: &mut AppState,
     reload_handler: ReloadHandler,
     whitelist_persist_handler: PersistWhitelistHandler,
+    llm_command_handler: LlmCommandHandler,
+    ask_handler: AskHandler,
     ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut tick = tokio::time::interval(Duration::from_millis(120));
@@ -1402,6 +1634,26 @@ async fn run_tui_loop(
                                         UiLevel::Warn,
                                         "runtime whitelist changed but config was not persisted",
                                     );
+                                }
+                            }
+                        }
+                        CommandOutcome::Llm(request) => {
+                            match llm_command_handler(request).await {
+                                Ok(message) => {
+                                    app.push_log(UiLevel::Info, message);
+                                }
+                                Err(err) => {
+                                    app.push_log(UiLevel::Warn, format!("llm command failed: {err}"));
+                                }
+                            }
+                        }
+                        CommandOutcome::Ask(prompt) => {
+                            match ask_handler(prompt).await {
+                                Ok(message) => {
+                                    app.push_log(UiLevel::Info, message);
+                                }
+                                Err(err) => {
+                                    app.push_log(UiLevel::Warn, format!("ask failed: {err}"));
                                 }
                             }
                         }
@@ -2310,6 +2562,113 @@ mod tests {
                 .iter()
                 .any(|log| log.message.contains("whitelist entries"))
         );
+
+        remove_file_if_exists(&path);
+    }
+
+    #[test]
+    fn llm_command_parses_actions() {
+        let path = temp_resume_path("llm-command");
+        remove_file_if_exists(&path);
+
+        let mut app = AppState::new(
+            RuntimeTarget::Cli,
+            "test".to_string(),
+            Vec::new(),
+            test_tui_config(path.clone()),
+        );
+
+        let outcome = app.handle_console_command("/llm model gpt-4.1-mini");
+        assert!(matches!(
+            outcome,
+            CommandOutcome::Llm(LlmCommandRequest::SetModel(_))
+        ));
+
+        let outcome = app.handle_console_command("/llm apikey k1 k2");
+        assert!(matches!(
+            outcome,
+            CommandOutcome::Llm(LlmCommandRequest::AddApiKeys(_))
+        ));
+
+        let outcome = app.handle_console_command("/llm provider openai");
+        assert!(matches!(
+            outcome,
+            CommandOutcome::Llm(LlmCommandRequest::ProbeProvider(Some(_)))
+        ));
+
+        let outcome = app.handle_console_command("/llm on openai");
+        assert!(matches!(
+            outcome,
+            CommandOutcome::Llm(LlmCommandRequest::SetEnabled { enabled: true, .. })
+        ));
+
+        remove_file_if_exists(&path);
+    }
+
+    #[test]
+    fn ask_command_parses_prompt() {
+        let path = temp_resume_path("ask-command");
+        remove_file_if_exists(&path);
+
+        let mut app = AppState::new(
+            RuntimeTarget::Cli,
+            "test".to_string(),
+            Vec::new(),
+            test_tui_config(path.clone()),
+        );
+
+        let outcome = app.handle_console_command("/ask hello world");
+        assert!(matches!(outcome, CommandOutcome::Ask(_)));
+
+        let outcome = app.handle_console_command("/ask");
+        assert!(matches!(outcome, CommandOutcome::None));
+        assert!(
+            app.logs
+                .iter()
+                .any(|log| log.message.contains("usage: /ask"))
+        );
+
+        remove_file_if_exists(&path);
+    }
+
+    #[test]
+    fn autocomplete_includes_ask_command() {
+        let path = temp_resume_path("autocomplete-ask");
+        remove_file_if_exists(&path);
+
+        let mut app = AppState::new(
+            RuntimeTarget::Cli,
+            "test".to_string(),
+            Vec::new(),
+            test_tui_config(path.clone()),
+        );
+
+        app.console_input = "/as".to_string();
+        app.autocomplete_console_input();
+        assert_eq!(app.console_input, "/ask ");
+
+        remove_file_if_exists(&path);
+    }
+
+    #[test]
+    fn autocomplete_llm_subcommands_and_provider() {
+        let path = temp_resume_path("autocomplete-llm");
+        remove_file_if_exists(&path);
+
+        let mut app = AppState::new(
+            RuntimeTarget::Cli,
+            "test".to_string(),
+            Vec::new(),
+            test_tui_config(path.clone()),
+        );
+
+        app.console_input = "/llm ".to_string();
+        app.autocomplete_console_input();
+        assert_eq!(app.console_input, "/llm model ");
+
+        app.console_input = "/llm on ".to_string();
+        app.autocomplete_console_input();
+        assert_eq!(app.console_input, "/llm on openai");
 
         remove_file_if_exists(&path);
     }

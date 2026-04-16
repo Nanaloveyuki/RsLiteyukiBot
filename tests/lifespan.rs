@@ -1,11 +1,11 @@
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use liteyukibot_core::{
     HookFilter, LifecycleContext, LifecycleFailurePolicy, LifecyclePhase, Lifespan, RuntimeFlavor,
 };
 use tokio::sync::Barrier;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{Duration, sleep, timeout};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lifecycle_hooks_share_context_state() {

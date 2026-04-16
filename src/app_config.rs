@@ -19,6 +19,12 @@ pub(crate) const APP_CONFIG_PATHS: [&str; 6] = [
 static LAST_RELOAD_WARNING_STATE: LazyLock<Mutex<Option<ReloadWarningState>>> =
     LazyLock::new(|| Mutex::new(None));
 
+const DEFAULT_LLM_PROVIDER: &str = "openai";
+const DEFAULT_LLM_BASE_URL: &str = "https://api.openai.com";
+const DEFAULT_LLM_MODEL: &str = "gpt-4.1-mini";
+const DEFAULT_LLM_TIMEOUT_SECONDS: u64 = 20;
+const DEFAULT_LLM_COMMAND_PREFIX: &str = "/ask";
+
 #[derive(Debug, Deserialize, Default)]
 pub(crate) struct AppConfigDoc {
     #[serde(default)]
@@ -33,6 +39,8 @@ pub(crate) struct AppConfigDoc {
     pub(crate) connect: Option<ConnectConfigSection>,
     #[serde(default)]
     pub(crate) tui: Option<TuiConfigSection>,
+    #[serde(default)]
+    pub(crate) llm: Option<LlmConfigSection>,
     #[serde(default, rename = "onebot-v11", alias = "onebot_v11")]
     pub(crate) onebot_v11: Option<OnebotV11ConfigSection>,
 }
@@ -249,6 +257,40 @@ pub(crate) struct TuiResumeSection {
     pub(crate) max_size_mib: Option<u64>,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct LlmConfigSection {
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) provider: Option<String>,
+    #[serde(default)]
+    pub(crate) base_url: Option<String>,
+    #[serde(default)]
+    pub(crate) api_keys: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) api_key: Option<String>,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    #[serde(default)]
+    pub(crate) timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub(crate) system_prompt: Option<String>,
+    #[serde(default)]
+    pub(crate) command_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LlmRuntimeConfig {
+    pub(crate) enabled: bool,
+    pub(crate) provider: String,
+    pub(crate) base_url: String,
+    pub(crate) api_keys: Vec<String>,
+    pub(crate) model: String,
+    pub(crate) timeout_ms: u64,
+    pub(crate) system_prompt: Option<String>,
+    pub(crate) command_prefix: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct AdapterConfigDoc {
     pub(crate) adapters: Vec<AdapterConfig>,
@@ -267,10 +309,6 @@ impl ReloadWarningState {
             log: config_log(doc).cloned(),
         }
     }
-}
-
-pub(crate) fn load_app_config() -> AppConfigDoc {
-    load_app_config_with_warnings(true).0
 }
 
 pub(crate) fn load_app_config_with_warnings(emit_stderr: bool) -> (AppConfigDoc, Vec<String>) {
@@ -399,6 +437,18 @@ connect:
     max_connections: 100
     timeout_seconds: 30
 
+llm:
+  enabled: false
+  provider: openai
+  base_url: https://api.openai.com
+  model: gpt-4.1-mini
+  timeout_seconds: 20
+  command_prefix: /ask
+  # api_keys:
+  #   - sk-xxx
+  # api_key: sk-xxx
+  # system_prompt: "You are a helpful assistant."
+
 onebot-v11:
   # 仅白名单会话可触发外部 /help。
   # 可写纯ID（private常用 user_id；group常用 group_id）或带前缀:
@@ -456,6 +506,17 @@ max_payload_size = 1048576
 max_connections = 100
 timeout_seconds = 30
 
+[llm]
+enabled = false
+provider = "openai"
+base_url = "https://api.openai.com"
+model = "gpt-4.1-mini"
+timeout_seconds = 20
+command_prefix = "/ask"
+# api_keys = ["sk-xxx"]
+# api_key = "sk-xxx"
+# system_prompt = "You are a helpful assistant."
+
 [onebot-v11]
 # whitelist = ["3541766758", "private:3541766758", "group:699493240"]
 whitelist = []
@@ -494,6 +555,10 @@ fn config_tui_resume(doc: &AppConfigDoc) -> Option<&TuiResumeSection> {
         .and_then(|section| section.tui.as_ref())
         .and_then(|tui| tui.resume.as_ref())
         .or(doc.tui.as_ref().and_then(|tui| tui.resume.as_ref()))
+}
+
+fn config_llm(doc: &AppConfigDoc) -> Option<&LlmConfigSection> {
+    doc.llm.as_ref()
 }
 
 fn config_runtime(doc: &AppConfigDoc) -> Option<&RuntimeConfigSection> {
@@ -588,6 +653,109 @@ pub(crate) fn resolve_tui_config(app_config: &AppConfigDoc) -> tui::TuiConfig {
     }
 
     config
+}
+
+pub(crate) fn resolve_llm_config(app_config: &AppConfigDoc) -> LlmRuntimeConfig {
+    let section = config_llm(app_config);
+
+    let enabled = std::env::var("LY_LLM_ENABLED")
+        .ok()
+        .and_then(|raw| parse_bool_env(raw.trim()))
+        .or_else(|| section.and_then(|cfg| cfg.enabled))
+        .unwrap_or(false);
+
+    let provider = std::env::var("LY_LLM_PROVIDER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| section.and_then(|cfg| cfg.provider.clone()))
+        .unwrap_or_else(|| DEFAULT_LLM_PROVIDER.to_string());
+    let provider = if provider.trim().is_empty() {
+        DEFAULT_LLM_PROVIDER.to_string()
+    } else {
+        provider.trim().to_ascii_lowercase()
+    };
+
+    let base_url = std::env::var("LY_LLM_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| section.and_then(|cfg| cfg.base_url.clone()))
+        .unwrap_or_else(|| DEFAULT_LLM_BASE_URL.to_string());
+    let base_url = if base_url.trim().is_empty() {
+        DEFAULT_LLM_BASE_URL.to_string()
+    } else {
+        base_url.trim().trim_end_matches('/').to_string()
+    };
+
+    let mut api_keys = std::env::var("LY_LLM_API_KEYS")
+        .ok()
+        .map(|raw| parse_llm_key_list(raw.as_str()))
+        .unwrap_or_default();
+    if api_keys.is_empty()
+        && let Some(section_keys) = section.and_then(|cfg| cfg.api_keys.clone())
+    {
+        api_keys = normalize_llm_key_list(section_keys);
+    }
+
+    let single_api_key = std::env::var("LY_LLM_API_KEY")
+        .ok()
+        .or_else(|| section.and_then(|cfg| cfg.api_key.clone()))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(single_api_key) = single_api_key {
+        api_keys.push(single_api_key);
+    }
+    api_keys = normalize_llm_key_list(api_keys);
+
+    let model = std::env::var("LY_LLM_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| section.and_then(|cfg| cfg.model.clone()))
+        .unwrap_or_else(|| DEFAULT_LLM_MODEL.to_string());
+    let model = if model.trim().is_empty() {
+        DEFAULT_LLM_MODEL.to_string()
+    } else {
+        model.trim().to_string()
+    };
+
+    let timeout_seconds = std::env::var("LY_LLM_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .or_else(|| {
+            section
+                .and_then(|cfg| cfg.timeout_seconds)
+                .filter(|value| *value > 0)
+        })
+        .unwrap_or(DEFAULT_LLM_TIMEOUT_SECONDS);
+    let timeout_ms = seconds_to_timeout_ms(Some(timeout_seconds));
+
+    let system_prompt = std::env::var("LY_LLM_SYSTEM_PROMPT")
+        .ok()
+        .or_else(|| section.and_then(|cfg| cfg.system_prompt.clone()))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let command_prefix = std::env::var("LY_LLM_COMMAND_PREFIX")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| section.and_then(|cfg| cfg.command_prefix.clone()))
+        .unwrap_or_else(|| DEFAULT_LLM_COMMAND_PREFIX.to_string());
+    let command_prefix = if command_prefix.trim().is_empty() {
+        DEFAULT_LLM_COMMAND_PREFIX.to_string()
+    } else {
+        command_prefix.trim().to_string()
+    };
+
+    LlmRuntimeConfig {
+        enabled,
+        provider,
+        base_url,
+        api_keys,
+        model,
+        timeout_ms,
+        system_prompt,
+        command_prefix,
+    }
 }
 
 pub(crate) fn connect_to_adapter_configs(doc: &AppConfigDoc) -> Vec<AdapterConfig> {
@@ -974,6 +1142,56 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
         }
     }
 
+    if let Some(llm) = config_llm(doc) {
+        if llm.timeout_seconds.is_some_and(|value| value == 0) {
+            warnings.push("llm.timeout_seconds should be > 0".to_string());
+        }
+        if llm
+            .api_keys
+            .as_ref()
+            .is_some_and(|keys| keys.iter().any(|key| key.trim().is_empty()))
+        {
+            warnings.push("llm.api_keys should not contain empty values".to_string());
+        }
+        if llm.enabled.unwrap_or(false) {
+            let has_non_empty_api_key = llm
+                .api_key
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+            let has_non_empty_api_keys = llm
+                .api_keys
+                .as_ref()
+                .is_some_and(|keys| keys.iter().any(|value| !value.trim().is_empty()));
+            if !has_non_empty_api_key && !has_non_empty_api_keys {
+                warnings.push("llm.enabled is true but llm.api_key/api_keys is empty".to_string());
+            }
+            if llm
+                .model
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                warnings.push("llm.enabled is true but llm.model is empty".to_string());
+            }
+        }
+        if let Some(provider) = llm.provider.as_deref()
+            && !provider.trim().is_empty()
+            && !provider.eq_ignore_ascii_case(DEFAULT_LLM_PROVIDER)
+        {
+            warnings.push(format!(
+                "llm.provider='{}' is not built-in yet (only '{}')",
+                provider.trim(),
+                DEFAULT_LLM_PROVIDER
+            ));
+        }
+        if llm
+            .command_prefix
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            warnings.push("llm.command_prefix should not be empty".to_string());
+        }
+    }
+
     if let Some(onebot) = config_onebot_v11(doc) {
         for entry in &onebot.whitelist {
             if entry.as_token().is_empty() {
@@ -1049,4 +1267,35 @@ pub(crate) fn log_has_startup_only_fields(log: &Option<LogConfigSection>) -> boo
             || log.timestamp_format.is_some()
             || log.timestamp_pattern.is_some()
     })
+}
+
+fn parse_bool_env(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_llm_key_list(raw: &str) -> Vec<String> {
+    raw.split([',', ';', '\n', '\r'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn normalize_llm_key_list(keys: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for key in keys {
+        let key = key.trim().to_string();
+        if key.is_empty() {
+            continue;
+        }
+        if seen.insert(key.clone()) {
+            normalized.push(key);
+        }
+    }
+    normalized
 }

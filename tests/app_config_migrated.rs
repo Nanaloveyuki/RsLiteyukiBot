@@ -61,6 +61,7 @@ fn validate_app_config_reports_invalid_values() {
         adapters: None,
         connect: None,
         tui: None,
+        llm: None,
         onebot_v11: None,
     };
 
@@ -90,6 +91,7 @@ fn runtime_reload_warnings_detect_low_level_runtime_fields() {
         adapters: None,
         connect: None,
         tui: None,
+        llm: None,
         onebot_v11: None,
     };
 
@@ -126,6 +128,7 @@ fn runtime_reload_warnings_skip_when_sensitive_fields_unchanged() {
         adapters: None,
         connect: None,
         tui: None,
+        llm: None,
         onebot_v11: None,
     };
 
@@ -164,6 +167,7 @@ fn connect_websocket_both_mode_generates_forward_and_reverse_adapters() {
             sse: None,
         }),
         tui: None,
+        llm: None,
         onebot_v11: None,
     };
 
@@ -210,6 +214,7 @@ fn connect_websocket_port_without_mode_defaults_to_reverse() {
             sse: None,
         }),
         tui: None,
+        llm: None,
         onebot_v11: None,
     };
 
@@ -229,6 +234,7 @@ fn resolve_help_whitelist_accepts_numeric_and_prefixed_entries() {
         adapters: None,
         connect: None,
         tui: None,
+        llm: None,
         onebot_v11: Some(OnebotV11ConfigSection {
             whitelist: vec![
                 OnebotWhitelistEntry::UInt(3541766758),
@@ -253,6 +259,7 @@ fn validate_app_config_warns_empty_onebot_whitelist_entry() {
         adapters: None,
         connect: None,
         tui: None,
+        llm: None,
         onebot_v11: Some(OnebotV11ConfigSection {
             whitelist: vec![OnebotWhitelistEntry::Text("  ".to_string())],
         }),
@@ -262,5 +269,79 @@ fn validate_app_config_warns_empty_onebot_whitelist_entry() {
         warnings
             .iter()
             .any(|warning| warning.contains("onebot-v11.whitelist"))
+    );
+}
+
+#[test]
+fn resolve_llm_config_reads_values_from_config() {
+    let doc = AppConfigDoc {
+        rust: None,
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: None,
+        tui: None,
+        llm: Some(LlmConfigSection {
+            enabled: Some(true),
+            provider: Some("openai".to_string()),
+            base_url: Some("https://api.openai.com/".to_string()),
+            api_keys: Some(vec!["sk-test".to_string(), "sk-b".to_string()]),
+            api_key: Some("sk-test".to_string()),
+            model: Some("gpt-4.1-mini".to_string()),
+            timeout_seconds: Some(12),
+            system_prompt: Some("system".to_string()),
+            command_prefix: Some("/ask".to_string()),
+        }),
+        onebot_v11: None,
+    };
+
+    let config = resolve_llm_config(&doc);
+    assert!(config.enabled);
+    assert_eq!(config.provider, "openai");
+    assert_eq!(config.base_url, "https://api.openai.com");
+    assert_eq!(config.api_keys.len(), 2);
+    assert_eq!(config.api_keys.first().map(|s| s.as_str()), Some("sk-test"));
+    assert_eq!(config.timeout_ms, 12_000);
+}
+
+#[test]
+fn validate_app_config_warns_when_llm_is_enabled_without_api_key() {
+    let doc = AppConfigDoc {
+        rust: None,
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: None,
+        tui: None,
+        llm: Some(LlmConfigSection {
+            enabled: Some(true),
+            provider: Some("not-built-in".to_string()),
+            base_url: None,
+            api_keys: None,
+            api_key: None,
+            model: Some("".to_string()),
+            timeout_seconds: Some(0),
+            system_prompt: None,
+            command_prefix: Some(" ".to_string()),
+        }),
+        onebot_v11: None,
+    };
+
+    let warnings = validate_app_config(&doc);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("llm.api_key/api_keys"))
+    );
+    assert!(warnings.iter().any(|warning| warning.contains("llm.model")));
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("not built-in yet"))
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("llm.timeout_seconds"))
     );
 }

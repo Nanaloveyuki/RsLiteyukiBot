@@ -158,7 +158,11 @@ async fn bot_start_adapter_failure_rolls_back_runtime_and_processes() {
     );
 
     let send_err = bot
-        .send(BotEvent::new(11, "integration.rollback", json!({ "ok": true })))
+        .send(BotEvent::new(
+            11,
+            "integration.rollback",
+            json!({ "ok": true }),
+        ))
         .await
         .expect_err("runtime should be rolled back");
     assert!(matches!(send_err, LiteyukiBotError::NotStarted));

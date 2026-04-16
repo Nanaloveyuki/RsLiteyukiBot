@@ -124,7 +124,9 @@ fn adapter_replace_configs_rejects_duplicates_without_mutating_existing_state() 
     let result = manager.replace_configs(vec![dup_a, dup_b]);
     assert!(result.is_err(), "duplicate replace should fail");
 
-    let kept = manager.get("keep-http").expect("existing config should remain");
+    let kept = manager
+        .get("keep-http")
+        .expect("existing config should remain");
     assert_eq!(kept.id, old.id);
     assert_eq!(kept.endpoint.url, old.endpoint.url);
 }

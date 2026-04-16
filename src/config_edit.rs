@@ -25,6 +25,39 @@ pub fn persist_onebot_v11_whitelist(path: &Path, entries: &[String]) -> Result<(
     Ok(())
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct LlmConfigPatch {
+    pub enabled: Option<bool>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub api_keys: Option<Vec<String>>,
+}
+
+pub fn persist_llm_config(path: &Path, patch: &LlmConfigPatch) -> Result<(), String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read config {}: {err}", path.display()))?;
+    let ext = path
+        .extension()
+        .and_then(|raw| raw.to_str())
+        .map(|raw| raw.to_ascii_lowercase());
+    let normalized_patch = normalize_llm_patch(patch);
+
+    let updated = match ext.as_deref() {
+        Some("yaml") | Some("yml") => update_yaml_llm_document(&content, &normalized_patch),
+        Some("toml") => update_toml_llm_document(&content, &normalized_patch),
+        _ => {
+            return Err(format!(
+                "unsupported config extension for {} (expected .yaml/.yml/.toml)",
+                path.display()
+            ));
+        }
+    };
+
+    std::fs::write(path, updated)
+        .map_err(|err| format!("failed to write config {}: {err}", path.display()))?;
+    Ok(())
+}
+
 fn normalize_entries(entries: &[String]) -> Vec<String> {
     let mut normalized: Vec<String> = entries
         .iter()
@@ -33,6 +66,49 @@ fn normalize_entries(entries: &[String]) -> Vec<String> {
         .collect();
     normalized.sort();
     normalized.dedup();
+    normalized
+}
+
+fn normalize_llm_patch(patch: &LlmConfigPatch) -> LlmConfigPatch {
+    let provider = patch
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    let model = patch
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let api_keys = patch
+        .api_keys
+        .as_ref()
+        .map(|keys| normalize_entries_preserve_order(keys))
+        .filter(|keys| !keys.is_empty());
+
+    LlmConfigPatch {
+        enabled: patch.enabled,
+        provider,
+        model,
+        api_keys,
+    }
+}
+
+fn normalize_entries_preserve_order(entries: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut normalized = Vec::new();
+    for raw in entries {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let value = raw.to_string();
+        if seen.insert(value.clone()) {
+            normalized.push(value);
+        }
+    }
     normalized
 }
 
@@ -155,6 +231,214 @@ fn update_toml_document(content: &str, entries: &[String]) -> String {
     join_lines(&lines, newline, trailing_newline)
 }
 
+fn update_yaml_llm_document(content: &str, patch: &LlmConfigPatch) -> String {
+    let newline = detect_newline(content);
+    let trailing_newline = content.ends_with('\n');
+    let mut lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
+
+    let section_index = lines
+        .iter()
+        .position(|line| matches!(line.trim(), "llm:" | "'llm':" | "\"llm\":"));
+    let section_start = if let Some(index) = section_index {
+        index
+    } else {
+        if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push("llm:".to_string());
+        lines.len() - 1
+    };
+    let section_indent = leading_spaces(lines[section_start].as_str());
+
+    if let Some(enabled) = patch.enabled {
+        upsert_yaml_scalar(
+            &mut lines,
+            section_start,
+            section_indent,
+            "enabled",
+            &enabled.to_string(),
+        );
+    }
+    if let Some(provider) = patch.provider.as_deref() {
+        let escaped = provider.replace('\'', "''");
+        upsert_yaml_scalar(
+            &mut lines,
+            section_start,
+            section_indent,
+            "provider",
+            &format!("'{escaped}'"),
+        );
+    }
+    if let Some(model) = patch.model.as_deref() {
+        let escaped = model.replace('\'', "''");
+        upsert_yaml_scalar(
+            &mut lines,
+            section_start,
+            section_indent,
+            "model",
+            &format!("'{escaped}'"),
+        );
+    }
+    if let Some(api_keys) = patch.api_keys.as_ref() {
+        upsert_yaml_list(
+            &mut lines,
+            section_start,
+            section_indent,
+            "api_keys",
+            api_keys,
+        );
+    }
+
+    join_lines(&lines, newline, trailing_newline)
+}
+
+fn upsert_yaml_scalar(
+    lines: &mut Vec<String>,
+    section_start: usize,
+    section_indent: usize,
+    key: &str,
+    value: &str,
+) {
+    let section_end = find_yaml_section_end(lines, section_start, section_indent);
+    let key_indent = section_indent + 2;
+    let key_index = (section_start + 1..section_end).find(|&idx| {
+        let line = lines[idx].as_str();
+        leading_spaces(line) == key_indent && line.trim_start().starts_with(&format!("{key}:"))
+    });
+
+    let rendered = format!("{}{}: {}", " ".repeat(key_indent), key, value);
+    if let Some(index) = key_index {
+        let block_end = find_yaml_key_block_end(lines, index, section_end);
+        lines.splice(index..block_end, vec![rendered]);
+    } else {
+        lines.splice(section_end..section_end, vec![rendered]);
+    }
+}
+
+fn upsert_yaml_list(
+    lines: &mut Vec<String>,
+    section_start: usize,
+    section_indent: usize,
+    key: &str,
+    entries: &[String],
+) {
+    let section_end = find_yaml_section_end(lines, section_start, section_indent);
+    let key_indent = section_indent + 2;
+    let key_index = (section_start + 1..section_end).find(|&idx| {
+        let line = lines[idx].as_str();
+        leading_spaces(line) == key_indent && line.trim_start().starts_with(&format!("{key}:"))
+    });
+
+    let rendered = render_yaml_string_list(key_indent, key, entries);
+    if let Some(index) = key_index {
+        let block_end = find_yaml_key_block_end(lines, index, section_end);
+        lines.splice(index..block_end, rendered);
+    } else {
+        lines.splice(section_end..section_end, rendered);
+    }
+}
+
+fn find_yaml_key_block_end(lines: &[String], key_index: usize, section_end: usize) -> usize {
+    let key_indent = leading_spaces(lines[key_index].as_str());
+    let mut block_end = key_index + 1;
+    while block_end < section_end {
+        let line = lines[block_end].as_str();
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            block_end += 1;
+            continue;
+        }
+        let indent = leading_spaces(line);
+        if indent <= key_indent {
+            break;
+        }
+        block_end += 1;
+    }
+    block_end
+}
+
+fn render_yaml_string_list(indent: usize, key: &str, entries: &[String]) -> Vec<String> {
+    let prefix = " ".repeat(indent);
+    if entries.is_empty() {
+        return vec![format!("{prefix}{key}: []")];
+    }
+    let mut lines = vec![format!("{prefix}{key}:")];
+    for entry in entries {
+        let escaped = entry.replace('\'', "''");
+        lines.push(format!("{prefix}  - '{escaped}'"));
+    }
+    lines
+}
+
+fn update_toml_llm_document(content: &str, patch: &LlmConfigPatch) -> String {
+    let newline = detect_newline(content);
+    let trailing_newline = content.ends_with('\n');
+    let mut lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
+
+    let table_index = lines.iter().position(|line| line.trim() == "[llm]");
+    let table_start = if let Some(index) = table_index {
+        index
+    } else {
+        if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push("[llm]".to_string());
+        lines.len() - 1
+    };
+
+    if let Some(enabled) = patch.enabled {
+        upsert_toml_llm_key(&mut lines, table_start, "enabled", &enabled.to_string());
+    }
+    if let Some(provider) = patch.provider.as_deref() {
+        let escaped = provider.replace('\\', "\\\\").replace('"', "\\\"");
+        upsert_toml_llm_key(
+            &mut lines,
+            table_start,
+            "provider",
+            &format!("\"{escaped}\""),
+        );
+    }
+    if let Some(model) = patch.model.as_deref() {
+        let escaped = model.replace('\\', "\\\\").replace('"', "\\\"");
+        upsert_toml_llm_key(&mut lines, table_start, "model", &format!("\"{escaped}\""));
+    }
+    if let Some(api_keys) = patch.api_keys.as_ref() {
+        let value = render_toml_string_list(api_keys);
+        upsert_toml_llm_key(&mut lines, table_start, "api_keys", &value);
+    }
+
+    join_lines(&lines, newline, trailing_newline)
+}
+
+fn upsert_toml_llm_key(lines: &mut Vec<String>, table_start: usize, key: &str, value: &str) {
+    let table_end = find_toml_table_end(lines, table_start);
+    let existing = (table_start + 1..table_end).find(|&idx| {
+        let trimmed = lines[idx].trim_start();
+        trimmed.starts_with(key) && trimmed.contains('=')
+    });
+    let rendered = format!("{key} = {value}");
+    if let Some(index) = existing {
+        lines[index] = rendered;
+    } else {
+        lines.splice(table_end..table_end, vec![rendered]);
+    }
+}
+
+fn render_toml_string_list(entries: &[String]) -> String {
+    if entries.is_empty() {
+        return "[]".to_string();
+    }
+    let rendered = entries
+        .iter()
+        .map(|entry| {
+            let escaped = entry.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{escaped}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{rendered}]")
+}
+
 fn find_toml_table_end(lines: &[String], table_start: usize) -> usize {
     for (idx, line) in lines.iter().enumerate().skip(table_start + 1) {
         let trimmed = line.trim();
@@ -231,5 +515,39 @@ mod tests {
         );
         assert!(updated.contains("whitelist = [\"private:1000\", \"group:2000\"]"));
         assert!(updated.contains("[rust]"));
+    }
+
+    #[test]
+    fn update_yaml_llm_rewrites_target_fields() {
+        let source = "llm:\n  enabled: false\n  provider: 'openai'\n  model: 'gpt-old'\n";
+        let patch = LlmConfigPatch {
+            enabled: Some(true),
+            provider: Some("openai".to_string()),
+            model: Some("gpt-4.1-mini".to_string()),
+            api_keys: Some(vec!["k1".to_string(), "k2".to_string()]),
+        };
+        let updated = update_yaml_llm_document(source, &patch);
+        assert!(updated.contains("llm:"));
+        assert!(updated.contains("enabled: true"));
+        assert!(updated.contains("provider: 'openai'"));
+        assert!(updated.contains("model: 'gpt-4.1-mini'"));
+        assert!(updated.contains("api_keys:\n    - 'k1'\n    - 'k2'"));
+    }
+
+    #[test]
+    fn update_toml_llm_inserts_section_when_missing() {
+        let source = "[rust]\nadapters = []\n";
+        let patch = LlmConfigPatch {
+            enabled: Some(true),
+            provider: Some("openai".to_string()),
+            model: Some("gpt-4.1-mini".to_string()),
+            api_keys: Some(vec!["k1".to_string()]),
+        };
+        let updated = update_toml_llm_document(source, &patch);
+        assert!(updated.contains("[llm]"));
+        assert!(updated.contains("enabled = true"));
+        assert!(updated.contains("provider = \"openai\""));
+        assert!(updated.contains("model = \"gpt-4.1-mini\""));
+        assert!(updated.contains("api_keys = [\"k1\"]"));
     }
 }

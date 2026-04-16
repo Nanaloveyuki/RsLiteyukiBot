@@ -71,6 +71,16 @@ fn help_command_matcher_supports_help_variants() {
 }
 
 #[test]
+fn parse_command_argument_supports_exact_and_prefix_forms() {
+    assert_eq!(
+        parse_command_argument("/ask hello world", "/ask").as_deref(),
+        Some("hello world")
+    );
+    assert_eq!(parse_command_argument("/ask", "/ask").as_deref(), Some(""));
+    assert!(parse_command_argument("/askhello", "/ask").is_none());
+}
+
+#[test]
 fn help_session_whitelist_matches_private_and_group_rules() {
     let private_event = SessionEvent {
         event_id: 1,

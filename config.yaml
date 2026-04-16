@@ -54,6 +54,19 @@ connect:
     max_connections: 100
     timeout_seconds: 30
 
+llm:
+  # 建议把密钥放到独立 llm-config.yaml（或设置 LY_LLM_CONFIG_PATH）并加入 .gitignore。
+  enabled: true
+  provider: openai
+  base_url: https://api.openai.com/v1
+  model: gpt-5.2
+  timeout_seconds: 20
+  command_prefix: /ask
+  # api_keys:
+  #   - sk-xxx
+  # api_key moved to llm-config.yaml
+  system_prompt: "You are a helpful assistant."
+
 onebot-v11:
   # 仅白名单会话可触发外部 /help。
   # 可写纯ID（private常用 user_id；group常用 group_id）或带前缀:

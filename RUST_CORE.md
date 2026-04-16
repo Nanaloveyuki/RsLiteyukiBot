@@ -57,6 +57,15 @@ Top-level schema:
 - `tui.resume.store_path`
 - `tui.resume.max_sessions`
 - `tui.resume.max_size_mib`
+- `llm.enabled/provider/base_url/api_keys/api_key/model/timeout_seconds/system_prompt/command_prefix`
+
+LLM 配置支持独立文件覆盖（建议用于密钥隔离）:
+
+- 环境变量 `LY_LLM_CONFIG_PATH`（最高优先级）
+- `llm-config.yaml`
+- `llm-config.toml`
+
+运行时会把该文件中的 `llm` 段覆盖到主配置上。
 
 Or nested under `rust`:
 
