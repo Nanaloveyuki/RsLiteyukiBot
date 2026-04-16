@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -33,6 +34,11 @@ async fn liteyuki_bot_orchestrates_runtime_and_managed_processes() {
     let (processed_tx, mut processed_rx) = mpsc::unbounded_channel::<u64>();
     let starts = Arc::new(AtomicUsize::new(0));
     let starts_for_runner = Arc::clone(&starts);
+    let restart_observed_starts = Arc::new(AtomicUsize::new(0));
+    let restart_observed_starts_for_hook = Arc::clone(&restart_observed_starts);
+    let starts_for_restart_hook = Arc::clone(&starts);
+    let shutdown_notifications = Arc::new(Mutex::new(Vec::<String>::new()));
+    let shutdown_notifications_for_hook = Arc::clone(&shutdown_notifications);
 
     let mut bot = LiteyukiBot::builder("rs-liteyuki", "0.2.0")
         .with_target(RuntimeTarget::CliWeb)
@@ -48,6 +54,28 @@ async fn liteyuki_bot_orchestrates_runtime_and_managed_processes() {
         context.set_meta("boot.mode", "integration");
         Ok(())
     });
+    bot.on_before_process_shutdown_sync(
+        "shutdown-notify",
+        HookFilter::default(),
+        move |_context, process_name| {
+            shutdown_notifications_for_hook
+                .lock()
+                .expect("test hook mutex should not be poisoned")
+                .push(process_name.to_string());
+            Ok(())
+        },
+    );
+    bot.lifespan_mut().on_after_restart_sync(
+        "restart-observer",
+        HookFilter::default(),
+        move |_context| {
+            restart_observed_starts_for_hook.store(
+                starts_for_restart_hook.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
+            Ok(())
+        },
+    );
 
     let process_name = "heartbeat";
     let process_spec = ManagedProcessSpec::new(process_name);
@@ -96,6 +124,10 @@ async fn liteyuki_bot_orchestrates_runtime_and_managed_processes() {
     bot.restart_process(process_name)
         .await
         .expect("process restart should succeed");
+    assert!(
+        restart_observed_starts.load(Ordering::SeqCst) >= 2,
+        "after_restart should run after process restart is effective"
+    );
 
     timeout(Duration::from_secs(1), async {
         while starts.load(Ordering::SeqCst) < 2 {
@@ -106,6 +138,18 @@ async fn liteyuki_bot_orchestrates_runtime_and_managed_processes() {
     .expect("managed process should restart");
 
     bot.shutdown().await.expect("shutdown should succeed");
+    let notifications = shutdown_notifications
+        .lock()
+        .expect("test hook mutex should not be poisoned")
+        .clone();
+    assert!(
+        notifications.iter().any(|name| name == process_name),
+        "managed process should receive before_process_shutdown hook"
+    );
+    assert!(
+        notifications.iter().any(|name| name == "runtime"),
+        "runtime should receive before_process_shutdown hook"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

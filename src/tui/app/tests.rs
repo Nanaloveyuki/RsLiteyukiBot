@@ -538,6 +538,42 @@ fn autocomplete_includes_ask_command() {
 }
 
 #[test]
+fn llm_apikey_command_is_redacted_for_display() {
+    let path = temp_resume_path("redact-apikey");
+    remove_file_if_exists(&path);
+
+    let app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+
+    let redacted = app.redact_console_command_for_display("/llm apikey sk-1 sk-2");
+    assert_eq!(redacted, "/llm apikey <redacted:2>");
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn llm_apikey_command_is_not_recorded_into_history() {
+    let path = temp_resume_path("history-apikey");
+    remove_file_if_exists(&path);
+
+    let app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+
+    assert!(!app.should_record_command_history("/llm apikey sk-secret"));
+    assert!(app.should_record_command_history("/ask hello"));
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
 fn autocomplete_llm_subcommands_and_provider() {
     let path = temp_resume_path("autocomplete-llm");
     remove_file_if_exists(&path);
