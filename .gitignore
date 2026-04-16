@@ -86,6 +86,8 @@ pdm.lock
 # config
 config.yaml
 config.toml
+llm-config.yaml
+llm-config.toml
 
 # dev doc
 dev-docs/
