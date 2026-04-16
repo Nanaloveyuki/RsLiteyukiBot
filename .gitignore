@@ -87,5 +87,5 @@ pdm.lock
 config.yaml
 config.toml
 
-# onebot v11 doc
-dev-docs/onebot-v11/
+# dev doc
+dev-docs/
