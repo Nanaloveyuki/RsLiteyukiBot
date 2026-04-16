@@ -4,12 +4,17 @@ use reqwest::Client;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::app_config::LlmRuntimeConfig;
-
 const OUTPUT_TRUNCATE_LIMIT: usize = 320;
 
+pub trait OpenAiRuntimeConfig {
+    fn base_url(&self) -> &str;
+    fn model(&self) -> &str;
+    fn timeout_ms(&self) -> u64;
+    fn system_prompt(&self) -> Option<&str>;
+}
+
 #[derive(Debug, Clone)]
-pub(crate) struct OpenAiResponsesClient {
+pub struct OpenAiResponsesClient {
     client: Client,
     base_url: String,
     api_key: String,
@@ -18,7 +23,7 @@ pub(crate) struct OpenAiResponsesClient {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum LlmClientError {
+pub enum LlmClientError {
     NotConfigured(String),
     Http(String),
     Upstream { status: u16, detail: String },
@@ -41,8 +46,8 @@ impl std::fmt::Display for LlmClientError {
 impl std::error::Error for LlmClientError {}
 
 impl OpenAiResponsesClient {
-    pub(crate) fn from_runtime_with_api_key(
-        config: &LlmRuntimeConfig,
+    pub fn from_runtime_with_api_key(
+        config: &impl OpenAiRuntimeConfig,
         api_key: &str,
     ) -> Result<Self, LlmClientError> {
         let api_key = api_key.trim().to_string();
@@ -52,20 +57,20 @@ impl OpenAiResponsesClient {
             ));
         }
         let client = Client::builder()
-            .timeout(Duration::from_millis(config.timeout_ms.max(10)))
+            .timeout(Duration::from_millis(config.timeout_ms().max(10)))
             .build()
             .map_err(|err| LlmClientError::NotConfigured(format!("reqwest init failed: {err}")))?;
 
         Ok(Self {
             client,
-            base_url: config.base_url.trim_end_matches('/').to_string(),
+            base_url: config.base_url().trim_end_matches('/').to_string(),
             api_key,
-            model: config.model.clone(),
-            system_prompt: config.system_prompt.clone(),
+            model: config.model().to_string(),
+            system_prompt: config.system_prompt().map(ToString::to_string),
         })
     }
 
-    pub(crate) async fn generate(&self, prompt: &str) -> Result<String, LlmClientError> {
+    pub async fn generate(&self, prompt: &str) -> Result<String, LlmClientError> {
         let responses_request = ResponsesRequest::from_input(
             self.model.clone(),
             self.system_prompt.clone(),

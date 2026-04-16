@@ -489,6 +489,30 @@ fn llm_command_parses_actions() {
         CommandOutcome::Llm(LlmCommandRequest::SetEnabled { enabled: true, .. })
     ));
 
+    let outcome = app.handle_console_command("/llm prompt list");
+    assert!(matches!(
+        outcome,
+        CommandOutcome::Llm(LlmCommandRequest::PromptList)
+    ));
+
+    let outcome = app.handle_console_command("/llm prompt use default");
+    assert!(matches!(
+        outcome,
+        CommandOutcome::Llm(LlmCommandRequest::PromptUse(_))
+    ));
+
+    let outcome = app.handle_console_command("/llm prompt set roleplay answer like pirate");
+    assert!(matches!(
+        outcome,
+        CommandOutcome::Llm(LlmCommandRequest::PromptSet { .. })
+    ));
+
+    let outcome = app.handle_console_command("/llm prompt preview hello");
+    assert!(matches!(
+        outcome,
+        CommandOutcome::Llm(LlmCommandRequest::PromptPreview { .. })
+    ));
+
     remove_file_if_exists(&path);
 }
 
@@ -592,6 +616,10 @@ fn autocomplete_llm_subcommands_and_provider() {
     app.console_input = "/llm on ".to_string();
     app.autocomplete_console_input();
     assert_eq!(app.console_input, "/llm on openai");
+
+    app.console_input = "/llm prompt ".to_string();
+    app.autocomplete_console_input();
+    assert_eq!(app.console_input, "/llm prompt list");
 
     remove_file_if_exists(&path);
 }

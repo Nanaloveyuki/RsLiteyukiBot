@@ -299,7 +299,7 @@ fn push_llm_response_logs(app: &mut AppState, message: String) {
     let normalized = message.replace("\r\n", "\n").replace('\r', "\n");
     let mut lines = normalized.split('\n').peekable();
     if lines.peek().is_none() {
-        app.push_log(UiLevel::Llm, "LLM> ");
+        app.push_log(UiLevel::Llm, " ");
         return;
     }
 
@@ -307,10 +307,10 @@ fn push_llm_response_logs(app: &mut AppState, message: String) {
     for line in lines {
         let content = if line.is_empty() { " " } else { line };
         if is_first {
-            app.push_log(UiLevel::Llm, format!("LLM> {content}"));
+            app.push_log(UiLevel::Llm, content);
             is_first = false;
         } else {
-            app.push_log(UiLevel::Llm, format!("LLM| {content}"));
+            app.push_log(UiLevel::Llm, format!("  {content}"));
         }
     }
 }
@@ -358,9 +358,9 @@ mod tests {
         assert_eq!(
             tail.into_iter().rev().collect::<Vec<_>>(),
             vec![
-                (UiLevel::Llm, "LLM> line-1".to_string()),
-                (UiLevel::Llm, "LLM| line-2".to_string()),
-                (UiLevel::Llm, "LLM| line-3".to_string()),
+                (UiLevel::Llm, "line-1".to_string()),
+                (UiLevel::Llm, "  line-2".to_string()),
+                (UiLevel::Llm, "  line-3".to_string()),
             ]
         );
     }
@@ -380,9 +380,9 @@ mod tests {
         assert_eq!(
             tail.into_iter().rev().collect::<Vec<_>>(),
             vec![
-                "LLM> first".to_string(),
-                "LLM|  ".to_string(),
-                "LLM| third".to_string(),
+                "first".to_string(),
+                "   ".to_string(),
+                "  third".to_string(),
             ]
         );
     }

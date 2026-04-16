@@ -63,8 +63,8 @@ const TUI_COMMANDS: [&str; 13] = [
 const LOG_SUBCOMMANDS: [&str; 2] = ["on", "off"];
 const WHITELIST_SUBCOMMANDS: [&str; 3] = ["add", "remove", "list"];
 const WHITELIST_SCOPE_HINTS: [&str; 4] = ["private", "group", "session", "user"];
-const LLM_SUBCOMMANDS: [&str; 7] = [
-    "model", "apikey", "provider", "enable", "disable", "on", "off",
+const LLM_SUBCOMMANDS: [&str; 8] = [
+    "model", "apikey", "provider", "enable", "disable", "on", "off", "prompt",
 ];
 const LLM_PROVIDER_HINTS: [&str; 1] = ["openai"];
 
@@ -138,6 +138,16 @@ pub enum LlmCommandRequest {
     SetEnabled {
         enabled: bool,
         provider: Option<String>,
+    },
+    PromptList,
+    PromptUse(String),
+    PromptSet {
+        name: String,
+        soul: String,
+    },
+    PromptRemove(String),
+    PromptPreview {
+        user_prompt: String,
     },
 }
 

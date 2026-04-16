@@ -5,6 +5,7 @@ use std::sync::{LazyLock, Mutex};
 use liteyukibot_core::AdapterConfig;
 use serde::Deserialize;
 
+use crate::llm;
 use crate::tui;
 
 pub(crate) const APP_CONFIG_PATHS: [&str; 6] = [
@@ -297,6 +298,24 @@ pub(crate) struct LlmRuntimeConfig {
     pub(crate) timeout_ms: u64,
     pub(crate) system_prompt: Option<String>,
     pub(crate) command_prefix: String,
+}
+
+impl llm::OpenAiRuntimeConfig for LlmRuntimeConfig {
+    fn base_url(&self) -> &str {
+        self.base_url.as_str()
+    }
+
+    fn model(&self) -> &str {
+        self.model.as_str()
+    }
+
+    fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+
+    fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_deref()
+    }
 }
 
 #[derive(Debug, Deserialize)]

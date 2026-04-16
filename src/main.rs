@@ -16,12 +16,15 @@ use tokio::sync::mpsc;
 
 mod app_config;
 mod config_edit;
-mod llm_client;
+mod llm;
 mod onebot_support;
 mod tui;
 
+use crate::llm::{
+    LlmClientError, LlmPromptPreview, LlmPromptProfile, LlmPromptStore, OpenAiResponsesClient,
+    build_prompt_preview, compose_user_prompt,
+};
 use app_config::*;
-use llm_client::OpenAiResponsesClient;
 use onebot_support::*;
 
 const APP_TITLE: &str = "RsLiteyukiBot";
@@ -29,6 +32,7 @@ const DEFAULT_RUNTIME_TARGET: RuntimeTarget = RuntimeTarget::Cli;
 const EXTERNAL_API_TIMEOUT: Duration = Duration::from_secs(12);
 const LLM_USAGE_TEXT: &str = "用法: /ask 你的问题";
 const LLM_CONFIG_PATHS: [&str; 2] = ["llm-config.yaml", "llm-config.toml"];
+const LLM_PROMPT_STORE_PATH: &str = "llm-prompts.json";
 
 static LLM_API_KEY_ROUND_ROBIN: AtomicU64 = AtomicU64::new(0);
 
@@ -719,10 +723,15 @@ async fn generate_llm_reply(prompt: &str) -> Result<String, String> {
     let Some(api_key) = pick_next_api_key(&llm_config) else {
         return Err("缺少 API Key，请在 TUI 输入 /llm apikey <key>".to_string());
     };
+    let prompt_profile = current_active_prompt_profile()?;
+    let composed_prompt = compose_user_prompt(prompt, prompt_profile.soul.as_str());
 
     let client = OpenAiResponsesClient::from_runtime_with_api_key(&llm_config, &api_key)
-        .map_err(|err| err.to_string())?;
-    client.generate(prompt).await.map_err(|err| err.to_string())
+        .map_err(|err: LlmClientError| err.to_string())?;
+    client
+        .generate(composed_prompt.as_str())
+        .await
+        .map_err(|err| err.to_string())
 }
 
 fn pick_next_api_key(llm_config: &LlmRuntimeConfig) -> Option<String> {
@@ -850,6 +859,70 @@ fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFutu
                     path.display()
                 ))
             }
+            tui::LlmCommandRequest::PromptList => {
+                let store = load_llm_prompt_store()?;
+                let path = resolve_llm_prompt_store_path();
+                let mut names = store.profile_names();
+                names.sort();
+
+                let lines = names
+                    .into_iter()
+                    .map(|name| {
+                        if name == store.active_profile {
+                            format!("* {name}")
+                        } else {
+                            format!("  {name}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                Ok(format!(
+                    "llm prompt profiles ({})\n{}",
+                    path.display(),
+                    lines
+                ))
+            }
+            tui::LlmCommandRequest::PromptUse(name) => {
+                let mut store = load_llm_prompt_store()?;
+                store.set_active_profile(name.as_str())?;
+                let path = persist_llm_prompt_store(&store)?;
+                Ok(format!(
+                    "llm active prompt profile -> '{}' ({})",
+                    store.active_profile,
+                    path.display()
+                ))
+            }
+            tui::LlmCommandRequest::PromptSet { name, soul } => {
+                let mut store = load_llm_prompt_store()?;
+                store.upsert_profile(name.as_str(), soul.as_str())?;
+                let path = persist_llm_prompt_store(&store)?;
+                Ok(format!(
+                    "llm prompt profile '{}' updated ({})",
+                    name,
+                    path.display()
+                ))
+            }
+            tui::LlmCommandRequest::PromptRemove(name) => {
+                let mut store = load_llm_prompt_store()?;
+                store.remove_profile(name.as_str())?;
+                let path = persist_llm_prompt_store(&store)?;
+                Ok(format!(
+                    "llm prompt profile '{}' removed ({})",
+                    name,
+                    path.display()
+                ))
+            }
+            tui::LlmCommandRequest::PromptPreview { user_prompt } => {
+                let llm_config = current_llm_runtime_config()?;
+                let profile = current_active_prompt_profile()?;
+                let preview = build_prompt_preview(
+                    llm_config.system_prompt.as_deref(),
+                    user_prompt.as_str(),
+                    profile.soul.as_str(),
+                );
+                Ok(format_prompt_preview(&profile.name, &preview))
+            }
         }
     })
 }
@@ -889,6 +962,31 @@ fn resolve_llm_config_write_path() -> PathBuf {
         return PathBuf::from(path);
     }
     PathBuf::from(LLM_CONFIG_PATHS[0])
+}
+
+fn resolve_llm_prompt_store_path() -> PathBuf {
+    if let Ok(path) = std::env::var("LY_LLM_PROMPT_STORE_PATH")
+        && !path.trim().is_empty()
+    {
+        return PathBuf::from(path);
+    }
+    PathBuf::from(LLM_PROMPT_STORE_PATH)
+}
+
+fn load_llm_prompt_store() -> Result<LlmPromptStore, String> {
+    let path = resolve_llm_prompt_store_path();
+    LlmPromptStore::load_or_default_from_path(path.as_path())
+}
+
+fn persist_llm_prompt_store(store: &LlmPromptStore) -> Result<PathBuf, String> {
+    let path = resolve_llm_prompt_store_path();
+    store.save_to_path(path.as_path())?;
+    Ok(path)
+}
+
+fn current_active_prompt_profile() -> Result<LlmPromptProfile, String> {
+    let store = load_llm_prompt_store()?;
+    Ok(store.active_profile())
 }
 
 fn ensure_llm_config_file(path: &std::path::Path) -> Result<(), String> {
@@ -973,6 +1071,24 @@ async fn probe_llm_configuration(llm_config: &LlmRuntimeConfig) -> Result<String
         "llm probe success: provider={} model={} output={}",
         llm_config.provider, llm_config.model, preview
     ))
+}
+
+fn format_prompt_preview(profile_name: &str, preview: &LlmPromptPreview) -> String {
+    let system_prompt = if preview.system_prompt.trim().is_empty() {
+        "<empty>".to_string()
+    } else {
+        preview.system_prompt.clone()
+    };
+    let composed_user_prompt = if preview.composed_user_prompt.trim().is_empty() {
+        "<empty>".to_string()
+    } else {
+        preview.composed_user_prompt.clone()
+    };
+
+    format!(
+        "active profile: {profile_name}\nsystem prompt:\n{system_prompt}\n\ncomposed user prompt:\n{composed_user_prompt}\n\ncombined prompt preview:\n{}",
+        preview.combined_prompt
+    )
 }
 
 fn truncate_text_for_log(raw: &str, max_chars: usize) -> String {

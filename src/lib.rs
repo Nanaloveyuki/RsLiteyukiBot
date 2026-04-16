@@ -2,6 +2,7 @@ pub mod adapter;
 pub mod bootstrap;
 pub mod comm;
 pub mod core;
+pub mod llm;
 pub mod observability;
 pub mod plugin;
 pub mod session;
@@ -24,6 +25,10 @@ pub use core::{
     LiteyukiBotBuilder, LiteyukiBotError, ManagedProcessRunner, ManagedProcessSpec, ProcessManager,
     ProcessManagerError, RestartPolicy, RuntimeCapabilities, RuntimeFlavor, RuntimeTarget,
     format_event_text, format_event_with,
+};
+pub use llm::{
+    LlmClientError, LlmPromptPreview, LlmPromptProfile, LlmPromptStore, OpenAiResponsesClient,
+    OpenAiRuntimeConfig, build_prompt_preview, compose_user_prompt,
 };
 pub use observability::{LogLevel, LogMode, Logger, LoggerConfig, TimeZone, TimestampFormat};
 pub use plugin::{

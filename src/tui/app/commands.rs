@@ -150,7 +150,7 @@ impl AppState {
     pub(super) fn show_llm_usage(&mut self) {
         self.push_log(
             UiLevel::Warn,
-            "usage: /llm model <name> | /llm apikey <k1> [k2 ...] | /llm provider [name] | /llm on|off|enable|disable [provider]",
+            "usage: /llm model <name> | /llm apikey <k1> [k2 ...] | /llm provider [name] | /llm on|off|enable|disable [provider] | /llm prompt list|use <name>|set <name> <soul>|remove <name>|preview [user_prompt]",
         );
     }
 
@@ -280,6 +280,67 @@ impl AppState {
                 );
                 CommandOutcome::Llm(LlmCommandRequest::SetEnabled { enabled, provider })
             }
+            "prompt" => match args {
+                [_, "list"] => {
+                    self.push_log(UiLevel::Info, "listing llm prompt profiles...");
+                    CommandOutcome::Llm(LlmCommandRequest::PromptList)
+                }
+                [_, "use", name] => {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        self.show_llm_usage();
+                        return CommandOutcome::None;
+                    }
+                    self.push_log(
+                        UiLevel::Info,
+                        format!("switching llm prompt profile -> {name}"),
+                    );
+                    CommandOutcome::Llm(LlmCommandRequest::PromptUse(name.to_string()))
+                }
+                [_, "set", name, soul @ ..] => {
+                    let name = name.trim();
+                    let soul = soul.join(" ").trim().to_string();
+                    if name.is_empty() || soul.is_empty() {
+                        self.show_llm_usage();
+                        return CommandOutcome::None;
+                    }
+                    self.push_log(
+                        UiLevel::Info,
+                        format!("updating llm prompt profile '{name}'"),
+                    );
+                    CommandOutcome::Llm(LlmCommandRequest::PromptSet {
+                        name: name.to_string(),
+                        soul,
+                    })
+                }
+                [_, "remove", name] => {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        self.show_llm_usage();
+                        return CommandOutcome::None;
+                    }
+                    self.push_log(
+                        UiLevel::Info,
+                        format!("removing llm prompt profile '{name}'"),
+                    );
+                    CommandOutcome::Llm(LlmCommandRequest::PromptRemove(name.to_string()))
+                }
+                [_, "preview"] => {
+                    self.push_log(UiLevel::Info, "previewing active prompt profile...");
+                    CommandOutcome::Llm(LlmCommandRequest::PromptPreview {
+                        user_prompt: String::new(),
+                    })
+                }
+                [_, "preview", user_prompt @ ..] => {
+                    let user_prompt = user_prompt.join(" ").trim().to_string();
+                    self.push_log(UiLevel::Info, "previewing active prompt profile...");
+                    CommandOutcome::Llm(LlmCommandRequest::PromptPreview { user_prompt })
+                }
+                _ => {
+                    self.show_llm_usage();
+                    CommandOutcome::None
+                }
+            },
             _ => {
                 self.show_llm_usage();
                 CommandOutcome::None
@@ -347,7 +408,19 @@ impl AppState {
             .filter(|candidate| candidate.starts_with(prefix))
             .map(|candidate| match *candidate {
                 "provider" => "/llm provider".to_string(),
+                "prompt" => "/llm prompt ".to_string(),
                 _ => format!("/llm {candidate} "),
+            })
+            .collect()
+    }
+
+    pub(super) fn llm_prompt_subcommand_candidates(prefix: &str) -> Vec<String> {
+        ["list", "use", "set", "remove", "preview"]
+            .iter()
+            .filter(|candidate| candidate.starts_with(prefix))
+            .map(|candidate| match *candidate {
+                "list" => "/llm prompt list".to_string(),
+                _ => format!("/llm prompt {candidate} "),
             })
             .collect()
     }
@@ -481,6 +554,14 @@ impl AppState {
                     candidates,
                 ));
             }
+            if trailing_space && verb == "prompt" {
+                let candidates = Self::llm_prompt_subcommand_candidates("");
+                return Some((
+                    "llm:prompt:subcommand:".to_string(),
+                    CompletionMode::Rendered,
+                    candidates,
+                ));
+            }
             let candidates = Self::llm_subcommand_candidates(verb);
             return Some((
                 format!("llm:subcommand:{verb}"),
@@ -497,6 +578,16 @@ impl AppState {
             let candidates = Self::llm_provider_candidates(verb, prefix);
             return Some((
                 format!("llm:{verb}:provider:{prefix}"),
+                CompletionMode::Rendered,
+                candidates,
+            ));
+        }
+
+        if tokens.len() == 2 && tokens[0] == "prompt" {
+            let prefix = if trailing_space { "" } else { tokens[1] };
+            let candidates = Self::llm_prompt_subcommand_candidates(prefix);
+            return Some((
+                format!("llm:prompt:subcommand:{prefix}"),
                 CompletionMode::Rendered,
                 candidates,
             ));
@@ -728,7 +819,7 @@ impl AppState {
                 );
                 self.push_log(
                     UiLevel::Info,
-                    "llm: /llm model <name> | /llm apikey <k1> [k2 ...] | /llm provider [name] | /llm on|off|enable|disable [provider]",
+                    "llm: /llm model <name> | /llm apikey <k1> [k2 ...] | /llm provider [name] | /llm on|off|enable|disable [provider] | /llm prompt list|use <name>|set <name> <soul>|remove <name>|preview [user_prompt]",
                 );
                 self.push_log(
                     UiLevel::Info,
@@ -916,7 +1007,7 @@ impl AppState {
             "/ask" => Some("命令说明: /ask <prompt> 后台请求 LLM，不阻塞终端刷新"),
             "/resumes" | "/history" => Some("命令说明: /resumes 或 /history 查看历史会话快照"),
             "/resume" => Some("命令说明: /resume <uid> 切换到指定历史会话"),
-            "/llm" => Some("命令说明: /llm 管理模型、Key、provider 与开关"),
+            "/llm" => Some("命令说明: /llm 管理模型、Key、provider 与 prompt profile"),
             "/whitelist" => Some("命令说明: /whitelist 管理 external /help 白名单"),
             "/quit" | "/exit" => Some("命令说明: /quit 或 /exit 安全退出程序"),
             _ => None,

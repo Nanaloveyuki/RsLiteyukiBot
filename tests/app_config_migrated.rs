@@ -2,6 +2,9 @@
 #[path = "../src/app_config.rs"]
 mod app_config;
 #[allow(dead_code, unused_imports)]
+#[path = "../src/llm/mod.rs"]
+mod llm;
+#[allow(dead_code, unused_imports)]
 #[path = "../src/tui/mod.rs"]
 mod tui;
 
