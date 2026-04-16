@@ -28,8 +28,11 @@ pub(super) fn poll_key_events(
                 had_ui_change = true;
                 let input = app.console_input.trim().to_string();
                 if !input.is_empty() {
-                    app.push_log(UiLevel::Info, format!("> {}", input));
-                    app.record_command(&input);
+                    let display_input = app.redact_console_command_for_display(&input);
+                    app.push_log(UiLevel::Info, format!("> {}", display_input));
+                    if app.should_record_command_history(&input) {
+                        app.record_command(&input);
+                    }
                     submitted.push(input);
                 }
                 app.console_input.clear();

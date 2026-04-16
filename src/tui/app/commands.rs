@@ -178,6 +178,32 @@ impl AppState {
         keys
     }
 
+    fn is_sensitive_console_command(command: &str) -> bool {
+        let mut parts = command.split_whitespace();
+        matches!((parts.next(), parts.next()), (Some("/llm"), Some("apikey")))
+    }
+
+    pub(super) fn should_record_command_history(&self, command: &str) -> bool {
+        !Self::is_sensitive_console_command(command)
+    }
+
+    pub(super) fn redact_console_command_for_display(&self, command: &str) -> String {
+        if !Self::is_sensitive_console_command(command) {
+            return command.to_string();
+        }
+
+        let key_count = command
+            .split_whitespace()
+            .skip(2)
+            .filter(|token| !token.is_empty())
+            .count();
+        if key_count == 0 {
+            "/llm apikey <redacted>".to_string()
+        } else {
+            format!("/llm apikey <redacted:{key_count}>")
+        }
+    }
+
     pub(super) fn handle_llm_command(&mut self, args: &[&str]) -> CommandOutcome {
         let Some(subcommand) = args.first().copied() else {
             self.show_llm_usage();

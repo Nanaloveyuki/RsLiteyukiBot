@@ -40,6 +40,8 @@ pub use self::runtime::run;
 const UI_LOG_CAPACITY: usize = 300;
 const COMMAND_HISTORY_CAPACITY: usize = 200;
 const RESUME_FLUSH_INTERVAL: Duration = Duration::from_millis(800);
+const ASYNC_COMMAND_RESULT_CAPACITY: usize = 64;
+const ASYNC_COMMAND_CONCURRENCY_LIMIT: usize = 4;
 const DEFAULT_LOG_VIEW_ROWS: usize = 12;
 const DEFAULT_RESUME_MAX_SESSIONS: usize = 64;
 const DEFAULT_RESUME_MAX_SIZE_MIB: u64 = 16;
@@ -66,12 +68,13 @@ const LLM_SUBCOMMANDS: [&str; 7] = [
 ];
 const LLM_PROVIDER_HINTS: [&str; 1] = ["openai"];
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiLevel {
     Info,
     Warn,
     Error,
     Event,
+    Llm,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,7 +173,7 @@ pub struct ReloadResult {
 }
 
 pub type ReloadFuture<'a> = Pin<Box<dyn Future<Output = Result<ReloadResult, String>> + 'a>>;
-pub type ReloadHandler = for<'a> fn(&'a mut LiteyukiBot) -> ReloadFuture<'a>;
+pub type ReloadHandler = for<'a> fn(&'a LiteyukiBot) -> ReloadFuture<'a>;
 pub type PersistWhitelistHandler = fn(Vec<String>) -> Result<String, String>;
 pub type LlmCommandFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
 pub type LlmCommandHandler = fn(LlmCommandRequest) -> LlmCommandFuture<'static>;
@@ -316,6 +319,7 @@ struct AppState {
     active_resume_uid: String,
     resume_dirty: bool,
     last_resume_flush: Instant,
+    last_resume_save_error: Option<String>,
     view_mode: UiViewMode,
     completion_state: Option<CompletionState>,
     help_whitelist: Option<Arc<RwLock<HashSet<String>>>>,
@@ -371,20 +375,45 @@ fn wrap_text_hard(text: &str, max_width: usize) -> Vec<String> {
 fn init_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    if let Err(err) = execute!(stdout, EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(err.into());
+    }
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
+    let mut terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(err) => {
+            let _ = disable_raw_mode();
+            let mut rollback_stdout = io::stdout();
+            let _ = execute!(rollback_stdout, LeaveAlternateScreen);
+            return Err(err.into());
+        }
+    };
+    if let Err(err) = terminal.clear() {
+        let _ = restore_terminal(&mut terminal);
+        return Err(err.into());
+    }
     Ok(terminal)
 }
 
 fn restore_terminal(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-    Ok(())
+    let mut errors = Vec::new();
+    if let Err(err) = disable_raw_mode() {
+        errors.push(format!("disable_raw_mode failed: {err}"));
+    }
+    if let Err(err) = execute!(terminal.backend_mut(), LeaveAlternateScreen) {
+        errors.push(format!("leave alternate screen failed: {err}"));
+    }
+    if let Err(err) = terminal.show_cursor() {
+        errors.push(format!("show cursor failed: {err}"));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(errors.join("; ")).into())
+    }
 }
 
 fn rounded_block<'a>(title: &'a str) -> Block<'a> {

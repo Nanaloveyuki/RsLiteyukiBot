@@ -1,4 +1,5 @@
 use super::*;
+use tokio::sync::Semaphore;
 
 #[derive(Clone, Copy)]
 struct LoopHandlers {
@@ -9,7 +10,7 @@ struct LoopHandlers {
 }
 
 pub async fn run(
-    bot: &mut LiteyukiBot,
+    bot: &LiteyukiBot,
     options: RunOptions,
     ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -62,16 +63,19 @@ pub async fn run(
         }
     };
     let loop_result = run_tui_loop(&mut terminal, bot, &mut app, handlers, ui_rx).await;
-
-    let _ = restore_terminal(&mut terminal);
+    let restore_result = restore_terminal(&mut terminal);
     set_console_log_output_enabled(previous_console_log_output);
     app.flush_resume_if_needed(true);
-    loop_result
+    match (loop_result, restore_result) {
+        (Err(err), _) => Err(err),
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(err)) => Err(err),
+    }
 }
 
 async fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    bot: &mut LiteyukiBot,
+    bot: &LiteyukiBot,
     app: &mut AppState,
     handlers: LoopHandlers,
     ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
@@ -81,10 +85,40 @@ async fn run_tui_loop(
     let mut should_quit = false;
     let mut needs_redraw = true;
     let mut last_uptime_sec = app.started_at.elapsed().as_secs();
-    let (async_result_tx, mut async_result_rx) = mpsc::unbounded_channel::<AsyncCommandResult>();
+    let (async_result_tx, mut async_result_rx) =
+        mpsc::channel::<AsyncCommandResult>(ASYNC_COMMAND_RESULT_CAPACITY);
+    let async_command_limiter = Arc::new(Semaphore::new(ASYNC_COMMAND_CONCURRENCY_LIMIT));
+    let mut reload_inflight: Option<ReloadFuture<'_>> = None;
+    let mut queued_reload = false;
 
     while !should_quit {
         tokio::select! {
+            reload_result = async {
+                match reload_inflight.as_mut() {
+                    Some(future) => Some(future.await),
+                    None => None,
+                }
+            }, if reload_inflight.is_some() => {
+                if let Some(result) = reload_result {
+                    match result {
+                        Ok(result) => {
+                            app.apply_reload_result(result);
+                            app.refresh_adapter_state(bot);
+                        }
+                        Err(err) => {
+                            app.push_log(UiLevel::Warn, format!("reload failed: {err}"));
+                        }
+                    }
+                }
+                reload_inflight = None;
+                if queued_reload {
+                    queued_reload = false;
+                    app.push_log(UiLevel::Info, "processing queued reload request...");
+                    app.push_log(UiLevel::Info, "reloading config...");
+                    reload_inflight = Some((handlers.reload_handler)(bot));
+                }
+                needs_redraw = true;
+            }
             _ = tick.tick() => {
                 let mut ui_changed = false;
                 let uptime_sec = app.started_at.elapsed().as_secs();
@@ -93,7 +127,7 @@ async fn run_tui_loop(
                     ui_changed = true;
                 }
 
-                if app.refresh_adapter_state(bot) {
+                if reload_inflight.is_none() && app.refresh_adapter_state(bot) {
                     ui_changed = true;
                 }
 
@@ -106,41 +140,26 @@ async fn run_tui_loop(
                             ui_changed = true;
                         }
                         CommandOutcome::Reload => {
-                            app.push_log(UiLevel::Info, "reloading config...");
-                            ui_changed = true;
-                            match (handlers.reload_handler)(bot).await {
-                                Ok(result) => {
-                                    app.apply_reload_result(result);
-                                    if app.refresh_adapter_state(bot) {
-                                        ui_changed = true;
-                                    }
-                                }
-                                Err(err) => {
-                                    app.push_log(UiLevel::Warn, format!("reload failed: {err}"));
-                                    ui_changed = true;
-                                }
+                            if reload_inflight.is_some() {
+                                queued_reload = true;
+                                app.push_log(UiLevel::Warn, "reload already in progress, request queued");
+                            } else {
+                                app.push_log(UiLevel::Info, "reloading config...");
+                                reload_inflight = Some((handlers.reload_handler)(bot));
                             }
+                            ui_changed = true;
                         }
                         CommandOutcome::PersistWhitelist(entries) => {
                             match (handlers.whitelist_persist_handler)(entries) {
                                 Ok(message) => {
                                     app.push_log(UiLevel::Info, message);
-                                    app.push_log(UiLevel::Info, "reloading config...");
                                     ui_changed = true;
-                                    match (handlers.reload_handler)(bot).await {
-                                        Ok(result) => {
-                                            app.apply_reload_result(result);
-                                            if app.refresh_adapter_state(bot) {
-                                                ui_changed = true;
-                                            }
-                                        }
-                                        Err(err) => {
-                                            app.push_log(
-                                                UiLevel::Warn,
-                                                format!("reload failed: {err}"),
-                                            );
-                                            ui_changed = true;
-                                        }
+                                    if reload_inflight.is_some() {
+                                        queued_reload = true;
+                                        app.push_log(UiLevel::Warn, "reload already in progress, request queued");
+                                    } else {
+                                        app.push_log(UiLevel::Info, "reloading config...");
+                                        reload_inflight = Some((handlers.reload_handler)(bot));
                                     }
                                 }
                                 Err(err) => {
@@ -154,21 +173,23 @@ async fn run_tui_loop(
                             }
                         }
                         CommandOutcome::Llm(request) => {
-                            let tx = async_result_tx.clone();
-                            let llm_command_handler = handlers.llm_command_handler;
-                            tokio::spawn(async move {
-                                let result = llm_command_handler(request).await;
-                                let _ = tx.send(AsyncCommandResult::Llm(result));
-                            });
+                            spawn_llm_command(
+                                request,
+                                handlers,
+                                &async_result_tx,
+                                &async_command_limiter,
+                                app,
+                            );
                             ui_changed = true;
                         }
                         CommandOutcome::Ask(prompt) => {
-                            let tx = async_result_tx.clone();
-                            let ask_handler = handlers.ask_handler;
-                            tokio::spawn(async move {
-                                let result = ask_handler(prompt).await;
-                                let _ = tx.send(AsyncCommandResult::Ask(result));
-                            });
+                            spawn_ask_command(
+                                prompt,
+                                handlers,
+                                &async_result_tx,
+                                &async_command_limiter,
+                                app,
+                            );
                             ui_changed = true;
                         }
                         CommandOutcome::None => {
@@ -186,16 +207,7 @@ async fn run_tui_loop(
                 needs_redraw = true;
             }
             Some(async_result) = async_result_rx.recv() => {
-                match async_result {
-                    AsyncCommandResult::Llm(result) => match result {
-                        Ok(message) => app.push_log(UiLevel::Info, message),
-                        Err(err) => app.push_log(UiLevel::Warn, format!("llm command failed: {err}")),
-                    },
-                    AsyncCommandResult::Ask(result) => match result {
-                        Ok(message) => app.push_log(UiLevel::Info, message),
-                        Err(err) => app.push_log(UiLevel::Warn, format!("ask failed: {err}")),
-                    },
-                }
+                apply_async_result(app, async_result);
                 needs_redraw = true;
             }
             signal = tokio::signal::ctrl_c() => {
@@ -218,4 +230,160 @@ async fn run_tui_loop(
 
     app.flush_resume_if_needed(true);
     Ok(())
+}
+
+fn spawn_llm_command(
+    request: LlmCommandRequest,
+    handlers: LoopHandlers,
+    async_result_tx: &mpsc::Sender<AsyncCommandResult>,
+    async_command_limiter: &Arc<Semaphore>,
+    app: &mut AppState,
+) {
+    if let Ok(permit) = async_command_limiter.clone().try_acquire_owned() {
+        let tx = async_result_tx.clone();
+        let llm_command_handler = handlers.llm_command_handler;
+        tokio::spawn(async move {
+            let _permit = permit;
+            let result = llm_command_handler(request).await;
+            let _ = tx.send(AsyncCommandResult::Llm(result)).await;
+        });
+    } else {
+        app.push_log(
+            UiLevel::Warn,
+            format!(
+                "too many async commands in flight (limit={ASYNC_COMMAND_CONCURRENCY_LIMIT}), please retry"
+            ),
+        );
+    }
+}
+
+fn spawn_ask_command(
+    prompt: String,
+    handlers: LoopHandlers,
+    async_result_tx: &mpsc::Sender<AsyncCommandResult>,
+    async_command_limiter: &Arc<Semaphore>,
+    app: &mut AppState,
+) {
+    if let Ok(permit) = async_command_limiter.clone().try_acquire_owned() {
+        let tx = async_result_tx.clone();
+        let ask_handler = handlers.ask_handler;
+        tokio::spawn(async move {
+            let _permit = permit;
+            let result = ask_handler(prompt).await;
+            let _ = tx.send(AsyncCommandResult::Ask(result)).await;
+        });
+    } else {
+        app.push_log(
+            UiLevel::Warn,
+            format!(
+                "too many async commands in flight (limit={ASYNC_COMMAND_CONCURRENCY_LIMIT}), please retry"
+            ),
+        );
+    }
+}
+
+fn apply_async_result(app: &mut AppState, async_result: AsyncCommandResult) {
+    match async_result {
+        AsyncCommandResult::Llm(result) => match result {
+            Ok(message) => app.push_log(UiLevel::Info, message),
+            Err(err) => app.push_log(UiLevel::Warn, format!("llm command failed: {err}")),
+        },
+        AsyncCommandResult::Ask(result) => match result {
+            Ok(message) => push_llm_response_logs(app, message),
+            Err(err) => app.push_log(UiLevel::Warn, format!("ask failed: {err}")),
+        },
+    }
+}
+
+fn push_llm_response_logs(app: &mut AppState, message: String) {
+    let normalized = message.replace("\r\n", "\n").replace('\r', "\n");
+    let mut lines = normalized.split('\n').peekable();
+    if lines.peek().is_none() {
+        app.push_log(UiLevel::Llm, "LLM> ");
+        return;
+    }
+
+    let mut is_first = true;
+    for line in lines {
+        let content = if line.is_empty() { " " } else { line };
+        if is_first {
+            app.push_log(UiLevel::Llm, format!("LLM> {content}"));
+            is_first = false;
+        } else {
+            app.push_log(UiLevel::Llm, format!("LLM| {content}"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_resume_path(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        path.push(format!("rsliteyuki-runtime-{name}-{nanos}.json"));
+        path
+    }
+
+    fn test_app() -> AppState {
+        AppState::new(
+            RuntimeTarget::Cli,
+            "test".to_string(),
+            Vec::new(),
+            TuiConfig {
+                resume_store_path: temp_resume_path("llm-multiline"),
+                resume_max_sessions: 8,
+                resume_max_size_mib: 4,
+            },
+        )
+    }
+
+    #[test]
+    fn llm_multiline_output_is_split_into_multiple_logs() {
+        let mut app = test_app();
+        push_llm_response_logs(&mut app, "line-1\nline-2\nline-3".to_string());
+
+        let tail: Vec<(UiLevel, String)> = app
+            .logs
+            .iter()
+            .rev()
+            .take(3)
+            .map(|log| (log.level, log.message.clone()))
+            .collect();
+        assert_eq!(
+            tail.into_iter().rev().collect::<Vec<_>>(),
+            vec![
+                (UiLevel::Llm, "LLM> line-1".to_string()),
+                (UiLevel::Llm, "LLM| line-2".to_string()),
+                (UiLevel::Llm, "LLM| line-3".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn llm_multiline_output_preserves_blank_lines() {
+        let mut app = test_app();
+        push_llm_response_logs(&mut app, "first\n\nthird".to_string());
+
+        let tail: Vec<String> = app
+            .logs
+            .iter()
+            .rev()
+            .take(3)
+            .map(|log| log.message.clone())
+            .collect();
+        assert_eq!(
+            tail.into_iter().rev().collect::<Vec<_>>(),
+            vec![
+                "LLM> first".to_string(),
+                "LLM|  ".to_string(),
+                "LLM| third".to_string(),
+            ]
+        );
+    }
 }

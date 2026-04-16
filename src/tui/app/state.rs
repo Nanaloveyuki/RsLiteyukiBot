@@ -46,6 +46,7 @@ impl AppState {
             active_resume_uid,
             resume_dirty: true,
             last_resume_flush: Instant::now(),
+            last_resume_save_error: None,
             view_mode: UiViewMode::Dashboard,
             completion_state: None,
             help_whitelist: None,
@@ -247,12 +248,17 @@ impl AppState {
 
         self.sync_active_resume_snapshot();
         if let Err(err) = self.resume_store.save(&self.resume_store_path) {
-            eprintln!(
+            let message = format!(
                 "failed to persist resume store to {}: {err}",
                 self.resume_store_path.display()
             );
+            if self.last_resume_save_error.as_deref() != Some(message.as_str()) {
+                self.push_log(UiLevel::Error, message.clone());
+                self.last_resume_save_error = Some(message);
+            }
         } else {
             self.resume_dirty = false;
+            self.last_resume_save_error = None;
         }
         self.last_resume_flush = Instant::now();
     }

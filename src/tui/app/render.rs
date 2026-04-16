@@ -217,11 +217,37 @@ fn render_logs_panel(frame: &mut ratatui::Frame<'_>, app: &mut AppState, area: R
         .skip(start)
         .take(end.saturating_sub(start))
         .map(|log| {
-            let (tag, style) = match log.level {
-                UiLevel::Info => ("INFO", Style::default().fg(Color::Blue)),
-                UiLevel::Warn => ("WARN", Style::default().fg(Color::Yellow)),
-                UiLevel::Error => ("ERR ", Style::default().fg(Color::Red)),
-                UiLevel::Event => ("EVT ", Style::default().fg(Color::Green)),
+            let (tag, tag_style, message_style) = match log.level {
+                UiLevel::Info => (
+                    "INFO",
+                    Style::default().fg(Color::Blue),
+                    Style::default().fg(Color::White),
+                ),
+                UiLevel::Warn => (
+                    "WARN",
+                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(Color::Yellow),
+                ),
+                UiLevel::Error => (
+                    "ERR ",
+                    Style::default().fg(Color::Red),
+                    Style::default().fg(Color::Red),
+                ),
+                UiLevel::Event => (
+                    "EVT ",
+                    Style::default().fg(Color::Green),
+                    Style::default().fg(Color::Green),
+                ),
+                UiLevel::Llm => (
+                    "LLM ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
             };
             let prefix = format!("{} [{}] ", log.timestamp, tag);
             let prefix_width = UnicodeWidthStr::width(prefix.as_str());
@@ -233,14 +259,14 @@ fn render_logs_panel(frame: &mut ratatui::Frame<'_>, app: &mut AppState, area: R
                     format!("{} ", log.timestamp),
                     Style::default().fg(Color::DarkGray),
                 ),
-                Span::styled(format!("[{}] ", tag), style),
-                Span::raw(first_line),
+                Span::styled(format!("[{}] ", tag), tag_style),
+                Span::styled(first_line, message_style),
             ])];
             let indent = " ".repeat(prefix_width);
             for segment in wrapped_message.iter().skip(1) {
                 lines.push(Line::from(vec![
                     Span::raw(indent.clone()),
-                    Span::raw(segment.clone()),
+                    Span::styled(segment.clone(), message_style),
                 ]));
             }
             ListItem::new(Text::from(lines))
