@@ -4,13 +4,18 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{sleep, timeout};
 
 use crate::observability::Logger;
 
 const MODULE_PROCESS_MANAGER: &str = "core.process_manager";
+const SUPERVISOR_COMMAND_QUEUE_CAPACITY: usize = 16;
+const SUPERVISOR_COMMAND_SEND_TIMEOUT: Duration = Duration::from_secs(2);
+const SUPERVISOR_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+const SUPERVISOR_RESTART_TIMEOUT: Duration = Duration::from_secs(5);
 
 type RunnerFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'static>>;
 pub type ManagedProcessRunner =
@@ -47,6 +52,10 @@ pub enum ProcessManagerError {
     AlreadyRunning(String),
     NotRunning(String),
     SupervisorChannelClosed(String),
+    SupervisorCommandTimeout(String),
+    SupervisorJoinTimeout(String),
+    SupervisorJoinFailed(String),
+    RestartTimeout(String),
 }
 
 impl std::fmt::Display for ProcessManagerError {
@@ -58,6 +67,18 @@ impl std::fmt::Display for ProcessManagerError {
             Self::NotRunning(name) => write!(f, "process '{}' not running", name),
             Self::SupervisorChannelClosed(name) => {
                 write!(f, "process '{}' supervisor channel closed", name)
+            }
+            Self::SupervisorCommandTimeout(name) => {
+                write!(f, "process '{}' supervisor command send timeout", name)
+            }
+            Self::SupervisorJoinTimeout(name) => {
+                write!(f, "process '{}' supervisor join timeout", name)
+            }
+            Self::SupervisorJoinFailed(name) => {
+                write!(f, "process '{}' supervisor join failed", name)
+            }
+            Self::RestartTimeout(name) => {
+                write!(f, "process '{}' restart timed out", name)
             }
         }
     }
@@ -72,7 +93,8 @@ struct Registration {
 }
 
 struct RunningProcess {
-    command_tx: mpsc::UnboundedSender<SupervisorCommand>,
+    command_tx: mpsc::Sender<SupervisorCommand>,
+    restart_generation_rx: watch::Receiver<u64>,
     supervisor: JoinHandle<()>,
 }
 
@@ -150,11 +172,12 @@ impl ProcessManager {
             return Err(ProcessManagerError::AlreadyRunning(name.to_string()));
         }
 
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = mpsc::channel(SUPERVISOR_COMMAND_QUEUE_CAPACITY);
+        let (restart_generation_tx, restart_generation_rx) = watch::channel(0u64);
         let logger = self.logger.clone();
         let supervisor_name = Arc::clone(&registration.spec.name);
         let supervisor = tokio::spawn(async move {
-            supervise_process(registration, command_rx, logger).await;
+            supervise_process(registration, command_rx, restart_generation_tx, logger).await;
         });
 
         if let Some(logger) = &self.logger {
@@ -168,6 +191,7 @@ impl ProcessManager {
             name_key,
             RunningProcess {
                 command_tx,
+                restart_generation_rx,
                 supervisor,
             },
         );
@@ -194,19 +218,55 @@ impl ProcessManager {
     }
 
     pub async fn restart(&self, name: &str) -> Result<(), ProcessManagerError> {
-        let mut running = self
-            .running
-            .lock()
-            .expect("process running lock should not be poisoned");
-        prune_finished(&mut running);
+        let (command_tx, mut restart_generation_rx, current_generation) = {
+            let mut running = self
+                .running
+                .lock()
+                .expect("process running lock should not be poisoned");
+            prune_finished(&mut running);
 
-        let process = running
-            .get(name)
-            .ok_or_else(|| ProcessManagerError::NotRunning(name.to_string()))?;
-        process
-            .command_tx
-            .send(SupervisorCommand::Restart)
-            .map_err(|_| ProcessManagerError::SupervisorChannelClosed(name.to_string()))
+            let process = running
+                .get(name)
+                .ok_or_else(|| ProcessManagerError::NotRunning(name.to_string()))?;
+            (
+                process.command_tx.clone(),
+                process.restart_generation_rx.clone(),
+                *process.restart_generation_rx.borrow(),
+            )
+        };
+
+        match command_tx.try_send(SupervisorCommand::Restart) {
+            Ok(_) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                if let Some(logger) = &self.logger {
+                    logger.debug_in(
+                        MODULE_PROCESS_MANAGER,
+                        format!(
+                            "process '{}' restart already queued; dropping duplicate command",
+                            name
+                        ),
+                    );
+                }
+                Ok(())
+            }
+            Err(TrySendError::Closed(_)) => Err(ProcessManagerError::SupervisorChannelClosed(
+                name.to_string(),
+            )),
+        }?;
+
+        timeout(SUPERVISOR_RESTART_TIMEOUT, async {
+            loop {
+                if *restart_generation_rx.borrow() != current_generation {
+                    return Ok(());
+                }
+                restart_generation_rx
+                    .changed()
+                    .await
+                    .map_err(|_| ProcessManagerError::SupervisorChannelClosed(name.to_string()))?;
+            }
+        })
+        .await
+        .map_err(|_| ProcessManagerError::RestartTimeout(name.to_string()))?
     }
 
     pub async fn terminate(&self, name: &str) -> Result<(), ProcessManagerError> {
@@ -221,29 +281,50 @@ impl ProcessManager {
                 .ok_or_else(|| ProcessManagerError::NotRunning(name.to_string()))?
         };
 
-        process
-            .command_tx
-            .send(SupervisorCommand::Shutdown)
-            .map_err(|_| ProcessManagerError::SupervisorChannelClosed(name.to_string()))?;
-
-        let _ = process.supervisor.await;
-        Ok(())
+        terminate_running_process(name.to_string(), process, self.logger.clone()).await
     }
 
     pub async fn terminate_all(&self) -> Result<(), ProcessManagerError> {
-        let names: Vec<String> = {
+        let processes: Vec<(String, RunningProcess)> = {
             let mut running = self
                 .running
                 .lock()
                 .expect("process running lock should not be poisoned");
             prune_finished(&mut running);
-            running.keys().map(ToString::to_string).collect()
+            running
+                .drain()
+                .map(|(name, process)| (name.to_string(), process))
+                .collect()
         };
 
-        for name in names {
-            self.terminate(&name).await?;
+        let mut join_set = JoinSet::new();
+        for (name, process) in processes {
+            let logger = self.logger.clone();
+            join_set.spawn(async move { terminate_running_process(name, process, logger).await });
         }
-        Ok(())
+
+        let mut first_error: Option<ProcessManagerError> = None;
+        while let Some(result) = join_set.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+                Err(err) => {
+                    if first_error.is_none() {
+                        first_error =
+                            Some(ProcessManagerError::SupervisorJoinFailed(err.to_string()));
+                    }
+                }
+            }
+        }
+
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     pub fn is_running(&self, name: &str) -> bool {
@@ -254,6 +335,15 @@ impl ProcessManager {
         prune_finished(&mut running);
         running.contains_key(name)
     }
+
+    pub fn running_process_names(&self) -> Vec<Arc<str>> {
+        let mut running = self
+            .running
+            .lock()
+            .expect("process running lock should not be poisoned");
+        prune_finished(&mut running);
+        running.keys().cloned().collect()
+    }
 }
 
 fn prune_finished(running: &mut HashMap<Arc<str>, RunningProcess>) {
@@ -262,7 +352,8 @@ fn prune_finished(running: &mut HashMap<Arc<str>, RunningProcess>) {
 
 async fn supervise_process(
     registration: Registration,
-    mut command_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
+    mut command_rx: mpsc::Receiver<SupervisorCommand>,
+    restart_generation_tx: watch::Sender<u64>,
     logger: Option<Logger>,
 ) {
     let name = Arc::clone(&registration.spec.name);
@@ -271,6 +362,7 @@ async fn supervise_process(
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let runner = Arc::clone(&registration.runner);
         let mut worker = tokio::spawn((runner)(shutdown_rx));
+        let _ = restart_generation_tx.send(*restart_generation_tx.borrow() + 1);
 
         if let Some(logger) = &logger {
             logger.info_in(
@@ -372,6 +464,57 @@ async fn shutdown_worker(
             }
             worker.abort();
             let _ = worker.await;
+        }
+    }
+}
+
+async fn terminate_running_process(
+    name: String,
+    process: RunningProcess,
+    logger: Option<Logger>,
+) -> Result<(), ProcessManagerError> {
+    match process.command_tx.try_send(SupervisorCommand::Shutdown) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            if let Some(logger) = &logger {
+                logger.warn_in(
+                    MODULE_PROCESS_MANAGER,
+                    format!(
+                        "process '{}' shutdown queue full, waiting for supervisor",
+                        name
+                    ),
+                );
+            }
+            let send_result = timeout(
+                SUPERVISOR_COMMAND_SEND_TIMEOUT,
+                process.command_tx.send(SupervisorCommand::Shutdown),
+            )
+            .await
+            .map_err(|_| ProcessManagerError::SupervisorCommandTimeout(name.clone()))?;
+            send_result.map_err(|_| ProcessManagerError::SupervisorChannelClosed(name.clone()))?;
+        }
+        Err(TrySendError::Closed(_)) => {
+            return Err(ProcessManagerError::SupervisorChannelClosed(name));
+        }
+    }
+
+    let mut supervisor = process.supervisor;
+    match timeout(SUPERVISOR_JOIN_TIMEOUT, &mut supervisor).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(ProcessManagerError::SupervisorJoinFailed(format!(
+            "{} ({})",
+            name, err
+        ))),
+        Err(_) => {
+            if let Some(logger) = &logger {
+                logger.warn_in(
+                    MODULE_PROCESS_MANAGER,
+                    format!("process '{}' supervisor join timeout, aborting", name),
+                );
+            }
+            supervisor.abort();
+            let _ = supervisor.await;
+            Err(ProcessManagerError::SupervisorJoinTimeout(name))
         }
     }
 }

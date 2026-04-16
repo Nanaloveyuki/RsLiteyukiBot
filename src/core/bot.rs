@@ -553,35 +553,37 @@ impl LiteyukiBot {
         }
 
         let mut first_error: Option<LiteyukiBotError> = None;
+        let process_names = self.collect_shutdown_process_names(self.runtime_handle.is_some());
 
-        if let Err(err) = self
-            .lifespan
-            .before_process_shutdown(self.lifecycle.clone(), Arc::<str>::from("runtime"))
-            .await
-        {
-            first_error = Some(err.into());
+        self.run_before_shutdown_hooks(&process_names, "shutdown", &mut first_error)
+            .await;
+
+        if let Err(err) = self.adapter_manager.shutdown_all().await {
+            self.record_first_error(
+                &mut first_error,
+                "shutdown adapter manager",
+                LiteyukiBotError::Adapter(err),
+            );
         }
 
-        if let Err(err) = self.adapter_manager.shutdown_all().await
-            && first_error.is_none()
-        {
-            first_error = Some(err.into());
-        }
-
-        if let Err(err) = self.process_manager.terminate_all().await
-            && first_error.is_none()
-        {
-            first_error = Some(err.into());
+        if let Err(err) = self.process_manager.terminate_all().await {
+            self.record_first_error(
+                &mut first_error,
+                "shutdown managed processes",
+                LiteyukiBotError::Process(err),
+            );
         }
 
         if let Some(handle) = self.runtime_handle.take() {
             handle.shutdown().await;
         }
 
-        if let Err(err) = self.lifespan.after_shutdown(self.lifecycle.clone()).await
-            && first_error.is_none()
-        {
-            first_error = Some(err.into());
+        if let Err(err) = self.lifespan.after_shutdown(self.lifecycle.clone()).await {
+            self.record_first_error(
+                &mut first_error,
+                "shutdown after_shutdown hook",
+                LiteyukiBotError::Lifecycle(err),
+            );
         }
 
         self.logger.info_in(MODULE_BOT, "bot shutdown complete");
@@ -600,6 +602,27 @@ impl LiteyukiBot {
                 MODULE_BOT,
                 format!("start rollback: adapter shutdown failed: {err}"),
             );
+        }
+
+        if progress.before_start_completed
+            && (progress.processes_started || progress.runtime_started)
+        {
+            let process_names = self.collect_shutdown_process_names(progress.runtime_started);
+            for process_name in process_names {
+                if let Err(err) = self
+                    .lifespan
+                    .before_process_shutdown(self.lifecycle.clone(), Arc::clone(&process_name))
+                    .await
+                {
+                    self.logger.warn_in(
+                        MODULE_BOT,
+                        format!(
+                            "start rollback: before_process_shutdown hook failed for '{}': {}",
+                            process_name, err
+                        ),
+                    );
+                }
+            }
         }
 
         if progress.runtime_started
@@ -659,13 +682,25 @@ impl LiteyukiBot {
             .ok_or(LiteyukiBotError::NotStarted)?;
         let ingress = handle.ingress_sender();
         let event_seq = Arc::clone(&self.inbound_adapter_event_seq);
+        let logger = self.logger.clone();
         let sink = sink_from_fn(move |packet| {
             let ingress = ingress.clone();
             let event_seq = Arc::clone(&event_seq);
+            let logger = logger.clone();
             async move {
                 let fallback_id = event_seq.fetch_add(1, Ordering::SeqCst);
                 let event = packet.into_bot_event(fallback_id);
-                let _ = ingress.send(event).await;
+                let event_id = event.id;
+                let event_topic = event.topic.clone();
+                if let Err(err) = ingress.send(event).await {
+                    logger.warn_in(
+                        MODULE_BOT,
+                        format!(
+                            "adapter ingress dropped event id={} topic={} reason={}",
+                            event_id, event_topic, err
+                        ),
+                    );
+                }
             }
         });
 
@@ -717,6 +752,48 @@ impl LiteyukiBot {
             logger: self.logger.clone(),
             sdk: self.plugin_sdk.clone(),
             host,
+        }
+    }
+
+    fn collect_shutdown_process_names(&self, include_runtime: bool) -> Vec<Arc<str>> {
+        let mut process_names = self.process_manager.running_process_names();
+        if include_runtime && !process_names.iter().any(|name| name.as_ref() == "runtime") {
+            process_names.push(Arc::<str>::from("runtime"));
+        }
+        process_names
+    }
+
+    async fn run_before_shutdown_hooks(
+        &self,
+        process_names: &[Arc<str>],
+        stage: &str,
+        first_error: &mut Option<LiteyukiBotError>,
+    ) {
+        for process_name in process_names {
+            if let Err(err) = self
+                .lifespan
+                .before_process_shutdown(self.lifecycle.clone(), Arc::clone(process_name))
+                .await
+            {
+                self.record_first_error(
+                    first_error,
+                    &format!("{} before_process_shutdown '{}'", stage, process_name),
+                    LiteyukiBotError::Lifecycle(err),
+                );
+            }
+        }
+    }
+
+    fn record_first_error(
+        &self,
+        first_error: &mut Option<LiteyukiBotError>,
+        phase: &str,
+        err: LiteyukiBotError,
+    ) {
+        self.logger
+            .warn_in(MODULE_BOT, format!("{} failed: {}", phase, err));
+        if first_error.is_none() {
+            *first_error = Some(err);
         }
     }
 }

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Duration, timeout};
 
 use super::formatting::format_event_text;
@@ -280,30 +280,46 @@ impl BotHandle {
     }
 
     pub async fn shutdown(self) {
-        self.logger
-            .info_in(MODULE_RUNTIME, "runtime shutdown begin");
-        let _ = self.shutdown_tx.send(true);
-        drop(self.ingress_tx);
+        let BotHandle {
+            ingress_tx,
+            shutdown_tx,
+            join_handles,
+            logger,
+        } = self;
 
-        for mut join in self.join_handles {
-            match timeout(Duration::from_secs(3), &mut join).await {
-                Ok(join_result) => {
-                    if let Err(err) = join_result {
-                        self.logger
-                            .error_in(MODULE_RUNTIME, format!("task join error: {}", err));
+        logger.info_in(MODULE_RUNTIME, "runtime shutdown begin");
+        let _ = shutdown_tx.send(true);
+        drop(ingress_tx);
+
+        let mut join_set = JoinSet::new();
+        for mut join in join_handles {
+            let logger = logger.clone();
+            join_set.spawn(async move {
+                match timeout(Duration::from_secs(3), &mut join).await {
+                    Ok(join_result) => {
+                        if let Err(err) = join_result {
+                            logger.error_in(MODULE_RUNTIME, format!("task join error: {}", err));
+                        }
+                    }
+                    Err(_) => {
+                        logger.warn_in(MODULE_RUNTIME, "task shutdown timeout, aborting");
+                        join.abort();
+                        let _ = join.await;
                     }
                 }
-                Err(_) => {
-                    self.logger
-                        .warn_in(MODULE_RUNTIME, "task shutdown timeout, aborting");
-                    join.abort();
-                    let _ = join.await;
-                }
+            });
+        }
+
+        while let Some(result) = join_set.join_next().await {
+            if let Err(err) = result {
+                logger.error_in(
+                    MODULE_RUNTIME,
+                    format!("shutdown task orchestration failed: {}", err),
+                );
             }
         }
 
-        self.logger
-            .info_in(MODULE_RUNTIME, "runtime shutdown complete");
+        logger.info_in(MODULE_RUNTIME, "runtime shutdown complete");
     }
 }
 
