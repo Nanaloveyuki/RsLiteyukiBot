@@ -23,6 +23,7 @@ Default log line template:
 ## Runtime Environment Variables
 
 - `LY_WORKERS`: worker count (default `4`)
+  - also used as adapter parallel pool size (WS forward / reverse worker sharding / SSE / HTTP fallback limit)
 - `LY_INGRESS_QUEUE`: ingress queue size (default `1024`)
 - `LY_WORKER_QUEUE`: per-worker queue size (default `256`)
 

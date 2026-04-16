@@ -390,6 +390,7 @@ fn default_config_template(path: &Path) -> String {
 
 const DEFAULT_YAML_CONFIG_TEMPLATE: &str = r#"rust:
   runtime:
+    # also used by adapter parallel pools (WS forward / SSE / HTTP)
     worker_count: 4
     ingress_queue: 1024
     worker_queue: 256
@@ -462,6 +463,7 @@ const DEFAULT_TOML_CONFIG_TEMPLATE: &str = r#"[rust]
 adapters = []
 
 [rust.runtime]
+# also used by adapter parallel pools (WS forward / SSE / HTTP)
 worker_count = 4
 ingress_queue = 1024
 worker_queue = 256

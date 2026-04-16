@@ -1487,7 +1487,10 @@ impl AppState {
                     self.push_log(UiLevel::Warn, "usage: /ask <prompt>");
                     return CommandOutcome::None;
                 }
-                self.push_log(UiLevel::Info, "sending /ask request...");
+                self.push_log(
+                    UiLevel::Info,
+                    "sending /ask request in background (ui remains responsive)...",
+                );
                 CommandOutcome::Ask(prompt)
             }
             "/resumes" | "/history" => {
@@ -1526,6 +1529,52 @@ impl AppState {
                 self.push_log(UiLevel::Warn, format!("unknown command: {cmd}. try /help"));
                 CommandOutcome::None
             }
+        }
+    }
+
+    fn command_help_text(&self) -> String {
+        let input = self.console_input.trim();
+        if input.is_empty() {
+            return "命令说明: 输入 /help 查看命令；Tab 自动补全；Enter 执行".to_string();
+        }
+
+        if !input.starts_with('/') {
+            return "命令说明: 普通文本不会执行命令，请以 / 开头；例如 /ask 你好".to_string();
+        }
+
+        if let Some(help) = Self::command_help_for_line(input) {
+            return help.to_string();
+        }
+
+        if let Some((_, mode, candidates)) = self.completion_context()
+            && let Some(candidate) = candidates.first()
+        {
+            let rendered = Self::apply_completion_candidate(mode, candidate);
+            if let Some(help) = Self::command_help_for_line(rendered.as_str()) {
+                return help.to_string();
+            }
+        }
+
+        "命令说明: 未知命令，输入 /help 查看可用命令".to_string()
+    }
+
+    fn command_help_for_line(line: &str) -> Option<&'static str> {
+        let mut parts = line.split_whitespace();
+        let command = parts.next()?;
+
+        match command {
+            "/help" => Some("命令说明: /help 显示全部命令与快捷键"),
+            "/reload" => Some("命令说明: /reload 重新加载配置与适配器状态"),
+            "/log" => Some("命令说明: /log [on|off] 切换日志控制台视图"),
+            "/clear" => Some("命令说明: /clear 清空当前日志窗口"),
+            "/adapters" => Some("命令说明: /adapters 列出适配器连接状态与端点"),
+            "/ask" => Some("命令说明: /ask <prompt> 后台请求 LLM，不阻塞终端刷新"),
+            "/resumes" | "/history" => Some("命令说明: /resumes 或 /history 查看历史会话快照"),
+            "/resume" => Some("命令说明: /resume <uid> 切换到指定历史会话"),
+            "/llm" => Some("命令说明: /llm 管理模型、Key、provider 与开关"),
+            "/whitelist" => Some("命令说明: /whitelist 管理 external /help 白名单"),
+            "/quit" | "/exit" => Some("命令说明: /quit 或 /exit 安全退出程序"),
+            _ => None,
         }
     }
 }
@@ -1834,7 +1883,7 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &mut AppState) {
         .constraints([
             Constraint::Length(5),
             Constraint::Min(3),
-            Constraint::Length(3),
+            Constraint::Length(4),
         ])
         .split(mid[1]);
     render_external_panel(frame, app, console[0]);
@@ -1862,7 +1911,7 @@ fn draw_log_console_view(
 ) {
     let content = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(4), Constraint::Length(3)])
+        .constraints([Constraint::Min(4), Constraint::Length(4)])
         .split(content_area);
     render_logs_panel(frame, app, content[0], "Log");
     render_command_panel(frame, app, content[1]);
@@ -1996,6 +2045,13 @@ fn render_logs_panel(frame: &mut ratatui::Frame<'_>, app: &mut AppState, area: R
 }
 
 fn render_command_panel(frame: &mut ratatui::Frame<'_>, app: &AppState, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(3)])
+        .split(area);
+
+    render_command_help_bar(frame, app, chunks[0]);
+
     let mut spans = vec![
         Span::styled("> ", Style::default().fg(Color::Cyan)),
         Span::raw(app.console_input.as_str()),
@@ -2009,10 +2065,22 @@ fn render_command_panel(frame: &mut ratatui::Frame<'_>, app: &AppState, area: Re
         ));
     }
 
+    let input_area = chunks[1];
     let input_widget = Paragraph::new(Line::from(spans)).block(rounded_block("Command"));
-    frame.render_widget(input_widget, area);
-    let (cursor_x, cursor_y) = command_cursor_position(area, app.console_input.as_str());
+    frame.render_widget(input_widget, input_area);
+    let (cursor_x, cursor_y) = command_cursor_position(input_area, app.console_input.as_str());
     frame.set_cursor_position((cursor_x, cursor_y));
+}
+
+fn render_command_help_bar(frame: &mut ratatui::Frame<'_>, app: &AppState, area: Rect) {
+    let style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let widget = Paragraph::new(Line::from(vec![Span::raw(app.command_help_text())]))
+        .style(style)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(widget, area);
 }
 
 fn command_cursor_position(area: Rect, input: &str) -> (u16, u16) {
@@ -2465,6 +2533,43 @@ mod tests {
 
         let wrapped_mixed = wrap_text_hard("ab你好cd", 4);
         assert_eq!(wrapped_mixed, vec!["ab你".to_string(), "好cd".to_string()]);
+    }
+
+    #[test]
+    fn command_help_text_shows_ask_non_blocking_hint() {
+        let path = temp_resume_path("command-help-ask");
+        remove_file_if_exists(&path);
+
+        let mut app = AppState::new(
+            RuntimeTarget::Cli,
+            "test".to_string(),
+            Vec::new(),
+            test_tui_config(path.clone()),
+        );
+        app.console_input = "/ask hello".to_string();
+        let help = app.command_help_text();
+        assert!(help.contains("/ask <prompt>"));
+        assert!(help.contains("不阻塞终端刷新"));
+
+        remove_file_if_exists(&path);
+    }
+
+    #[test]
+    fn command_help_text_uses_completion_for_prefix() {
+        let path = temp_resume_path("command-help-prefix");
+        remove_file_if_exists(&path);
+
+        let mut app = AppState::new(
+            RuntimeTarget::Cli,
+            "test".to_string(),
+            Vec::new(),
+            test_tui_config(path.clone()),
+        );
+        app.console_input = "/as".to_string();
+        let help = app.command_help_text();
+        assert!(help.contains("/ask <prompt>"));
+
+        remove_file_if_exists(&path);
     }
 
     #[test]

@@ -194,10 +194,12 @@ impl LiteyukiBotBuilder {
 
     pub fn build(self) -> LiteyukiBot {
         let runtime_config = self.target.tune_runtime_config(self.runtime_config);
+        let adapter_parallelism = runtime_config.worker_count.max(1);
         let base_logger = Logger::with_config(runtime_config.logger.clone());
         let session_router = SessionRouter::with_logger(base_logger.clone());
         let plugin_manager = PluginManager::with_logger(base_logger.clone());
-        let adapter_manager = AdapterManager::with_logger(base_logger.clone());
+        let adapter_manager =
+            AdapterManager::with_logger(base_logger.clone()).with_parallelism(adapter_parallelism);
         let plugin_sdk = self.plugin_sdk.unwrap_or_default();
         let custom_handler = self.event_handler.clone();
         let runtime_router = session_router.clone();
