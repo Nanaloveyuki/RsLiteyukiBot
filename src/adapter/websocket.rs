@@ -23,29 +23,36 @@ use super::packet::AdapterPacket;
 pub type AdapterSinkFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 pub type AdapterSink = Arc<dyn Fn(AdapterPacket) -> AdapterSinkFuture + Send + Sync + 'static>;
 
-enum OutboundSender {
+#[derive(Clone)]
+pub(crate) enum WebSocketOutboundSender {
     Forward(mpsc::Sender<AdapterPacket>),
     Reverse(broadcast::Sender<AdapterPacket>),
 }
 
+impl WebSocketOutboundSender {
+    pub async fn send(&self, packet: AdapterPacket) -> Result<(), AdapterError> {
+        match self {
+            Self::Forward(sender) => sender
+                .send(packet)
+                .await
+                .map_err(|err| AdapterError::WebSocket(format!("forward send failed: {}", err))),
+            Self::Reverse(sender) => sender
+                .send(packet)
+                .map(|_| ())
+                .map_err(|err| AdapterError::WebSocket(format!("reverse send failed: {}", err))),
+        }
+    }
+}
+
 pub struct WebSocketAdapterHandle {
-    outbound: OutboundSender,
+    outbound: WebSocketOutboundSender,
     shutdown_tx: watch::Sender<bool>,
     task: JoinHandle<Result<(), AdapterError>>,
 }
 
 impl WebSocketAdapterHandle {
     pub async fn send(&self, packet: AdapterPacket) -> Result<(), AdapterError> {
-        match &self.outbound {
-            OutboundSender::Forward(sender) => sender
-                .send(packet)
-                .await
-                .map_err(|err| AdapterError::WebSocket(format!("forward send failed: {}", err))),
-            OutboundSender::Reverse(sender) => sender
-                .send(packet)
-                .map(|_| ())
-                .map_err(|err| AdapterError::WebSocket(format!("reverse send failed: {}", err))),
-        }
+        self.outbound.send(packet).await
     }
 
     pub async fn shutdown(self) -> Result<(), AdapterError> {
@@ -61,6 +68,10 @@ impl WebSocketAdapterHandle {
 
     pub async fn stop(self) -> Result<(), AdapterError> {
         self.shutdown().await
+    }
+
+    pub(crate) fn outbound_sender(&self) -> WebSocketOutboundSender {
+        self.outbound.clone()
     }
 }
 
@@ -116,7 +127,7 @@ pub async fn start_forward_adapter(
     });
 
     Ok(WebSocketAdapterHandle {
-        outbound: OutboundSender::Forward(tx),
+        outbound: WebSocketOutboundSender::Forward(tx),
         shutdown_tx,
         task,
     })
@@ -168,6 +179,7 @@ pub async fn start_reverse_adapter(
                     let active_connections = Arc::clone(&active_connections);
                     let max_payload_size = max_payload_size;
 
+                    connection_tasks.retain(|task| !task.is_finished());
                     connection_tasks.push(tokio::spawn(async move {
                         loop {
                             tokio::select! {
@@ -221,7 +233,7 @@ pub async fn start_reverse_adapter(
     });
 
     Ok(WebSocketAdapterHandle {
-        outbound: OutboundSender::Reverse(outbound_tx),
+        outbound: WebSocketOutboundSender::Reverse(outbound_tx),
         shutdown_tx,
         task,
     })
