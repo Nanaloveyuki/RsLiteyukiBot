@@ -138,6 +138,7 @@ pub async fn start_reverse_adapter(
     queue_capacity: usize,
     max_payload_size: Option<usize>,
     max_connections: Option<usize>,
+    worker_parallelism: usize,
     sink: AdapterSink,
 ) -> Result<WebSocketAdapterHandle, AdapterError> {
     let bind_addr = parse_bind_addr(&endpoint.url)?;
@@ -148,9 +149,106 @@ pub async fn start_reverse_adapter(
     let outbound_for_task = outbound_tx.clone();
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let active_connections = Arc::new(AtomicUsize::new(0));
+    let worker_count = worker_parallelism.max(1);
 
     let task = tokio::spawn(async move {
-        let mut connection_tasks: Vec<JoinHandle<()>> = Vec::new();
+        let mut worker_senders = Vec::with_capacity(worker_count);
+        let mut worker_tasks: Vec<JoinHandle<()>> = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let (worker_tx, mut worker_rx) = mpsc::channel(queue_capacity.max(1));
+            worker_senders.push(worker_tx);
+
+            let mut worker_shutdown = shutdown_rx.clone();
+            let sink = sink.clone();
+            let outbound_for_worker = outbound_for_task.clone();
+            let active_connections = Arc::clone(&active_connections);
+            let max_payload_size = max_payload_size;
+            let max_connections = max_connections;
+
+            worker_tasks.push(tokio::spawn(async move {
+                let mut connection_tasks: Vec<JoinHandle<()>> = Vec::new();
+                loop {
+                    tokio::select! {
+                        changed = worker_shutdown.changed() => {
+                            if changed.is_err() || *worker_shutdown.borrow() {
+                                break;
+                            }
+                        }
+                        accepted = worker_rx.recv() => {
+                            let Some(socket) = accepted else {
+                                break;
+                            };
+                            if let Some(limit) = max_connections
+                                && active_connections.load(Ordering::Relaxed) >= limit
+                            {
+                                continue;
+                            }
+
+                            let Ok(ws_stream) = accept_async(socket).await else {
+                                continue;
+                            };
+                            active_connections.fetch_add(1, Ordering::Relaxed);
+                            let (mut write, mut read) = ws_stream.split();
+                            let mut local_shutdown = worker_shutdown.clone();
+                            let mut outbound_rx = outbound_for_worker.subscribe();
+                            let sink = sink.clone();
+                            let active_connections = Arc::clone(&active_connections);
+                            let max_payload_size = max_payload_size;
+
+                            connection_tasks.retain(|task| !task.is_finished());
+                            connection_tasks.push(tokio::spawn(async move {
+                                loop {
+                                    tokio::select! {
+                                        changed = local_shutdown.changed() => {
+                                            if changed.is_err() || *local_shutdown.borrow() {
+                                                break;
+                                            }
+                                        }
+                                        outbound = outbound_rx.recv() => {
+                                            let Ok(packet) = outbound else {
+                                                break;
+                                            };
+                                            let Ok(text) = serialize_packet(&packet) else {
+                                                continue;
+                                            };
+                                            if enforce_ws_payload_limit(text.len(), max_payload_size, "reverse outbound").is_err() {
+                                                continue;
+                                            }
+                                            if write.send(Message::Text(text)).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        inbound = read.next() => {
+                                            let Some(inbound) = inbound else {
+                                                break;
+                                            };
+                                            let Ok(inbound) = inbound else {
+                                                break;
+                                            };
+                                            if let Some(size) = ws_message_payload_size(&inbound)
+                                                && enforce_ws_payload_limit(size, max_payload_size, "reverse inbound").is_err()
+                                            {
+                                                continue;
+                                            }
+                                            if let Ok(Some(packet)) = parse_packet(inbound) {
+                                                sink(packet).await;
+                                            }
+                                        }
+                                    }
+                                }
+                                active_connections.fetch_sub(1, Ordering::Relaxed);
+                            }));
+                        }
+                    }
+                }
+
+                for task in connection_tasks {
+                    task.abort();
+                }
+            }));
+        }
+
+        let mut next_worker = 0usize;
         loop {
             tokio::select! {
                 changed = shutdown_rx.changed() => {
@@ -161,73 +259,25 @@ pub async fn start_reverse_adapter(
                 accepted = listener.accept() => {
                     let (socket, _) = accepted
                         .map_err(|err| AdapterError::Io(format!("accept failed: {}", err)))?;
-
-                    if let Some(limit) = max_connections
-                        && active_connections.load(Ordering::Relaxed) >= limit
-                    {
+                    if worker_senders.is_empty() {
                         continue;
                     }
-
-                    let ws_stream = accept_async(socket)
-                        .await
-                        .map_err(|err| AdapterError::WebSocket(format!("upgrade failed: {}", err)))?;
-                    active_connections.fetch_add(1, Ordering::Relaxed);
-                    let (mut write, mut read) = ws_stream.split();
-                    let mut local_shutdown = shutdown_rx.clone();
-                    let mut outbound_rx = outbound_for_task.subscribe();
-                    let sink = sink.clone();
-                    let active_connections = Arc::clone(&active_connections);
-                    let max_payload_size = max_payload_size;
-
-                    connection_tasks.retain(|task| !task.is_finished());
-                    connection_tasks.push(tokio::spawn(async move {
-                        loop {
-                            tokio::select! {
-                                changed = local_shutdown.changed() => {
-                                    if changed.is_err() || *local_shutdown.borrow() {
-                                        break;
-                                    }
-                                }
-                                outbound = outbound_rx.recv() => {
-                                    let Ok(packet) = outbound else {
-                                        break;
-                                    };
-                                    let Ok(text) = serialize_packet(&packet) else {
-                                        continue;
-                                    };
-                                    if enforce_ws_payload_limit(text.len(), max_payload_size, "reverse outbound").is_err() {
-                                        continue;
-                                    }
-                                    if write.send(Message::Text(text)).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                inbound = read.next() => {
-                                    let Some(inbound) = inbound else {
-                                        break;
-                                    };
-                                    let Ok(inbound) = inbound else {
-                                        break;
-                                    };
-                                    if let Some(size) = ws_message_payload_size(&inbound)
-                                        && enforce_ws_payload_limit(size, max_payload_size, "reverse inbound").is_err()
-                                    {
-                                        continue;
-                                    }
-                                    if let Ok(Some(packet)) = parse_packet(inbound) {
-                                        sink(packet).await;
-                                    }
-                                }
-                            }
-                        }
-                        active_connections.fetch_sub(1, Ordering::Relaxed);
-                    }));
+                    let index = next_worker % worker_senders.len();
+                    next_worker = if index + 1 == worker_senders.len() {
+                        0
+                    } else {
+                        index + 1
+                    };
+                    if worker_senders[index].send(socket).await.is_err() {
+                        break;
+                    }
                 }
             }
         }
 
-        for task in connection_tasks {
-            task.abort();
+        drop(worker_senders);
+        for task in worker_tasks {
+            let _ = task.await;
         }
         Ok(())
     });

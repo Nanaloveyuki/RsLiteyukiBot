@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::{Value, json};
@@ -25,12 +26,12 @@ pub type ManagedAdapterSinkFuture = AdapterSinkFuture;
 
 enum RunningAdapter {
     WebSocket {
-        handle: WebSocketAdapterHandle,
-        outbound: WebSocketOutboundSender,
+        handles: Vec<WebSocketAdapterHandle>,
+        sender: WebSocketPoolSender,
     },
     Sse {
         shutdown_tx: watch::Sender<bool>,
-        task: JoinHandle<()>,
+        tasks: Vec<JoinHandle<()>>,
     },
     Http,
 }
@@ -38,10 +39,25 @@ enum RunningAdapter {
 impl RunningAdapter {
     async fn shutdown(self) -> Result<(), AdapterError> {
         match self {
-            Self::WebSocket { handle, .. } => handle.shutdown().await,
-            Self::Sse { shutdown_tx, task } => {
+            Self::WebSocket { handles, .. } => {
+                let mut first_err = None;
+                for handle in handles {
+                    if let Err(err) = handle.shutdown().await
+                        && first_err.is_none()
+                    {
+                        first_err = Some(err);
+                    }
+                }
+                match first_err {
+                    Some(err) => Err(err),
+                    None => Ok(()),
+                }
+            }
+            Self::Sse { shutdown_tx, tasks } => {
                 let _ = shutdown_tx.send(true);
-                let _ = task.await;
+                for task in tasks {
+                    let _ = task.await;
+                }
                 Ok(())
             }
             Self::Http => Ok(()),
@@ -50,9 +66,7 @@ impl RunningAdapter {
 
     fn sender(&self) -> Result<RunningAdapterSender, AdapterError> {
         match self {
-            Self::WebSocket { outbound, .. } => {
-                Ok(RunningAdapterSender::WebSocket(outbound.clone()))
-            }
+            Self::WebSocket { sender, .. } => Ok(RunningAdapterSender::WebSocket(sender.clone())),
             Self::Sse { .. } => Err(AdapterError::Sse(
                 "sse adapter does not support outbound packet send".to_string(),
             )),
@@ -65,7 +79,7 @@ impl RunningAdapter {
 
 #[derive(Clone)]
 enum RunningAdapterSender {
-    WebSocket(WebSocketOutboundSender),
+    WebSocket(WebSocketPoolSender),
 }
 
 impl RunningAdapterSender {
@@ -73,6 +87,37 @@ impl RunningAdapterSender {
         match self {
             Self::WebSocket(sender) => sender.send(packet).await,
         }
+    }
+}
+
+#[derive(Clone)]
+struct WebSocketPoolSender {
+    outbounds: Arc<Vec<WebSocketOutboundSender>>,
+    cursor: Arc<AtomicUsize>,
+}
+
+impl WebSocketPoolSender {
+    fn new(outbounds: Vec<WebSocketOutboundSender>) -> Result<Self, AdapterError> {
+        if outbounds.is_empty() {
+            return Err(AdapterError::WebSocket(
+                "websocket sender pool is empty".to_string(),
+            ));
+        }
+        Ok(Self {
+            outbounds: Arc::new(outbounds),
+            cursor: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    async fn send(&self, packet: AdapterPacket) -> Result<(), AdapterError> {
+        let len = self.outbounds.len();
+        if len == 0 {
+            return Err(AdapterError::WebSocket(
+                "websocket sender pool is empty".to_string(),
+            ));
+        }
+        let index = self.cursor.fetch_add(1, Ordering::Relaxed) % len;
+        self.outbounds[index].send(packet).await
     }
 }
 
@@ -151,6 +196,7 @@ pub struct AdapterManager {
     http_limiters: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     http_client: HttpTransportClient,
     sse_client: SseTransportClient,
+    parallelism: Arc<AtomicUsize>,
     logger: Option<Logger>,
 }
 
@@ -163,6 +209,7 @@ impl Default for AdapterManager {
             http_limiters: Arc::new(Mutex::new(HashMap::new())),
             http_client: HttpTransportClient::default(),
             sse_client: SseTransportClient::default(),
+            parallelism: Arc::new(AtomicUsize::new(1)),
             logger: None,
         }
     }
@@ -182,6 +229,23 @@ impl AdapterManager {
 
     pub fn set_logger(&mut self, logger: Logger) {
         self.logger = Some(logger);
+    }
+
+    pub fn with_parallelism(self, parallelism: usize) -> Self {
+        self.parallelism
+            .store(parallelism.max(1), std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+
+    pub fn set_parallelism(&self, parallelism: usize) {
+        self.parallelism
+            .store(parallelism.max(1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn parallelism(&self) -> usize {
+        self.parallelism
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1)
     }
 
     pub fn register(&self, config: AdapterConfig) -> Result<(), AdapterError> {
@@ -410,17 +474,34 @@ impl AdapterManager {
         config: &AdapterConfig,
         sink: ManagedAdapterSink,
     ) -> Result<RunningAdapter, AdapterError> {
+        let adapter_parallelism = self.parallelism();
         match config.transport {
             AdapterTransport::WebSocketForward => {
-                let handle = start_forward_adapter(
-                    config.endpoint.clone(),
-                    config.queue_capacity,
-                    config.max_payload_size,
-                    sink,
-                )
-                .await?;
-                let outbound = handle.outbound_sender();
-                Ok(RunningAdapter::WebSocket { handle, outbound })
+                let mut handles: Vec<WebSocketAdapterHandle> =
+                    Vec::with_capacity(adapter_parallelism);
+                let mut outbounds = Vec::with_capacity(adapter_parallelism);
+                for _ in 0..adapter_parallelism {
+                    let handle = match start_forward_adapter(
+                        config.endpoint.clone(),
+                        config.queue_capacity,
+                        config.max_payload_size,
+                        sink.clone(),
+                    )
+                    .await
+                    {
+                        Ok(handle) => handle,
+                        Err(err) => {
+                            for handle in handles {
+                                let _ = handle.shutdown().await;
+                            }
+                            return Err(err);
+                        }
+                    };
+                    outbounds.push(handle.outbound_sender());
+                    handles.push(handle);
+                }
+                let sender = WebSocketPoolSender::new(outbounds)?;
+                Ok(RunningAdapter::WebSocket { handles, sender })
             }
             AdapterTransport::WebSocketReverse => {
                 let handle = start_reverse_adapter(
@@ -428,51 +509,72 @@ impl AdapterManager {
                     config.queue_capacity,
                     config.max_payload_size,
                     config.max_connections,
+                    adapter_parallelism,
                     sink,
                 )
                 .await?;
-                let outbound = handle.outbound_sender();
-                Ok(RunningAdapter::WebSocket { handle, outbound })
+                let sender = WebSocketPoolSender::new(vec![handle.outbound_sender()])?;
+                Ok(RunningAdapter::WebSocket {
+                    handles: vec![handle],
+                    sender,
+                })
             }
             AdapterTransport::Sse => {
-                let mut rx = self
-                    .sse_client
-                    .open_stream(
-                        &config.endpoint,
-                        config.queue_capacity,
-                        config.max_payload_size,
-                    )
-                    .await?;
-                let inbound_topic = config.route.inbound_topic.clone();
-                let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-                let task = tokio::spawn(async move {
-                    loop {
-                        tokio::select! {
-                            changed = shutdown_rx.changed() => {
-                                if changed.is_err() || *shutdown_rx.borrow() {
-                                    break;
+                let (shutdown_tx, shutdown_rx) = watch::channel(false);
+                let mut tasks = Vec::with_capacity(adapter_parallelism);
+                for _ in 0..adapter_parallelism {
+                    let mut rx = match self
+                        .sse_client
+                        .open_stream(
+                            &config.endpoint,
+                            config.queue_capacity,
+                            config.max_payload_size,
+                        )
+                        .await
+                    {
+                        Ok(rx) => rx,
+                        Err(err) => {
+                            let _ = shutdown_tx.send(true);
+                            for task in tasks {
+                                let _ = task.await;
+                            }
+                            return Err(err);
+                        }
+                    };
+
+                    let inbound_topic = config.route.inbound_topic.clone();
+                    let sink = sink.clone();
+                    let mut stream_shutdown = shutdown_rx.clone();
+                    let task = tokio::spawn(async move {
+                        loop {
+                            tokio::select! {
+                                changed = stream_shutdown.changed() => {
+                                    if changed.is_err() || *stream_shutdown.borrow() {
+                                        break;
+                                    }
+                                }
+                                event = rx.recv() => {
+                                    let Some(event) = event else {
+                                        break;
+                                    };
+                                    let packet = AdapterPacket::new(
+                                        event.id.clone().unwrap_or_else(|| "sse-event".to_string()),
+                                        inbound_topic.clone(),
+                                        json!({
+                                            "event": event.event,
+                                            "data": event.data,
+                                            "id": event.id,
+                                            "retry": event.retry
+                                        }),
+                                    );
+                                    sink(packet).await;
                                 }
                             }
-                            event = rx.recv() => {
-                                let Some(event) = event else {
-                                    break;
-                                };
-                                let packet = AdapterPacket::new(
-                                    event.id.clone().unwrap_or_else(|| "sse-event".to_string()),
-                                    inbound_topic.clone(),
-                                    json!({
-                                        "event": event.event,
-                                        "data": event.data,
-                                        "id": event.id,
-                                        "retry": event.retry
-                                    }),
-                                );
-                                sink(packet).await;
-                            }
                         }
-                    }
-                });
-                Ok(RunningAdapter::Sse { shutdown_tx, task })
+                    });
+                    tasks.push(task);
+                }
+                Ok(RunningAdapter::Sse { shutdown_tx, tasks })
             }
             AdapterTransport::Http => Ok(RunningAdapter::Http),
         }
@@ -482,9 +584,7 @@ impl AdapterManager {
         &self,
         config: &AdapterConfig,
     ) -> Result<Option<OwnedSemaphorePermit>, AdapterError> {
-        let Some(max_connections) = config.max_connections else {
-            return Ok(None);
-        };
+        let max_connections = config.max_connections.unwrap_or_else(|| self.parallelism());
 
         let permit = self
             .http_limiter(&config.id, max_connections)
@@ -657,5 +757,37 @@ mod tests {
             Some("onebot.v11.event.notice")
         );
         assert_eq!(normalized.payload.get("data"), Some(&json!("raw-data")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn websocket_pool_sender_uses_round_robin_distribution() {
+        let (tx0, mut rx0) = tokio::sync::mpsc::channel::<AdapterPacket>(4);
+        let (tx1, mut rx1) = tokio::sync::mpsc::channel::<AdapterPacket>(4);
+        let pool = WebSocketPoolSender::new(vec![
+            WebSocketOutboundSender::Forward(tx0),
+            WebSocketOutboundSender::Forward(tx1),
+        ])
+        .expect("pool should build");
+
+        pool.send(AdapterPacket::new("1", "adapter.outbound", json!({})))
+            .await
+            .expect("first send should succeed");
+        pool.send(AdapterPacket::new("2", "adapter.outbound", json!({})))
+            .await
+            .expect("second send should succeed");
+
+        let first = rx0.recv().await.expect("first lane should receive packet");
+        let second = rx1.recv().await.expect("second lane should receive packet");
+        assert_eq!(first.id, "1");
+        assert_eq!(second.id, "2");
+    }
+
+    #[test]
+    fn adapter_manager_parallelism_can_be_configured() {
+        let manager = AdapterManager::new();
+        assert_eq!(manager.parallelism(), 1);
+
+        manager.set_parallelism(4);
+        assert_eq!(manager.parallelism(), 4);
     }
 }
