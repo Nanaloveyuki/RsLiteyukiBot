@@ -342,7 +342,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bot.start().await?;
 
     let tui_result = tui::run(
-        &mut bot,
+        &bot,
         tui::RunOptions {
             target,
             settings_desc: describe_runtime_config(&effective_runtime_config),
@@ -759,7 +759,7 @@ async fn dispatch_onebot_reply(
     Ok(())
 }
 
-fn reload_from_config(bot: &mut LiteyukiBot) -> tui::ReloadFuture<'_> {
+fn reload_from_config(bot: &LiteyukiBot) -> tui::ReloadFuture<'_> {
     Box::pin(async move {
         let (app_config, mut warnings) = load_app_config_with_warnings(false);
         warnings.extend(collect_runtime_reload_warnings(&app_config));

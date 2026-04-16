@@ -131,23 +131,56 @@ impl OpenAiResponsesClient {
 #[derive(Debug, Serialize)]
 struct ResponsesRequest {
     model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    instructions: Option<String>,
-    input: String,
+    input: Vec<ResponsesInputMessage>,
 }
 
 impl ResponsesRequest {
     fn from_input(model: String, system_prompt: Option<String>, user_prompt: String) -> Self {
-        let instructions = system_prompt
+        let mut input = Vec::new();
+        if let Some(system_prompt) = system_prompt
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(ToString::to_string);
-        let input = user_prompt.trim().to_string();
+            .map(ToString::to_string)
+        {
+            input.push(ResponsesInputMessage::new("system", system_prompt));
+        }
+
+        // Keep at least one user message item to match responses providers that
+        // require `input` to be a list of message items.
+        let user_prompt = user_prompt.trim().to_string();
+        input.push(ResponsesInputMessage::new("user", user_prompt));
+        Self { model, input }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesInputMessage {
+    role: String,
+    content: Vec<ResponsesInputText>,
+}
+
+impl ResponsesInputMessage {
+    fn new(role: &str, text: String) -> Self {
         Self {
-            model,
-            instructions,
-            input,
+            role: role.to_string(),
+            content: vec![ResponsesInputText::new(text)],
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesInputText {
+    #[serde(rename = "type")]
+    content_type: &'static str,
+    text: String,
+}
+
+impl ResponsesInputText {
+    fn new(text: String) -> Self {
+        Self {
+            content_type: "input_text",
+            text,
         }
     }
 }
@@ -278,6 +311,7 @@ fn truncate_text(raw: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::ResponsesRequest;
     use super::{extract_output_text, llm_endpoint, should_fallback_to_chat_completions};
 
     #[test]
@@ -344,5 +378,35 @@ mod tests {
             400,
             r#"{"detail":"Instructions are required"}"#
         ));
+    }
+
+    #[test]
+    fn responses_request_serializes_input_as_message_list() {
+        let request = ResponsesRequest::from_input(
+            "gpt-5.2".to_string(),
+            Some("system prompt".to_string()),
+            "hello".to_string(),
+        );
+        let json = serde_json::to_value(request).expect("responses request should serialize");
+
+        let input = json
+            .get("input")
+            .and_then(serde_json::Value::as_array)
+            .expect("input should be array");
+        assert_eq!(input.len(), 2);
+        assert_eq!(
+            input[0].get("role").and_then(serde_json::Value::as_str),
+            Some("system")
+        );
+        assert_eq!(
+            input[1].get("role").and_then(serde_json::Value::as_str),
+            Some("user")
+        );
+        assert_eq!(
+            input[1]
+                .pointer("/content/0/type")
+                .and_then(serde_json::Value::as_str),
+            Some("input_text")
+        );
     }
 }
