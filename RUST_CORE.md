@@ -39,7 +39,7 @@ Load order:
 4. `rust-config.toml`
 5. `config/rust-core.yaml`
 6. `config/rust-core.toml`
-7. `config.yaml` (only if it contains compatible `rust/runtime/log` sections)
+7. `config.yaml` (only if it contains compatible `core/runtime/log` sections)
 
 Top-level schema:
 
@@ -68,9 +68,9 @@ LLM 配置支持独立文件覆盖（建议用于密钥隔离）:
 
 运行时会把该文件中的 `llm` 段覆盖到主配置上。
 
-Or nested under `rust`:
+Or nested under `core`:
 
-- `rust.runtime.*`
-- `rust.log.*`
-- `rust.adapters[]`
-- `rust.tui.resume.*`
+- `core.runtime.*`
+- `core.log.*`
+- `core.adapters[]`
+- `core.tui.resume.*`
