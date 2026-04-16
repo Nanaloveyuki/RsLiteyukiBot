@@ -27,7 +27,7 @@ const DEFAULT_LLM_COMMAND_PREFIX: &str = "/ask";
 
 #[derive(Debug, Deserialize, Default)]
 pub(crate) struct AppConfigDoc {
-    #[serde(default)]
+    #[serde(default, rename = "core")]
     pub(crate) rust: Option<AppRustSection>,
     #[serde(default)]
     pub(crate) runtime: Option<RuntimeConfigSection>,
@@ -123,6 +123,8 @@ pub(crate) struct WebSocketConnectSection {
     pub(crate) mode: Option<String>,
     #[serde(default)]
     pub(crate) url: Option<String>,
+    #[serde(default, alias = "endpoints", alias = "multi_urls")]
+    pub(crate) urls: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) host: Option<String>,
     #[serde(default)]
@@ -157,6 +159,8 @@ pub(crate) struct WebSocketEndpointSection {
     pub(crate) enabled: Option<bool>,
     #[serde(default)]
     pub(crate) url: Option<String>,
+    #[serde(default, alias = "endpoints", alias = "multi_urls")]
+    pub(crate) urls: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) host: Option<String>,
     #[serde(default)]
@@ -187,6 +191,8 @@ pub(crate) struct HttpConnectSection {
     pub(crate) enabled: Option<bool>,
     #[serde(default)]
     pub(crate) url: Option<String>,
+    #[serde(default, alias = "endpoints", alias = "multi_urls")]
+    pub(crate) urls: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) host: Option<String>,
     #[serde(default)]
@@ -217,6 +223,8 @@ pub(crate) struct SseConnectSection {
     pub(crate) enabled: Option<bool>,
     #[serde(default)]
     pub(crate) url: Option<String>,
+    #[serde(default, alias = "endpoints", alias = "multi_urls")]
+    pub(crate) urls: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) host: Option<String>,
     #[serde(default)]
@@ -388,7 +396,7 @@ fn default_config_template(path: &Path) -> String {
     }
 }
 
-const DEFAULT_YAML_CONFIG_TEMPLATE: &str = r#"rust:
+const DEFAULT_YAML_CONFIG_TEMPLATE: &str = r#"core:
   runtime:
     # also used by adapter parallel pools (WS forward / SSE / HTTP)
     worker_count: 4
@@ -412,6 +420,10 @@ connect:
     enabled: true
     # mode: forward | reverse | both
     mode: reverse
+    # 多端同连: urls 可配置多个地址，自动展开为 connect-ws-*-1/-2...
+    # urls:
+    #   - ws://127.0.0.1:3000/ws
+    #   - ws://127.0.0.1:3001/ws
     # reverse mode can use port (+ optional host/path)
     host: 0.0.0.0
     port: 8080
@@ -423,6 +435,10 @@ connect:
     timeout_seconds: 30
   tcp-http:
     enabled: true
+    # 多端同连:
+    # urls:
+    #   - http://127.0.0.1:8081/
+    #   - http://127.0.0.1:8083/
     host: 127.0.0.1
     port: 8081
     path: /
@@ -431,6 +447,10 @@ connect:
     timeout_seconds: 30
   sse:
     enabled: true
+    # 多端同连:
+    # urls:
+    #   - http://127.0.0.1:8082/sse
+    #   - http://127.0.0.1:8084/sse
     host: 127.0.0.1
     port: 8082
     path: /sse
@@ -441,7 +461,6 @@ connect:
 llm:
   enabled: false
   provider: openai
-  base_url: https://api.openai.com
   model: gpt-4.1-mini
   timeout_seconds: 20
   command_prefix: /ask
@@ -459,23 +478,23 @@ onebot-v11:
   whitelist: []
 "#;
 
-const DEFAULT_TOML_CONFIG_TEMPLATE: &str = r#"[rust]
+const DEFAULT_TOML_CONFIG_TEMPLATE: &str = r#"[core]
 adapters = []
 
-[rust.runtime]
+[core.runtime]
 # also used by adapter parallel pools (WS forward / SSE / HTTP)
 worker_count = 4
 ingress_queue = 1024
 worker_queue = 256
 
-[rust.log]
+[core.log]
 mode = "color"
 level = "info"
 timezone = "local"
 timestamp_format = "custom"
 timestamp_pattern = "%Y-%m-%d %H:%M:%S"
 
-[rust.tui.resume]
+[core.tui.resume]
 store_path = "./.liteyuki-tui-resumes.json"
 max_sessions = 64
 max_size_mib = 16
@@ -483,6 +502,8 @@ max_size_mib = 16
 [connect.websocket]
 enabled = true
 mode = "reverse" # forward | reverse | both
+# multi-end:
+# urls = ["ws://127.0.0.1:3000/ws", "ws://127.0.0.1:3001/ws"]
 host = "0.0.0.0"
 port = 8080
 path = "/ws"
@@ -492,6 +513,8 @@ timeout_seconds = 30
 
 [connect.tcp-http]
 enabled = true
+# multi-end:
+# urls = ["http://127.0.0.1:8081/", "http://127.0.0.1:8083/"]
 host = "127.0.0.1"
 port = 8081
 path = "/"
@@ -501,6 +524,8 @@ timeout_seconds = 30
 
 [connect.sse]
 enabled = true
+# multi-end:
+# urls = ["http://127.0.0.1:8082/sse", "http://127.0.0.1:8084/sse"]
 host = "127.0.0.1"
 port = 8082
 path = "/sse"
@@ -511,7 +536,6 @@ timeout_seconds = 30
 [llm]
 enabled = false
 provider = "openai"
-base_url = "https://api.openai.com"
 model = "gpt-4.1-mini"
 timeout_seconds = 20
 command_prefix = "/ask"
@@ -597,26 +621,33 @@ pub(crate) fn resolve_help_whitelist(doc: &AppConfigDoc) -> HashSet<String> {
 pub(crate) fn load_adapter_configs(
     app_config: &AppConfigDoc,
 ) -> Result<Vec<AdapterConfig>, Box<dyn std::error::Error>> {
-    if let Ok(path) = std::env::var("LY_ADAPTERS_PATH") {
+    if let Ok(path) = std::env::var("LY_ADAPTERS_PATH")
+        && !path.trim().is_empty()
+    {
         let content = std::fs::read_to_string(PathBuf::from(path))?;
-        if let Ok(doc) = serde_json::from_str::<AdapterConfigDoc>(&content) {
-            return Ok(sanitize_adapter_configs(doc.adapters, "LY_ADAPTERS_PATH"));
-        }
-        let list = serde_json::from_str::<Vec<AdapterConfig>>(&content)?;
-        return Ok(sanitize_adapter_configs(list, "LY_ADAPTERS_PATH"));
+        return parse_adapter_configs_json(&content, "LY_ADAPTERS_PATH");
     }
 
-    if let Ok(raw) = std::env::var("LY_ADAPTERS_JSON") {
-        if let Ok(doc) = serde_json::from_str::<AdapterConfigDoc>(&raw) {
-            return Ok(sanitize_adapter_configs(doc.adapters, "LY_ADAPTERS_JSON"));
-        }
-        let list = serde_json::from_str::<Vec<AdapterConfig>>(&raw)?;
-        return Ok(sanitize_adapter_configs(list, "LY_ADAPTERS_JSON"));
+    if let Ok(raw) = std::env::var("LY_ADAPTERS_JSON")
+        && !raw.trim().is_empty()
+    {
+        return parse_adapter_configs_json(&raw, "LY_ADAPTERS_JSON");
     }
 
     let mut combined = config_adapters(app_config).cloned().unwrap_or_default();
     combined.extend(connect_to_adapter_configs(app_config));
     Ok(sanitize_adapter_configs(combined, "config"))
+}
+
+fn parse_adapter_configs_json(
+    raw: &str,
+    source: &str,
+) -> Result<Vec<AdapterConfig>, Box<dyn std::error::Error>> {
+    if let Ok(doc) = serde_json::from_str::<AdapterConfigDoc>(raw) {
+        return Ok(sanitize_adapter_configs(doc.adapters, source));
+    }
+    let list = serde_json::from_str::<Vec<AdapterConfig>>(raw)?;
+    Ok(sanitize_adapter_configs(list, source))
 }
 
 pub(crate) fn resolve_tui_config(app_config: &AppConfigDoc) -> tui::TuiConfig {
@@ -771,20 +802,24 @@ pub(crate) fn connect_to_adapter_configs(doc: &AppConfigDoc) -> Vec<AdapterConfi
         let mut has_nested = false;
         if let Some(forward) = &ws.forward {
             has_nested = true;
-            if forward.enabled.unwrap_or(false)
-                && let Some(config) =
-                    websocket_endpoint_to_adapter("connect-ws-forward", true, forward, ws)
-            {
-                adapters.push(config);
+            if forward.enabled.unwrap_or(false) {
+                adapters.extend(websocket_endpoint_to_adapters(
+                    "connect-ws-forward",
+                    true,
+                    forward,
+                    ws,
+                ));
             }
         }
         if let Some(reverse) = &ws.reverse {
             has_nested = true;
-            if reverse.enabled.unwrap_or(false)
-                && let Some(config) =
-                    websocket_endpoint_to_adapter("connect-ws-reverse", false, reverse, ws)
-            {
-                adapters.push(config);
+            if reverse.enabled.unwrap_or(false) {
+                adapters.extend(websocket_endpoint_to_adapters(
+                    "connect-ws-reverse",
+                    false,
+                    reverse,
+                    ws,
+                ));
             }
         }
 
@@ -800,15 +835,11 @@ pub(crate) fn connect_to_adapter_configs(doc: &AppConfigDoc) -> Vec<AdapterConfi
                 mode
             };
 
-            if matches!(resolved_mode.as_str(), "forward" | "both" | "all")
-                && let Some(config) = websocket_root_to_adapter("connect-ws-forward", true, ws)
-            {
-                adapters.push(config);
+            if matches!(resolved_mode.as_str(), "forward" | "both" | "all") {
+                adapters.extend(websocket_root_to_adapters("connect-ws-forward", true, ws));
             }
-            if matches!(resolved_mode.as_str(), "reverse" | "both" | "all")
-                && let Some(config) = websocket_root_to_adapter("connect-ws-reverse", false, ws)
-            {
-                adapters.push(config);
+            if matches!(resolved_mode.as_str(), "reverse" | "both" | "all") {
+                adapters.extend(websocket_root_to_adapters("connect-ws-reverse", false, ws));
             }
         }
     }
@@ -816,94 +847,107 @@ pub(crate) fn connect_to_adapter_configs(doc: &AppConfigDoc) -> Vec<AdapterConfi
     if let Some(http) = &connect.tcp_http
         && http.enabled.unwrap_or(false)
     {
-        adapters.push(http_to_adapter("connect-http", http));
+        adapters.extend(http_to_adapters("connect-http", http));
     }
 
     if let Some(sse) = &connect.sse
         && sse.enabled.unwrap_or(false)
     {
-        adapters.push(sse_to_adapter("connect-sse", sse));
+        adapters.extend(sse_to_adapters("connect-sse", sse));
     }
 
     adapters
 }
 
-fn websocket_endpoint_to_adapter(
-    id: &str,
+fn websocket_endpoint_to_adapters(
+    base_id: &str,
     is_forward: bool,
     endpoint: &WebSocketEndpointSection,
     fallback: &WebSocketConnectSection,
-) -> Option<AdapterConfig> {
+) -> Vec<AdapterConfig> {
     use liteyukibot_core::{AdapterEndpoint, AdapterRoute, AdapterTransport};
 
-    let url = endpoint.url.clone().or_else(|| {
-        build_url(
-            "ws",
-            endpoint
-                .host
-                .as_deref()
-                .or(fallback.host.as_deref())
-                .unwrap_or(if is_forward { "127.0.0.1" } else { "0.0.0.0" }),
-            endpoint.port.or(fallback.port),
-            endpoint
-                .path
-                .as_deref()
-                .or(fallback.path.as_deref())
-                .unwrap_or(if is_forward { "/ws" } else { "/" }),
-        )
-    });
+    let mut urls = normalize_non_empty_list(endpoint.urls.as_ref().or(fallback.urls.as_ref()));
+    if urls.is_empty() {
+        let fallback_url = endpoint
+            .url
+            .clone()
+            .or_else(|| fallback.url.clone())
+            .or_else(|| {
+                build_url(
+                    "ws",
+                    endpoint
+                        .host
+                        .as_deref()
+                        .or(fallback.host.as_deref())
+                        .unwrap_or(if is_forward { "127.0.0.1" } else { "0.0.0.0" }),
+                    endpoint.port.or(fallback.port),
+                    endpoint
+                        .path
+                        .as_deref()
+                        .or(fallback.path.as_deref())
+                        .unwrap_or(if is_forward { "/ws" } else { "/" }),
+                )
+            });
+        if let Some(url) = normalize_non_empty(fallback_url) {
+            urls.push(url);
+        }
+    }
 
-    let url = url?;
-
-    Some(AdapterConfig {
-        id: id.to_string(),
-        enabled: true,
-        transport: if is_forward {
-            AdapterTransport::WebSocketForward
-        } else {
-            AdapterTransport::WebSocketReverse
-        },
-        endpoint: AdapterEndpoint {
-            url,
-            headers: endpoint
-                .headers
-                .clone()
-                .or_else(|| fallback.headers.clone())
-                .unwrap_or_default(),
-            token: endpoint.token.clone().or_else(|| fallback.token.clone()),
-            timeout_ms: seconds_to_timeout_ms(
-                endpoint.timeout_seconds.or(fallback.timeout_seconds),
-            ),
-        },
-        route: AdapterRoute {
-            inbound_topic: endpoint
-                .inbound_topic
-                .clone()
-                .or_else(|| fallback.inbound_topic.clone())
-                .unwrap_or_else(|| "adapter.inbound".to_string()),
-            outbound_topic: endpoint
-                .outbound_topic
-                .clone()
-                .or_else(|| fallback.outbound_topic.clone())
-                .unwrap_or_else(|| "adapter.outbound".to_string()),
-        },
-        queue_capacity: endpoint
-            .queue_capacity
-            .or(fallback.queue_capacity)
-            .unwrap_or(256),
-        max_payload_size: endpoint.max_payload_size.or(fallback.max_payload_size),
-        max_connections: endpoint.max_connections.or(fallback.max_connections),
-    })
+    let total = urls.len();
+    urls.into_iter()
+        .enumerate()
+        .map(|(idx, url)| AdapterConfig {
+            id: indexed_adapter_id(base_id, idx, total),
+            enabled: true,
+            transport: if is_forward {
+                AdapterTransport::WebSocketForward
+            } else {
+                AdapterTransport::WebSocketReverse
+            },
+            endpoint: AdapterEndpoint {
+                url,
+                headers: endpoint
+                    .headers
+                    .clone()
+                    .or_else(|| fallback.headers.clone())
+                    .unwrap_or_default(),
+                token: endpoint.token.clone().or_else(|| fallback.token.clone()),
+                timeout_ms: seconds_to_timeout_ms(
+                    endpoint.timeout_seconds.or(fallback.timeout_seconds),
+                ),
+            },
+            route: AdapterRoute {
+                inbound_topic: endpoint
+                    .inbound_topic
+                    .clone()
+                    .or_else(|| fallback.inbound_topic.clone())
+                    .unwrap_or_else(|| "adapter.inbound".to_string()),
+                outbound_topic: endpoint
+                    .outbound_topic
+                    .clone()
+                    .or_else(|| fallback.outbound_topic.clone())
+                    .unwrap_or_else(|| "adapter.outbound".to_string()),
+            },
+            queue_capacity: endpoint
+                .queue_capacity
+                .or(fallback.queue_capacity)
+                .unwrap_or(256),
+            max_payload_size: endpoint.max_payload_size.or(fallback.max_payload_size),
+            max_connections: endpoint.max_connections.or(fallback.max_connections),
+        })
+        .collect()
 }
 
-fn websocket_root_to_adapter(
-    id: &str,
+fn websocket_root_to_adapters(
+    base_id: &str,
     is_forward: bool,
     ws: &WebSocketConnectSection,
-) -> Option<AdapterConfig> {
+) -> Vec<AdapterConfig> {
     let endpoint = WebSocketEndpointSection {
         enabled: Some(true),
         url: ws.url.clone(),
+        urls: ws.urls.clone(),
         host: ws.host.clone(),
         port: ws.port,
         path: ws.path.clone(),
@@ -916,81 +960,153 @@ fn websocket_root_to_adapter(
         inbound_topic: ws.inbound_topic.clone(),
         outbound_topic: ws.outbound_topic.clone(),
     };
-    websocket_endpoint_to_adapter(id, is_forward, &endpoint, ws)
+    websocket_endpoint_to_adapters(base_id, is_forward, &endpoint, ws)
 }
 
-fn http_to_adapter(id: &str, section: &HttpConnectSection) -> AdapterConfig {
+fn http_to_adapters(base_id: &str, section: &HttpConnectSection) -> Vec<AdapterConfig> {
     use liteyukibot_core::{AdapterEndpoint, AdapterRoute, AdapterTransport};
 
-    AdapterConfig {
-        id: id.to_string(),
-        enabled: true,
-        transport: AdapterTransport::Http,
-        endpoint: AdapterEndpoint {
-            url: section.url.clone().unwrap_or_else(|| {
-                build_url(
-                    "http",
-                    section.host.as_deref().unwrap_or("127.0.0.1"),
-                    section.port,
-                    section.path.as_deref().unwrap_or("/"),
-                )
-                .unwrap_or_else(|| "http://127.0.0.1:8081/".to_string())
-            }),
-            headers: section.headers.clone().unwrap_or_default(),
-            token: section.token.clone(),
-            timeout_ms: seconds_to_timeout_ms(section.timeout_seconds),
-        },
-        route: AdapterRoute {
-            inbound_topic: section
-                .inbound_topic
-                .clone()
-                .unwrap_or_else(|| "adapter.inbound".to_string()),
-            outbound_topic: section
-                .outbound_topic
-                .clone()
-                .unwrap_or_else(|| "adapter.outbound".to_string()),
-        },
-        queue_capacity: section.queue_capacity.unwrap_or(256),
-        max_payload_size: section.max_payload_size,
-        max_connections: section.max_connections,
+    let mut urls = normalize_non_empty_list(section.urls.as_ref());
+    if urls.is_empty() {
+        let fallback_url = section.url.clone().or_else(|| {
+            build_url(
+                "http",
+                section.host.as_deref().unwrap_or("127.0.0.1"),
+                section.port,
+                section.path.as_deref().unwrap_or("/"),
+            )
+        });
+        urls.push(
+            normalize_non_empty(fallback_url)
+                .unwrap_or_else(|| "http://127.0.0.1:8081/".to_string()),
+        );
+    }
+
+    let total = urls.len();
+    urls.into_iter()
+        .enumerate()
+        .map(|(idx, url)| AdapterConfig {
+            id: indexed_adapter_id(base_id, idx, total),
+            enabled: true,
+            transport: AdapterTransport::Http,
+            endpoint: AdapterEndpoint {
+                url,
+                headers: section.headers.clone().unwrap_or_default(),
+                token: section.token.clone(),
+                timeout_ms: seconds_to_timeout_ms(section.timeout_seconds),
+            },
+            route: AdapterRoute {
+                inbound_topic: section
+                    .inbound_topic
+                    .clone()
+                    .unwrap_or_else(|| "adapter.inbound".to_string()),
+                outbound_topic: section
+                    .outbound_topic
+                    .clone()
+                    .unwrap_or_else(|| "adapter.outbound".to_string()),
+            },
+            queue_capacity: section.queue_capacity.unwrap_or(256),
+            max_payload_size: section.max_payload_size,
+            max_connections: section.max_connections,
+        })
+        .collect()
+}
+
+fn sse_to_adapters(base_id: &str, section: &SseConnectSection) -> Vec<AdapterConfig> {
+    use liteyukibot_core::{AdapterEndpoint, AdapterRoute, AdapterTransport};
+
+    let mut urls = normalize_non_empty_list(section.urls.as_ref());
+    if urls.is_empty() {
+        let fallback_url = section.url.clone().or_else(|| {
+            build_url(
+                "http",
+                section.host.as_deref().unwrap_or("127.0.0.1"),
+                section.port,
+                section.path.as_deref().unwrap_or("/sse"),
+            )
+        });
+        urls.push(
+            normalize_non_empty(fallback_url)
+                .unwrap_or_else(|| "http://127.0.0.1:8082/sse".to_string()),
+        );
+    }
+
+    let total = urls.len();
+    urls.into_iter()
+        .enumerate()
+        .map(|(idx, url)| AdapterConfig {
+            id: indexed_adapter_id(base_id, idx, total),
+            enabled: true,
+            transport: AdapterTransport::Sse,
+            endpoint: AdapterEndpoint {
+                url,
+                headers: section.headers.clone().unwrap_or_default(),
+                token: section.token.clone(),
+                timeout_ms: seconds_to_timeout_ms(section.timeout_seconds),
+            },
+            route: AdapterRoute {
+                inbound_topic: section
+                    .inbound_topic
+                    .clone()
+                    .unwrap_or_else(|| "adapter.inbound".to_string()),
+                outbound_topic: section
+                    .outbound_topic
+                    .clone()
+                    .unwrap_or_else(|| "adapter.outbound".to_string()),
+            },
+            queue_capacity: section.queue_capacity.unwrap_or(256),
+            max_payload_size: section.max_payload_size,
+            max_connections: section.max_connections,
+        })
+        .collect()
+}
+
+fn normalize_non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+}
+
+fn normalize_non_empty_list(values: Option<&Vec<String>>) -> Vec<String> {
+    let Some(values) = values else {
+        return Vec::new();
+    };
+
+    let mut output = Vec::new();
+    let mut seen = HashSet::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if seen.insert(value.to_string()) {
+            output.push(value.to_string());
+        }
+    }
+    output
+}
+
+fn indexed_adapter_id(base_id: &str, index: usize, total: usize) -> String {
+    if total <= 1 {
+        base_id.to_string()
+    } else {
+        format!("{base_id}-{}", index + 1)
     }
 }
 
-fn sse_to_adapter(id: &str, section: &SseConnectSection) -> AdapterConfig {
-    use liteyukibot_core::{AdapterEndpoint, AdapterRoute, AdapterTransport};
+fn has_non_empty_list(values: Option<&Vec<String>>) -> bool {
+    !normalize_non_empty_list(values).is_empty()
+}
 
-    AdapterConfig {
-        id: id.to_string(),
-        enabled: true,
-        transport: AdapterTransport::Sse,
-        endpoint: AdapterEndpoint {
-            url: section.url.clone().unwrap_or_else(|| {
-                build_url(
-                    "http",
-                    section.host.as_deref().unwrap_or("127.0.0.1"),
-                    section.port,
-                    section.path.as_deref().unwrap_or("/sse"),
-                )
-                .unwrap_or_else(|| "http://127.0.0.1:8082/sse".to_string())
-            }),
-            headers: section.headers.clone().unwrap_or_default(),
-            token: section.token.clone(),
-            timeout_ms: seconds_to_timeout_ms(section.timeout_seconds),
-        },
-        route: AdapterRoute {
-            inbound_topic: section
-                .inbound_topic
-                .clone()
-                .unwrap_or_else(|| "adapter.inbound".to_string()),
-            outbound_topic: section
-                .outbound_topic
-                .clone()
-                .unwrap_or_else(|| "adapter.outbound".to_string()),
-        },
-        queue_capacity: section.queue_capacity.unwrap_or(256),
-        max_payload_size: section.max_payload_size,
-        max_connections: section.max_connections,
-    }
+fn has_empty_item(values: Option<&Vec<String>>) -> bool {
+    values.is_some_and(|items| items.iter().any(|item| item.trim().is_empty()))
+}
+
+fn websocket_has_multi_urls(
+    endpoint: &WebSocketEndpointSection,
+    fallback: &WebSocketConnectSection,
+) -> bool {
+    has_non_empty_list(endpoint.urls.as_ref()) || has_non_empty_list(fallback.urls.as_ref())
 }
 
 pub(crate) fn build_url(scheme: &str, host: &str, port: Option<u16>, path: &str) -> Option<String> {
@@ -1073,23 +1189,41 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
             if ws.max_connections.is_some_and(|value| value == 0) {
                 warnings.push("connect.websocket.max_connections should be > 0".to_string());
             }
+            if has_empty_item(ws.urls.as_ref()) {
+                warnings.push("connect.websocket.urls should not contain empty values".to_string());
+            }
             if ws.enabled.unwrap_or(false) {
                 let has_nested = ws.forward.is_some() || ws.reverse.is_some();
-                if !has_nested && ws.url.is_none() && ws.port.is_none() {
+                if !has_nested
+                    && ws.url.is_none()
+                    && !has_non_empty_list(ws.urls.as_ref())
+                    && ws.port.is_none()
+                {
                     warnings.push(
                         "connect.websocket enabled but neither url nor port is set".to_string(),
                     );
                 }
             }
-            if let Some(forward) = &ws.forward
-                && forward.enabled.unwrap_or(false)
-                && forward.url.is_none()
-                && (forward.port.is_none() || forward.host.as_deref().is_none())
-            {
-                warnings.push(
-                    "connect.websocket.forward enabled but url is missing and host/port is incomplete"
-                        .to_string(),
-                );
+            if let Some(forward) = &ws.forward {
+                if has_empty_item(forward.urls.as_ref()) {
+                    warnings.push(
+                        "connect.websocket.forward.urls should not contain empty values"
+                            .to_string(),
+                    );
+                }
+                let host = forward.host.as_deref().or(ws.host.as_deref());
+                let port = forward.port.or(ws.port);
+                if forward.enabled.unwrap_or(false)
+                    && !websocket_has_multi_urls(forward, ws)
+                    && forward.url.is_none()
+                    && ws.url.is_none()
+                    && (port.is_none() || host.is_none())
+                {
+                    warnings.push(
+                        "connect.websocket.forward enabled but url(s) is missing and host/port is incomplete"
+                            .to_string(),
+                    );
+                }
             }
             if let Some(forward) = &ws.forward
                 && forward.max_payload_size.is_some_and(|value| value == 0)
@@ -1103,13 +1237,24 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
                 warnings
                     .push("connect.websocket.forward.max_connections should be > 0".to_string());
             }
-            if let Some(reverse) = &ws.reverse
-                && reverse.enabled.unwrap_or(false)
-                && reverse.url.is_none()
-                && reverse.port.is_none()
-            {
-                warnings
-                    .push("connect.websocket.reverse enabled but url/port is missing".to_string());
+            if let Some(reverse) = &ws.reverse {
+                if has_empty_item(reverse.urls.as_ref()) {
+                    warnings.push(
+                        "connect.websocket.reverse.urls should not contain empty values"
+                            .to_string(),
+                    );
+                }
+                let port = reverse.port.or(ws.port);
+                if reverse.enabled.unwrap_or(false)
+                    && !websocket_has_multi_urls(reverse, ws)
+                    && reverse.url.is_none()
+                    && ws.url.is_none()
+                    && port.is_none()
+                {
+                    warnings.push(
+                        "connect.websocket.reverse enabled but url(s)/port is missing".to_string(),
+                    );
+                }
             }
             if let Some(reverse) = &ws.reverse
                 && reverse.max_payload_size.is_some_and(|value| value == 0)
@@ -1132,6 +1277,9 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
             if http.max_connections.is_some_and(|value| value == 0) {
                 warnings.push("connect.tcp-http.max_connections should be > 0".to_string());
             }
+            if has_empty_item(http.urls.as_ref()) {
+                warnings.push("connect.tcp-http.urls should not contain empty values".to_string());
+            }
         }
 
         if let Some(sse) = &connect.sse {
@@ -1141,12 +1289,24 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
             if sse.max_connections.is_some_and(|value| value == 0) {
                 warnings.push("connect.sse.max_connections should be > 0".to_string());
             }
+            if has_empty_item(sse.urls.as_ref()) {
+                warnings.push("connect.sse.urls should not contain empty values".to_string());
+            }
         }
     }
 
     if let Some(llm) = config_llm(doc) {
         if llm.timeout_seconds.is_some_and(|value| value == 0) {
             warnings.push("llm.timeout_seconds should be > 0".to_string());
+        }
+        if llm
+            .base_url
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            warnings.push(
+                "llm.base_url in main config is deprecated, move it to llm-config.yaml".to_string(),
+            );
         }
         if llm
             .api_keys

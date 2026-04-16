@@ -1,4 +1,4 @@
-rust:
+core:
   runtime:
     worker_count: 4
     ingress_queue: 512
@@ -21,6 +21,10 @@ connect:
     enabled: true
     # mode: forward | reverse | both
     mode: reverse
+    # 多端同连:
+    # urls:
+    #   - ws://127.0.0.1:3000/ws
+    #   - ws://127.0.0.1:3001/ws
     host: 0.0.0.0
     port: 8080
     path: /ws
@@ -58,7 +62,6 @@ llm:
   # 建议把密钥放到独立 llm-config.yaml（或设置 LY_LLM_CONFIG_PATH）并加入 .gitignore。
   enabled: true
   provider: openai
-  base_url: https://api.openai.com/v1
   model: gpt-5.2
   timeout_seconds: 20
   command_prefix: /ask

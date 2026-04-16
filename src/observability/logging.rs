@@ -1,10 +1,21 @@
 use std::env;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 
 use super::logging_format::{format_level_tag, format_log_line, format_timestamp};
+
+static CONSOLE_LOG_OUTPUT_ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn set_console_log_output_enabled(enabled: bool) -> bool {
+    CONSOLE_LOG_OUTPUT_ENABLED.swap(enabled, Ordering::SeqCst)
+}
+
+pub fn is_console_log_output_enabled() -> bool {
+    CONSOLE_LOG_OUTPUT_ENABLED.load(Ordering::SeqCst)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
@@ -244,6 +255,9 @@ impl Logger {
 
     pub fn log_with_module(&self, level: LogLevel, module: &str, message: impl AsRef<str>) {
         if level < self.config.min_level {
+            return;
+        }
+        if !is_console_log_output_enabled() {
             return;
         }
 

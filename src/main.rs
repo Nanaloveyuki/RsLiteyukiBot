@@ -912,10 +912,10 @@ fn ensure_llm_config_file(path: &std::path::Path) -> Result<(), String> {
         .map(|value| value.to_ascii_lowercase());
     let template = match ext.as_deref() {
         Some("toml") => {
-            "[llm]\nenabled = false\nprovider = \"openai\"\nbase_url = \"https://api.openai.com\"\nmodel = \"gpt-4.1-mini\"\ntimeout_seconds = 20\ncommand_prefix = \"/ask\"\napi_keys = []\n"
+            "[llm]\nenabled = false\nprovider = \"openai\"\nbase_url = \"https://tokenflux.dev/v1\"\nmodel = \"gpt-4.1-mini\"\ntimeout_seconds = 20\ncommand_prefix = \"/ask\"\napi_keys = []\n"
         }
         _ => {
-            "llm:\n  enabled: false\n  provider: openai\n  base_url: https://api.openai.com\n  model: gpt-4.1-mini\n  timeout_seconds: 20\n  command_prefix: /ask\n  api_keys: []\n"
+            "llm:\n  enabled: false\n  provider: openai\n  base_url: https://tokenflux.dev/v1\n  model: gpt-4.1-mini\n  timeout_seconds: 20\n  command_prefix: /ask\n  api_keys: []\n"
         }
     };
     std::fs::write(path, template)

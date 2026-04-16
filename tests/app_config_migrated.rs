@@ -28,7 +28,7 @@ fn write_default_config_if_missing_creates_yaml_template() {
 
     write_default_config_if_missing(&path).expect("config file should be created");
     let content = std::fs::read_to_string(&path).expect("config file should be readable");
-    assert!(content.contains("rust:"));
+    assert!(content.contains("core:"));
     assert!(content.contains("adapters: []"));
 
     let _ = std::fs::remove_file(&path);
@@ -149,6 +149,7 @@ fn connect_websocket_both_mode_generates_forward_and_reverse_adapters() {
                 enabled: Some(true),
                 mode: Some("both".to_string()),
                 url: Some("ws://127.0.0.1:3000/ws".to_string()),
+                urls: None,
                 host: Some("0.0.0.0".to_string()),
                 port: Some(8080),
                 path: Some("/ws".to_string()),
@@ -196,6 +197,7 @@ fn connect_websocket_port_without_mode_defaults_to_reverse() {
                 enabled: Some(true),
                 mode: None,
                 url: None,
+                urls: None,
                 host: Some("0.0.0.0".to_string()),
                 port: Some(8090),
                 path: Some("/ws".to_string()),
@@ -223,6 +225,112 @@ fn connect_websocket_port_without_mode_defaults_to_reverse() {
     assert_eq!(adapters[0].id, "connect-ws-reverse");
     assert_eq!(adapters[0].max_payload_size, Some(1024 * 1024));
     assert_eq!(adapters[0].max_connections, Some(100));
+}
+
+#[test]
+fn connect_websocket_urls_expand_to_multiple_adapters() {
+    let doc = AppConfigDoc {
+        rust: None,
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: Some(ConnectConfigSection {
+            websocket: Some(WebSocketConnectSection {
+                enabled: Some(true),
+                mode: Some("forward".to_string()),
+                url: None,
+                urls: Some(vec![
+                    "ws://127.0.0.1:3100/ws".to_string(),
+                    "ws://127.0.0.1:3200/ws".to_string(),
+                ]),
+                host: None,
+                port: None,
+                path: None,
+                headers: None,
+                token: None,
+                timeout_seconds: Some(30),
+                queue_capacity: Some(128),
+                max_payload_size: Some(1024 * 1024),
+                max_connections: Some(100),
+                inbound_topic: None,
+                outbound_topic: None,
+                forward: None,
+                reverse: None,
+            }),
+            tcp_http: None,
+            sse: None,
+        }),
+        tui: None,
+        llm: None,
+        onebot_v11: None,
+    };
+
+    let adapters = load_adapter_configs(&doc).expect("connect adapters should parse");
+    assert_eq!(adapters.len(), 2);
+    assert_eq!(adapters[0].id, "connect-ws-forward-1");
+    assert_eq!(adapters[1].id, "connect-ws-forward-2");
+    assert_eq!(adapters[0].endpoint.url, "ws://127.0.0.1:3100/ws");
+    assert_eq!(adapters[1].endpoint.url, "ws://127.0.0.1:3200/ws");
+}
+
+#[test]
+fn connect_http_urls_expand_to_multiple_adapters() {
+    let doc = AppConfigDoc {
+        rust: None,
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: Some(ConnectConfigSection {
+            websocket: None,
+            tcp_http: Some(HttpConnectSection {
+                enabled: Some(true),
+                url: None,
+                urls: Some(vec![
+                    "http://127.0.0.1:8081/".to_string(),
+                    "http://127.0.0.1:8083/".to_string(),
+                ]),
+                host: None,
+                port: None,
+                path: None,
+                headers: None,
+                token: None,
+                timeout_seconds: Some(30),
+                queue_capacity: Some(64),
+                max_payload_size: Some(2048),
+                max_connections: Some(8),
+                inbound_topic: None,
+                outbound_topic: None,
+            }),
+            sse: None,
+        }),
+        tui: None,
+        llm: None,
+        onebot_v11: None,
+    };
+
+    let adapters = load_adapter_configs(&doc).expect("connect adapters should parse");
+    assert_eq!(adapters.len(), 2);
+    assert_eq!(adapters[0].id, "connect-http-1");
+    assert_eq!(adapters[1].id, "connect-http-2");
+    assert_eq!(adapters[0].endpoint.url, "http://127.0.0.1:8081/");
+    assert_eq!(adapters[1].endpoint.url, "http://127.0.0.1:8083/");
+}
+
+#[test]
+fn load_app_config_accepts_core_root() {
+    let path = temp_path("core-root", "yaml");
+    let content = "core:\n  runtime:\n    worker_count: 6\n";
+    std::fs::write(&path, content).expect("should write temp config");
+
+    let doc = load_app_config_from_path(&path).expect("should parse with core root");
+    let worker_count = doc
+        .rust
+        .as_ref()
+        .and_then(|section| section.runtime.as_ref())
+        .and_then(|runtime| runtime.worker_count);
+    assert_eq!(worker_count, Some(6));
+
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -343,5 +451,36 @@ fn validate_app_config_warns_when_llm_is_enabled_without_api_key() {
         warnings
             .iter()
             .any(|warning| warning.contains("llm.timeout_seconds"))
+    );
+}
+
+#[test]
+fn validate_app_config_warns_llm_base_url_in_main_config() {
+    let doc = AppConfigDoc {
+        rust: None,
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: None,
+        tui: None,
+        llm: Some(LlmConfigSection {
+            enabled: Some(true),
+            provider: Some("openai".to_string()),
+            base_url: Some("https://tokenflux.dev/v1".to_string()),
+            api_keys: Some(vec!["sk-test".to_string()]),
+            api_key: None,
+            model: Some("gpt-4.1-mini".to_string()),
+            timeout_seconds: Some(20),
+            system_prompt: None,
+            command_prefix: Some("/ask".to_string()),
+        }),
+        onebot_v11: None,
+    };
+
+    let warnings = validate_app_config(&doc);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("move it to llm-config.yaml"))
     );
 }
