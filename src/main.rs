@@ -33,6 +33,7 @@ const EXTERNAL_API_TIMEOUT: Duration = Duration::from_secs(12);
 const LLM_USAGE_TEXT: &str = "用法: /ask 你的问题";
 const LLM_CONFIG_PATHS: [&str; 2] = ["llm-config.yaml", "llm-config.toml"];
 const LLM_PROMPT_STORE_PATH: &str = "llm-prompts.json";
+const DEFAULT_LLM_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 
 static LLM_API_KEY_ROUND_ROBIN: AtomicU64 = AtomicU64::new(0);
 
@@ -217,6 +218,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(err) = ensure_default_config_files() {
         eprintln!("failed to ensure default config files: {err}");
     }
+    if let Err(err) = ensure_default_llm_config_file() {
+        eprintln!("failed to ensure default llm config file: {err}");
+    }
 
     let settings = match RuntimeSettings::try_load() {
         Ok(settings) => settings,
@@ -380,6 +384,24 @@ fn resolve_runtime_target() -> RuntimeTarget {
         .unwrap_or(DEFAULT_RUNTIME_TARGET)
 }
 
+fn ensure_default_llm_config_file() -> Result<(), String> {
+    if let Ok(path) = std::env::var("LY_LLM_CONFIG_PATH")
+        && !path.trim().is_empty()
+    {
+        return ensure_llm_config_file(std::path::Path::new(path.trim()));
+    }
+
+    if LLM_CONFIG_PATHS
+        .iter()
+        .map(PathBuf::from)
+        .any(|path| path.exists())
+    {
+        return Ok(());
+    }
+
+    ensure_llm_config_file(std::path::Path::new(LLM_CONFIG_PATHS[0]))
+}
+
 fn load_app_config_with_llm_overlay() -> (AppConfigDoc, Vec<String>) {
     let (mut app_config, mut warnings) = load_app_config_with_warnings(false);
     if let Some(path) = resolve_llm_config_path() {
@@ -418,6 +440,9 @@ fn merge_llm_config_sections(
     }
     if overlay.base_url.is_some() {
         merged.base_url = overlay.base_url;
+    }
+    if overlay.provider_urls.is_some() {
+        merged.provider_urls = overlay.provider_urls;
     }
     if overlay.api_keys.is_some() {
         merged.api_keys = overlay.api_keys;
@@ -846,6 +871,111 @@ fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFutu
                 let message = probe_llm_configuration(&llm_config).await?;
                 Ok(message)
             }
+            tui::LlmCommandRequest::AddProviderUrl(provider_url) => {
+                let doc = load_current_app_config_doc()?;
+                let mut provider_urls = extract_llm_provider_urls_from_doc(&doc);
+                if provider_urls.iter().any(|value| value == &provider_url) {
+                    return Ok(format!(
+                        "llm provider base-url already exists: {}",
+                        provider_url
+                    ));
+                }
+
+                provider_urls.push(provider_url.clone());
+                provider_urls = normalize_provider_url_list(provider_urls);
+                let active_base_url = configured_llm_base_url_from_doc(&doc)
+                    .or_else(|| provider_urls.first().cloned())
+                    .unwrap_or_else(|| DEFAULT_LLM_PROVIDER_BASE_URL.to_string());
+                let patch = config_edit::LlmConfigPatch {
+                    base_url: Some(active_base_url.clone()),
+                    provider_urls: Some(provider_urls.clone()),
+                    ..Default::default()
+                };
+                let path = persist_llm_patch(&patch)?;
+                Ok(format!(
+                    "llm provider base-url added: {} (count={}, active={}) ({})",
+                    provider_url,
+                    provider_urls.len(),
+                    active_base_url,
+                    path.display()
+                ))
+            }
+            tui::LlmCommandRequest::RemoveProviderUrl(provider_url) => {
+                let doc = load_current_app_config_doc()?;
+                let mut provider_urls = extract_llm_provider_urls_from_doc(&doc);
+                if provider_urls.is_empty() {
+                    return Err(
+                        "no provider base-url configured, run /llm provider add <base-url>"
+                            .to_string(),
+                    );
+                }
+
+                let before = provider_urls.len();
+                provider_urls.retain(|value| value != &provider_url);
+                if provider_urls.len() == before {
+                    return Err(format!("llm provider base-url not found: {}", provider_url));
+                }
+
+                let configured_base_url = configured_llm_base_url_from_doc(&doc);
+                let active_base_url = if configured_base_url
+                    .as_ref()
+                    .is_some_and(|base| base == &provider_url)
+                {
+                    provider_urls.first().cloned()
+                } else {
+                    configured_base_url.or_else(|| provider_urls.first().cloned())
+                }
+                .unwrap_or_else(|| DEFAULT_LLM_PROVIDER_BASE_URL.to_string());
+
+                let patch = config_edit::LlmConfigPatch {
+                    base_url: Some(active_base_url.clone()),
+                    provider_urls: Some(provider_urls.clone()),
+                    ..Default::default()
+                };
+                let path = persist_llm_patch(&patch)?;
+                Ok(format!(
+                    "llm provider base-url removed: {} (count={}, active={}) ({})",
+                    provider_url,
+                    provider_urls.len(),
+                    active_base_url,
+                    path.display()
+                ))
+            }
+            tui::LlmCommandRequest::ListProviderUrls => {
+                let doc = load_current_app_config_doc()?;
+                let llm_config = current_llm_runtime_config()?;
+                let provider_urls = extract_llm_provider_urls_from_doc(&doc);
+                let path = resolve_llm_config_path().unwrap_or_else(resolve_llm_config_write_path);
+                let mut lines = vec![format!("* {}", llm_config.base_url)];
+                lines.extend(
+                    provider_urls
+                        .iter()
+                        .filter(|url| **url != llm_config.base_url)
+                        .map(|url| format!("  {url}")),
+                );
+                Ok(format!(
+                    "llm provider base-url list ({})\n{}",
+                    path.display(),
+                    lines.join("\n")
+                ))
+            }
+            tui::LlmCommandRequest::UseProviderUrl(provider_url) => {
+                let doc = load_current_app_config_doc()?;
+                let provider_urls = extract_llm_provider_urls_from_doc(&doc);
+
+                let patch = config_edit::LlmConfigPatch {
+                    base_url: Some(provider_url.clone()),
+                    provider_urls: Some(provider_urls.clone()),
+                    ..Default::default()
+                };
+                let path = persist_llm_patch(&patch)?;
+                Ok(format!(
+                    "llm provider base-url switched: {} (count={}) ({})",
+                    provider_url,
+                    provider_urls.len(),
+                    path.display()
+                ))
+            }
             tui::LlmCommandRequest::SetEnabled { enabled, provider } => {
                 let patch = config_edit::LlmConfigPatch {
                     enabled: Some(enabled),
@@ -1034,6 +1164,21 @@ fn extract_llm_keys_from_doc(doc: &AppConfigDoc) -> Vec<String> {
     normalize_string_list(keys)
 }
 
+fn extract_llm_provider_urls_from_doc(doc: &AppConfigDoc) -> Vec<String> {
+    doc.llm
+        .as_ref()
+        .and_then(|section| section.provider_urls.clone())
+        .map(normalize_provider_url_list)
+        .unwrap_or_default()
+}
+
+fn configured_llm_base_url_from_doc(doc: &AppConfigDoc) -> Option<String> {
+    doc.llm
+        .as_ref()
+        .and_then(|section| section.base_url.as_deref())
+        .and_then(normalize_provider_url)
+}
+
 fn normalize_string_list(values: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut normalized = Vec::new();
@@ -1049,6 +1194,25 @@ fn normalize_string_list(values: Vec<String>) -> Vec<String> {
     normalized
 }
 
+fn normalize_provider_url(raw: &str) -> Option<String> {
+    let value = raw.trim().trim_end_matches('/').to_string();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn normalize_provider_url_list(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for value in values {
+        let Some(value) = normalize_provider_url(value.as_str()) else {
+            continue;
+        };
+        if seen.insert(value.clone()) {
+            normalized.push(value);
+        }
+    }
+    normalized
+}
+
 async fn probe_llm_configuration(llm_config: &LlmRuntimeConfig) -> Result<String, String> {
     if !llm_config.provider.eq_ignore_ascii_case("openai") {
         return Err(format!(
@@ -1057,7 +1221,10 @@ async fn probe_llm_configuration(llm_config: &LlmRuntimeConfig) -> Result<String
         ));
     }
     let Some(api_key) = llm_config.api_keys.first() else {
-        return Err("no api key configured, run /llm apikey <key>".to_string());
+        return Ok(format!(
+            "llm probe skipped remote request: provider={} base_url={} (no api key configured)",
+            llm_config.provider, llm_config.base_url
+        ));
     };
 
     let client = OpenAiResponsesClient::from_runtime_with_api_key(llm_config, api_key)

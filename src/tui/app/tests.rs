@@ -483,6 +483,30 @@ fn llm_command_parses_actions() {
         CommandOutcome::Llm(LlmCommandRequest::ProbeProvider(Some(_)))
     ));
 
+    let outcome = app.handle_console_command("/llm provider list");
+    assert!(matches!(
+        outcome,
+        CommandOutcome::Llm(LlmCommandRequest::ListProviderUrls)
+    ));
+
+    let outcome = app.handle_console_command("/llm provider add https://api.openai.com");
+    assert!(matches!(
+        outcome,
+        CommandOutcome::Llm(LlmCommandRequest::AddProviderUrl(_))
+    ));
+
+    let outcome = app.handle_console_command("/llm provider remove https://api.openai.com");
+    assert!(matches!(
+        outcome,
+        CommandOutcome::Llm(LlmCommandRequest::RemoveProviderUrl(_))
+    ));
+
+    let outcome = app.handle_console_command("/llm provider use https://api.openai.com");
+    assert!(matches!(
+        outcome,
+        CommandOutcome::Llm(LlmCommandRequest::UseProviderUrl(_))
+    ));
+
     let outcome = app.handle_console_command("/llm on openai");
     assert!(matches!(
         outcome,
@@ -620,6 +644,26 @@ fn autocomplete_llm_subcommands_and_provider() {
     app.console_input = "/llm prompt ".to_string();
     app.autocomplete_console_input();
     assert_eq!(app.console_input, "/llm prompt list");
+
+    app.console_input = "/llm provider ".to_string();
+    app.autocomplete_console_input();
+    assert_eq!(app.console_input, "/llm provider add ");
+
+    app.clear_completion_state();
+    app.console_input = "/llm provider add ".to_string();
+    app.autocomplete_console_input();
+    assert_eq!(
+        app.console_input,
+        "/llm provider add https://api.openai.com"
+    );
+
+    app.clear_completion_state();
+    app.console_input = "/llm provider use ".to_string();
+    app.autocomplete_console_input();
+    assert_eq!(
+        app.console_input,
+        "/llm provider use https://api.openai.com"
+    );
 
     remove_file_if_exists(&path);
 }

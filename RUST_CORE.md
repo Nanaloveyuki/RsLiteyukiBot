@@ -58,7 +58,7 @@ Top-level schema:
 - `tui.resume.store_path`
 - `tui.resume.max_sessions`
 - `tui.resume.max_size_mib`
-- `llm.enabled/provider/base_url/api_keys/api_key/model/timeout_seconds/system_prompt/command_prefix`
+- `llm.enabled/provider/base_url/provider_urls/api_keys/api_key/model/timeout_seconds/system_prompt/command_prefix`
 
 LLM 配置支持独立文件覆盖（建议用于密钥隔离）:
 

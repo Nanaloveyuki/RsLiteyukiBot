@@ -275,6 +275,8 @@ pub(crate) struct LlmConfigSection {
     #[serde(default)]
     pub(crate) base_url: Option<String>,
     #[serde(default)]
+    pub(crate) provider_urls: Option<Vec<String>>,
+    #[serde(default)]
     pub(crate) api_keys: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) api_key: Option<String>,
@@ -483,6 +485,8 @@ llm:
   model: gpt-4.1-mini
   timeout_seconds: 20
   command_prefix: /ask
+  # provider_urls:
+  #   - https://api.openai.com
   # api_keys:
   #   - sk-xxx
   # api_key: sk-xxx
@@ -558,6 +562,7 @@ provider = "openai"
 model = "gpt-4.1-mini"
 timeout_seconds = 20
 command_prefix = "/ask"
+# provider_urls = ["https://api.openai.com"]
 # api_keys = ["sk-xxx"]
 # api_key = "sk-xxx"
 # system_prompt = "You are a helpful assistant."
@@ -727,16 +732,19 @@ pub(crate) fn resolve_llm_config(app_config: &AppConfigDoc) -> LlmRuntimeConfig 
         provider.trim().to_ascii_lowercase()
     };
 
+    let provider_urls = section
+        .and_then(|cfg| cfg.provider_urls.clone())
+        .map(normalize_llm_provider_url_list)
+        .unwrap_or_default();
+
     let base_url = std::env::var("LY_LLM_BASE_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| section.and_then(|cfg| cfg.base_url.clone()))
+        .or_else(|| provider_urls.first().cloned())
         .unwrap_or_else(|| DEFAULT_LLM_BASE_URL.to_string());
-    let base_url = if base_url.trim().is_empty() {
-        DEFAULT_LLM_BASE_URL.to_string()
-    } else {
-        base_url.trim().trim_end_matches('/').to_string()
-    };
+    let base_url = normalize_llm_provider_url(base_url.as_str())
+        .unwrap_or_else(|| DEFAULT_LLM_BASE_URL.to_string());
 
     let mut api_keys = std::env::var("LY_LLM_API_KEYS")
         .ok()
@@ -1334,6 +1342,12 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
         {
             warnings.push("llm.api_keys should not contain empty values".to_string());
         }
+        if llm.provider_urls.as_ref().is_some_and(|urls| {
+            urls.iter()
+                .any(|url| normalize_llm_provider_url(url).is_none())
+        }) {
+            warnings.push("llm.provider_urls should not contain empty values".to_string());
+        }
         if llm.enabled.unwrap_or(false) {
             let has_non_empty_api_key = llm
                 .api_key
@@ -1464,6 +1478,25 @@ fn parse_llm_key_list(raw: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
         .collect()
+}
+
+fn normalize_llm_provider_url(raw: &str) -> Option<String> {
+    let value = raw.trim().trim_end_matches('/').to_string();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn normalize_llm_provider_url_list(urls: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for url in urls {
+        let Some(url) = normalize_llm_provider_url(url.as_str()) else {
+            continue;
+        };
+        if seen.insert(url.clone()) {
+            normalized.push(url);
+        }
+    }
+    normalized
 }
 
 fn normalize_llm_key_list(keys: Vec<String>) -> Vec<String> {

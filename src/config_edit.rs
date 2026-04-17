@@ -29,6 +29,8 @@ pub fn persist_onebot_v11_whitelist(path: &Path, entries: &[String]) -> Result<(
 pub struct LlmConfigPatch {
     pub enabled: Option<bool>,
     pub provider: Option<String>,
+    pub base_url: Option<String>,
+    pub provider_urls: Option<Vec<String>>,
     pub model: Option<String>,
     pub api_keys: Option<Vec<String>>,
 }
@@ -76,6 +78,11 @@ fn normalize_llm_patch(patch: &LlmConfigPatch) -> LlmConfigPatch {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase());
+    let base_url = patch.base_url.as_deref().and_then(normalize_provider_url);
+    let provider_urls = patch
+        .provider_urls
+        .as_ref()
+        .map(|urls| normalize_provider_url_entries(urls));
     let model = patch
         .model
         .as_deref()
@@ -91,9 +98,30 @@ fn normalize_llm_patch(patch: &LlmConfigPatch) -> LlmConfigPatch {
     LlmConfigPatch {
         enabled: patch.enabled,
         provider,
+        base_url,
+        provider_urls,
         model,
         api_keys,
     }
+}
+
+fn normalize_provider_url(raw: &str) -> Option<String> {
+    let value = raw.trim().trim_end_matches('/').to_string();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn normalize_provider_url_entries(entries: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut normalized = Vec::new();
+    for raw in entries {
+        let Some(value) = normalize_provider_url(raw.as_str()) else {
+            continue;
+        };
+        if seen.insert(value.clone()) {
+            normalized.push(value);
+        }
+    }
+    normalized
 }
 
 fn normalize_entries_preserve_order(entries: &[String]) -> Vec<String> {
@@ -269,6 +297,25 @@ fn update_yaml_llm_document(content: &str, patch: &LlmConfigPatch) -> String {
             &format!("'{escaped}'"),
         );
     }
+    if let Some(base_url) = patch.base_url.as_deref() {
+        let escaped = base_url.replace('\'', "''");
+        upsert_yaml_scalar(
+            &mut lines,
+            section_start,
+            section_indent,
+            "base_url",
+            &format!("'{escaped}'"),
+        );
+    }
+    if let Some(provider_urls) = patch.provider_urls.as_ref() {
+        upsert_yaml_list(
+            &mut lines,
+            section_start,
+            section_indent,
+            "provider_urls",
+            provider_urls,
+        );
+    }
     if let Some(model) = patch.model.as_deref() {
         let escaped = model.replace('\'', "''");
         upsert_yaml_scalar(
@@ -398,6 +445,19 @@ fn update_toml_llm_document(content: &str, patch: &LlmConfigPatch) -> String {
             &format!("\"{escaped}\""),
         );
     }
+    if let Some(base_url) = patch.base_url.as_deref() {
+        let escaped = base_url.replace('\\', "\\\\").replace('"', "\\\"");
+        upsert_toml_llm_key(
+            &mut lines,
+            table_start,
+            "base_url",
+            &format!("\"{escaped}\""),
+        );
+    }
+    if let Some(provider_urls) = patch.provider_urls.as_ref() {
+        let value = render_toml_string_list(provider_urls);
+        upsert_toml_llm_key(&mut lines, table_start, "provider_urls", &value);
+    }
     if let Some(model) = patch.model.as_deref() {
         let escaped = model.replace('\\', "\\\\").replace('"', "\\\"");
         upsert_toml_llm_key(&mut lines, table_start, "model", &format!("\"{escaped}\""));
@@ -523,6 +583,11 @@ mod tests {
         let patch = LlmConfigPatch {
             enabled: Some(true),
             provider: Some("openai".to_string()),
+            base_url: Some("https://api.openai.com".to_string()),
+            provider_urls: Some(vec![
+                "https://api.openai.com".to_string(),
+                "https://tokenflux.dev/v1".to_string(),
+            ]),
             model: Some("gpt-4.1-mini".to_string()),
             api_keys: Some(vec!["k1".to_string(), "k2".to_string()]),
         };
@@ -530,6 +595,10 @@ mod tests {
         assert!(updated.contains("llm:"));
         assert!(updated.contains("enabled: true"));
         assert!(updated.contains("provider: 'openai'"));
+        assert!(updated.contains("base_url: 'https://api.openai.com'"));
+        assert!(updated.contains(
+            "provider_urls:\n    - 'https://api.openai.com'\n    - 'https://tokenflux.dev/v1'"
+        ));
         assert!(updated.contains("model: 'gpt-4.1-mini'"));
         assert!(updated.contains("api_keys:\n    - 'k1'\n    - 'k2'"));
     }
@@ -540,6 +609,8 @@ mod tests {
         let patch = LlmConfigPatch {
             enabled: Some(true),
             provider: Some("openai".to_string()),
+            base_url: Some("https://api.openai.com".to_string()),
+            provider_urls: Some(vec!["https://api.openai.com".to_string()]),
             model: Some("gpt-4.1-mini".to_string()),
             api_keys: Some(vec!["k1".to_string()]),
         };
@@ -547,7 +618,20 @@ mod tests {
         assert!(updated.contains("[llm]"));
         assert!(updated.contains("enabled = true"));
         assert!(updated.contains("provider = \"openai\""));
+        assert!(updated.contains("base_url = \"https://api.openai.com\""));
+        assert!(updated.contains("provider_urls = [\"https://api.openai.com\"]"));
         assert!(updated.contains("model = \"gpt-4.1-mini\""));
         assert!(updated.contains("api_keys = [\"k1\"]"));
+    }
+
+    #[test]
+    fn update_yaml_llm_allows_clearing_provider_urls() {
+        let source = "llm:\n  base_url: 'https://api.openai.com'\n  provider_urls:\n    - 'https://api.openai.com'\n";
+        let patch = LlmConfigPatch {
+            provider_urls: Some(vec![]),
+            ..Default::default()
+        };
+        let updated = update_yaml_llm_document(source, &patch);
+        assert!(updated.contains("provider_urls: []"));
     }
 }

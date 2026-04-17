@@ -245,7 +245,7 @@ fn render_logs_panel(frame: &mut ratatui::Frame<'_>, app: &mut AppState, area: R
                         .bg(Color::LightCyan)
                         .add_modifier(Modifier::BOLD),
                     Style::default()
-                        .fg(Color::LightCyan)
+                        .fg(Color::LightBlue)
                         .add_modifier(Modifier::BOLD),
                 ),
             };

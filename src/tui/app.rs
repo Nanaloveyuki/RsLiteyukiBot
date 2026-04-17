@@ -135,6 +135,10 @@ pub enum LlmCommandRequest {
     SetModel(String),
     AddApiKeys(Vec<String>),
     ProbeProvider(Option<String>),
+    AddProviderUrl(String),
+    RemoveProviderUrl(String),
+    ListProviderUrls,
+    UseProviderUrl(String),
     SetEnabled {
         enabled: bool,
         provider: Option<String>,

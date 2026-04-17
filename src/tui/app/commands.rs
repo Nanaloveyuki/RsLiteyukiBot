@@ -150,7 +150,7 @@ impl AppState {
     pub(super) fn show_llm_usage(&mut self) {
         self.push_log(
             UiLevel::Warn,
-            "usage: /llm model <name> | /llm apikey <k1> [k2 ...] | /llm provider [name] | /llm on|off|enable|disable [provider] | /llm prompt list|use <name>|set <name> <soul>|remove <name>|preview [user_prompt]",
+            "usage: /llm model <name> | /llm apikey <k1> [k2 ...] | /llm provider [name] | /llm provider add|remove|use <base-url> | /llm provider list | /llm on|off|enable|disable [provider] | /llm prompt list|use <name>|set <name> <soul>|remove <name>|preview [user_prompt]",
         );
     }
 
@@ -161,6 +161,17 @@ impl AppState {
         } else {
             Some(provider)
         }
+    }
+
+    pub(super) fn parse_llm_provider_url(raw: &str) -> Option<String> {
+        let url = raw.trim().trim_end_matches('/').to_string();
+        if url.is_empty() {
+            return None;
+        }
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return None;
+        }
+        Some(url)
     }
 
     pub(super) fn parse_llm_api_keys(args: &[&str]) -> Vec<String> {
@@ -238,25 +249,69 @@ impl AppState {
                 );
                 CommandOutcome::Llm(LlmCommandRequest::AddApiKeys(keys))
             }
-            "provider" => {
-                let provider = match args {
-                    [_] => None,
-                    [_, provider] => Self::parse_llm_provider(provider),
-                    _ => {
+            "provider" => match args {
+                [_, "list"] => {
+                    self.push_log(UiLevel::Info, "listing llm provider base-url(s) ...");
+                    CommandOutcome::Llm(LlmCommandRequest::ListProviderUrls)
+                }
+                [_, "add", provider_url] => {
+                    let Some(provider_url) = Self::parse_llm_provider_url(provider_url) else {
                         self.show_llm_usage();
                         return CommandOutcome::None;
-                    }
-                };
-                if let Some(provider) = provider.as_deref() {
+                    };
                     self.push_log(
                         UiLevel::Info,
-                        format!("probing llm provider (override={provider}) ..."),
+                        format!("adding llm provider base-url -> {provider_url}"),
                     );
-                } else {
-                    self.push_log(UiLevel::Info, "probing current llm provider ...");
+                    CommandOutcome::Llm(LlmCommandRequest::AddProviderUrl(provider_url))
                 }
-                CommandOutcome::Llm(LlmCommandRequest::ProbeProvider(provider))
-            }
+                [_, "remove", provider_url] => {
+                    let Some(provider_url) = Self::parse_llm_provider_url(provider_url) else {
+                        self.show_llm_usage();
+                        return CommandOutcome::None;
+                    };
+                    self.push_log(
+                        UiLevel::Info,
+                        format!("removing llm provider base-url -> {provider_url}"),
+                    );
+                    CommandOutcome::Llm(LlmCommandRequest::RemoveProviderUrl(provider_url))
+                }
+                [_, "use", provider_url] => {
+                    let Some(provider_url) = Self::parse_llm_provider_url(provider_url) else {
+                        self.show_llm_usage();
+                        return CommandOutcome::None;
+                    };
+                    self.push_log(
+                        UiLevel::Info,
+                        format!("switching llm provider base-url -> {provider_url}"),
+                    );
+                    CommandOutcome::Llm(LlmCommandRequest::UseProviderUrl(provider_url))
+                }
+                [_, "add" | "remove" | "use"] => {
+                    self.show_llm_usage();
+                    CommandOutcome::None
+                }
+                [_] | [_, _] => {
+                    let provider = match args {
+                        [_] => None,
+                        [_, provider] => Self::parse_llm_provider(provider),
+                        _ => None,
+                    };
+                    if let Some(provider) = provider.as_deref() {
+                        self.push_log(
+                            UiLevel::Info,
+                            format!("probing llm provider (override={provider}) ..."),
+                        );
+                    } else {
+                        self.push_log(UiLevel::Info, "probing current llm provider ...");
+                    }
+                    CommandOutcome::Llm(LlmCommandRequest::ProbeProvider(provider))
+                }
+                _ => {
+                    self.show_llm_usage();
+                    CommandOutcome::None
+                }
+            },
             "enable" | "on" | "disable" | "off" => {
                 let enabled = matches!(subcommand, "enable" | "on");
                 let provider = match args {
@@ -407,7 +462,7 @@ impl AppState {
             .iter()
             .filter(|candidate| candidate.starts_with(prefix))
             .map(|candidate| match *candidate {
-                "provider" => "/llm provider".to_string(),
+                "provider" => "/llm provider ".to_string(),
                 "prompt" => "/llm prompt ".to_string(),
                 _ => format!("/llm {candidate} "),
             })
@@ -430,6 +485,25 @@ impl AppState {
             .iter()
             .filter(|candidate| candidate.starts_with(prefix))
             .map(|candidate| format!("/llm {verb} {candidate}"))
+            .collect()
+    }
+
+    pub(super) fn llm_provider_subcommand_candidates(prefix: &str) -> Vec<String> {
+        ["add", "remove", "use", "list"]
+            .iter()
+            .filter(|candidate| candidate.starts_with(prefix))
+            .map(|candidate| match *candidate {
+                "list" => "/llm provider list".to_string(),
+                _ => format!("/llm provider {candidate} "),
+            })
+            .collect()
+    }
+
+    pub(super) fn llm_provider_url_candidates(action: &str, prefix: &str) -> Vec<String> {
+        ["https://api.openai.com", "https://tokenflux.dev/v1"]
+            .iter()
+            .filter(|candidate| candidate.starts_with(prefix))
+            .map(|candidate| format!("/llm provider {action} {candidate}"))
             .collect()
     }
 
@@ -546,10 +620,19 @@ impl AppState {
         let trailing_space = input.ends_with(' ');
         if tokens.len() == 1 {
             let verb = tokens[0];
-            if trailing_space && matches!(verb, "provider" | "enable" | "on" | "disable" | "off") {
+            if trailing_space && matches!(verb, "enable" | "on" | "disable" | "off") {
                 let candidates = Self::llm_provider_candidates(verb, "");
                 return Some((
                     format!("llm:{verb}:provider:"),
+                    CompletionMode::Rendered,
+                    candidates,
+                ));
+            }
+            if trailing_space && verb == "provider" {
+                let mut candidates = Self::llm_provider_subcommand_candidates("");
+                candidates.extend(Self::llm_provider_candidates("provider", ""));
+                return Some((
+                    "llm:provider:verb:".to_string(),
                     CompletionMode::Rendered,
                     candidates,
                 ));
@@ -570,14 +653,46 @@ impl AppState {
             ));
         }
 
-        if tokens.len() == 2
-            && matches!(tokens[0], "provider" | "enable" | "on" | "disable" | "off")
-        {
+        if tokens.len() == 2 && matches!(tokens[0], "enable" | "on" | "disable" | "off") {
             let verb = tokens[0];
             let prefix = if trailing_space { "" } else { tokens[1] };
             let candidates = Self::llm_provider_candidates(verb, prefix);
             return Some((
                 format!("llm:{verb}:provider:{prefix}"),
+                CompletionMode::Rendered,
+                candidates,
+            ));
+        }
+
+        if tokens.len() == 2 && tokens[0] == "provider" {
+            if trailing_space && matches!(tokens[1], "add" | "remove" | "use") {
+                let action = tokens[1];
+                let candidates = Self::llm_provider_url_candidates(action, "");
+                return Some((
+                    format!("llm:provider:{action}:url:"),
+                    CompletionMode::Rendered,
+                    candidates,
+                ));
+            }
+            let prefix = if trailing_space { "" } else { tokens[1] };
+            let mut candidates = Self::llm_provider_subcommand_candidates(prefix);
+            candidates.extend(Self::llm_provider_candidates("provider", prefix));
+            return Some((
+                format!("llm:provider:verb:{prefix}"),
+                CompletionMode::Rendered,
+                candidates,
+            ));
+        }
+
+        if tokens.len() == 3
+            && tokens[0] == "provider"
+            && matches!(tokens[1], "add" | "remove" | "use")
+        {
+            let action = tokens[1];
+            let prefix = if trailing_space { "" } else { tokens[2] };
+            let candidates = Self::llm_provider_url_candidates(action, prefix);
+            return Some((
+                format!("llm:provider:{action}:url:{prefix}"),
                 CompletionMode::Rendered,
                 candidates,
             ));
@@ -819,7 +934,7 @@ impl AppState {
                 );
                 self.push_log(
                     UiLevel::Info,
-                    "llm: /llm model <name> | /llm apikey <k1> [k2 ...] | /llm provider [name] | /llm on|off|enable|disable [provider] | /llm prompt list|use <name>|set <name> <soul>|remove <name>|preview [user_prompt]",
+                    "llm: /llm model <name> | /llm apikey <k1> [k2 ...] | /llm provider [name] | /llm provider add|remove|use <base-url> | /llm provider list | /llm on|off|enable|disable [provider] | /llm prompt list|use <name>|set <name> <soul>|remove <name>|preview [user_prompt]",
                 );
                 self.push_log(
                     UiLevel::Info,

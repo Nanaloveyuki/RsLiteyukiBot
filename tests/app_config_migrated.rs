@@ -396,6 +396,10 @@ fn resolve_llm_config_reads_values_from_config() {
             enabled: Some(true),
             provider: Some("openai".to_string()),
             base_url: Some("https://api.openai.com/".to_string()),
+            provider_urls: Some(vec![
+                "https://api.openai.com/".to_string(),
+                "https://tokenflux.dev/v1".to_string(),
+            ]),
             api_keys: Some(vec!["sk-test".to_string(), "sk-b".to_string()]),
             api_key: Some("sk-test".to_string()),
             model: Some("gpt-4.1-mini".to_string()),
@@ -416,6 +420,37 @@ fn resolve_llm_config_reads_values_from_config() {
 }
 
 #[test]
+fn resolve_llm_config_falls_back_to_provider_urls_when_base_url_missing() {
+    let doc = AppConfigDoc {
+        rust: None,
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: None,
+        tui: None,
+        llm: Some(LlmConfigSection {
+            enabled: Some(true),
+            provider: Some("openai".to_string()),
+            base_url: None,
+            provider_urls: Some(vec![
+                "https://tokenflux.dev/v1/".to_string(),
+                "https://api.openai.com".to_string(),
+            ]),
+            api_keys: Some(vec!["sk-test".to_string()]),
+            api_key: None,
+            model: Some("gpt-4.1-mini".to_string()),
+            timeout_seconds: Some(20),
+            system_prompt: None,
+            command_prefix: Some("/ask".to_string()),
+        }),
+        onebot_v11: None,
+    };
+
+    let config = resolve_llm_config(&doc);
+    assert_eq!(config.base_url, "https://tokenflux.dev/v1");
+}
+
+#[test]
 fn validate_app_config_warns_when_llm_is_enabled_without_api_key() {
     let doc = AppConfigDoc {
         rust: None,
@@ -428,6 +463,7 @@ fn validate_app_config_warns_when_llm_is_enabled_without_api_key() {
             enabled: Some(true),
             provider: Some("not-built-in".to_string()),
             base_url: None,
+            provider_urls: None,
             api_keys: None,
             api_key: None,
             model: Some("".to_string()),
@@ -470,6 +506,7 @@ fn validate_app_config_warns_llm_base_url_in_main_config() {
             enabled: Some(true),
             provider: Some("openai".to_string()),
             base_url: Some("https://tokenflux.dev/v1".to_string()),
+            provider_urls: None,
             api_keys: Some(vec!["sk-test".to_string()]),
             api_key: None,
             model: Some("gpt-4.1-mini".to_string()),

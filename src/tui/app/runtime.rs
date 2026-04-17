@@ -303,15 +303,37 @@ fn push_llm_response_logs(app: &mut AppState, message: String) {
         return;
     }
 
+    let mut has_non_empty = false;
     let mut is_first = true;
     for line in lines {
-        let content = if line.is_empty() { " " } else { line };
+        let mut content = line
+            .chars()
+            .filter(|ch| !ch.is_control() || *ch == '\t')
+            .filter(|ch| {
+                !matches!(
+                    *ch,
+                    '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}'
+                )
+            })
+            .collect::<String>()
+            .replace('\t', "    ");
+        if content.is_empty() {
+            content = " ".to_string();
+        } else if content.trim().is_empty() {
+            content = " ".to_string();
+        } else {
+            has_non_empty = true;
+        }
+
         if is_first {
             app.push_log(UiLevel::Llm, content);
             is_first = false;
         } else {
-            app.push_log(UiLevel::Llm, format!("  {content}"));
+            app.push_log(UiLevel::Llm, format!("| {content}"));
         }
+    }
+    if !has_non_empty {
+        app.push_log(UiLevel::Llm, "(empty llm output)");
     }
 }
 
@@ -359,8 +381,8 @@ mod tests {
             tail.into_iter().rev().collect::<Vec<_>>(),
             vec![
                 (UiLevel::Llm, "line-1".to_string()),
-                (UiLevel::Llm, "  line-2".to_string()),
-                (UiLevel::Llm, "  line-3".to_string()),
+                (UiLevel::Llm, "| line-2".to_string()),
+                (UiLevel::Llm, "| line-3".to_string()),
             ]
         );
     }
@@ -381,9 +403,27 @@ mod tests {
             tail.into_iter().rev().collect::<Vec<_>>(),
             vec![
                 "first".to_string(),
-                "   ".to_string(),
-                "  third".to_string(),
+                "|  ".to_string(),
+                "| third".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn llm_zero_width_output_shows_placeholder() {
+        let mut app = test_app();
+        push_llm_response_logs(&mut app, "\u{200B}\u{200D}\u{FEFF}".to_string());
+
+        let tail: Vec<String> = app
+            .logs
+            .iter()
+            .rev()
+            .take(2)
+            .map(|log| log.message.clone())
+            .collect();
+        assert_eq!(
+            tail.into_iter().rev().collect::<Vec<_>>(),
+            vec![" ".to_string(), "(empty llm output)".to_string(),]
         );
     }
 }
