@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rust LLM Provider URLs"
+  short_description: "Fix /llm provider config consistency and tests"
+  default_prompt: "Use $rust-llm-provider-url-consistency to fix a Rust /llm provider command that can write an invalid base_url."

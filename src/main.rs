@@ -903,18 +903,8 @@ fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFutu
             tui::LlmCommandRequest::RemoveProviderUrl(provider_url) => {
                 let doc = load_current_app_config_doc()?;
                 let mut provider_urls = extract_llm_provider_urls_from_doc(&doc);
-                if provider_urls.is_empty() {
-                    return Err(
-                        "no provider base-url configured, run /llm provider add <base-url>"
-                            .to_string(),
-                    );
-                }
-
-                let before = provider_urls.len();
+                ensure_registered_provider_url(provider_url.as_str(), &provider_urls)?;
                 provider_urls.retain(|value| value != &provider_url);
-                if provider_urls.len() == before {
-                    return Err(format!("llm provider base-url not found: {}", provider_url));
-                }
 
                 let configured_base_url = configured_llm_base_url_from_doc(&doc);
                 let active_base_url = if configured_base_url
@@ -962,6 +952,7 @@ fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFutu
             tui::LlmCommandRequest::UseProviderUrl(provider_url) => {
                 let doc = load_current_app_config_doc()?;
                 let provider_urls = extract_llm_provider_urls_from_doc(&doc);
+                ensure_registered_provider_url(provider_url.as_str(), &provider_urls)?;
 
                 let patch = config_edit::LlmConfigPatch {
                     base_url: Some(provider_url.clone()),
@@ -1213,6 +1204,21 @@ fn normalize_provider_url_list(values: Vec<String>) -> Vec<String> {
     normalized
 }
 
+fn ensure_registered_provider_url(
+    provider_url: &str,
+    provider_urls: &[String],
+) -> Result<(), String> {
+    if provider_urls.is_empty() {
+        return Err(
+            "no provider base-url configured, run /llm provider add <base-url>".to_string(),
+        );
+    }
+    if provider_urls.iter().all(|value| value != provider_url) {
+        return Err(format!("llm provider base-url not found: {}", provider_url));
+    }
+    Ok(())
+}
+
 async fn probe_llm_configuration(llm_config: &LlmRuntimeConfig) -> Result<String, String> {
     if !llm_config.provider.eq_ignore_ascii_case("openai") {
         return Err(format!(
@@ -1265,5 +1271,111 @@ fn truncate_text_for_log(raw: &str, max_chars: usize) -> String {
         format!("{preview}...")
     } else {
         preview
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn llm_config_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.as_deref() {
+                Some(value) => unsafe {
+                    std::env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.key);
+                },
+            }
+        }
+    }
+
+    fn temp_llm_config_path(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("rsliteyukibot-{name}-{unique}.yaml"))
+    }
+
+    fn run_llm_command_for_test(action: tui::LlmCommandRequest) -> Result<String, String> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build")
+            .block_on(handle_llm_tui_command(action))
+    }
+
+    #[test]
+    fn llm_provider_use_rejects_unregistered_base_url_without_mutating_config() {
+        let _lock = llm_config_env_lock()
+            .lock()
+            .expect("llm config env lock should not be poisoned");
+        let path = temp_llm_config_path("provider-use-invalid");
+        let source = "llm:\n  base_url: https://api.openai.com\n  provider_urls:\n    - https://api.openai.com\n    - https://tokenflux.dev/v1\n";
+        fs::write(&path, source).expect("test llm config should be written");
+        let _env_guard = EnvVarGuard::set("LY_LLM_CONFIG_PATH", path.as_path());
+
+        let result = run_llm_command_for_test(tui::LlmCommandRequest::UseProviderUrl(
+            "https://typo.example/v1".to_string(),
+        ));
+
+        assert_eq!(
+            result,
+            Err("llm provider base-url not found: https://typo.example/v1".to_string())
+        );
+        let updated = fs::read_to_string(&path).expect("test llm config should remain readable");
+        assert_eq!(updated, source);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn llm_provider_use_switches_to_registered_base_url() {
+        let _lock = llm_config_env_lock()
+            .lock()
+            .expect("llm config env lock should not be poisoned");
+        let path = temp_llm_config_path("provider-use-valid");
+        let source = "llm:\n  base_url: https://api.openai.com\n  provider_urls:\n    - https://api.openai.com\n    - https://tokenflux.dev/v1\n";
+        fs::write(&path, source).expect("test llm config should be written");
+        let _env_guard = EnvVarGuard::set("LY_LLM_CONFIG_PATH", path.as_path());
+
+        let result = run_llm_command_for_test(tui::LlmCommandRequest::UseProviderUrl(
+            "https://tokenflux.dev/v1".to_string(),
+        ))
+        .expect("registered provider url should switch successfully");
+
+        assert!(result.contains("llm provider base-url switched: https://tokenflux.dev/v1"));
+        let updated = fs::read_to_string(&path).expect("updated llm config should be readable");
+        assert!(updated.contains("base_url: 'https://tokenflux.dev/v1'"));
+        assert!(updated.contains("provider_urls:"));
+        assert!(updated.contains("- 'https://api.openai.com'"));
+        assert!(updated.contains("- 'https://tokenflux.dev/v1'"));
+
+        let _ = fs::remove_file(path);
     }
 }
