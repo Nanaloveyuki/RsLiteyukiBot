@@ -32,7 +32,7 @@ config.example.yml
 
 # vuepress
 
-# mupy
+# legacy type-check cache
 mypy.ini
 
 # nuitka
@@ -52,7 +52,7 @@ prompt.txt
 .env
 
 
-# pdm
+# legacy packaging cache
 .pdm-python
 .pdm-build
 dist
@@ -62,7 +62,7 @@ doc
 mkdoc2.py
 result.json
 
-# litedoc
+# docs generator artifacts
 docs/zh/dev/api
 docs/en/dev/api
 mkdoc.bat
@@ -72,11 +72,11 @@ docs/.vitepress/dist/
 docs/.vitepress/cache
 docs/.vitepress/.temp
 
-# python toolchain
+# legacy toolchain cache
 .mypy_cache/
 .pytest_cache/
 
-# pdm
+# legacy package manager cache
 __pypackages__/
 pdm.lock
 
