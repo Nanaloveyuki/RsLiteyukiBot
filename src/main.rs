@@ -30,7 +30,6 @@ use onebot_support::*;
 const APP_TITLE: &str = "RsLiteyukiBot";
 const DEFAULT_RUNTIME_TARGET: RuntimeTarget = RuntimeTarget::Cli;
 const EXTERNAL_API_TIMEOUT: Duration = Duration::from_secs(12);
-const LLM_USAGE_TEXT: &str = "用法: /ask 你的问题";
 const LLM_CONFIG_PATHS: [&str; 2] = ["llm-config.yaml", "llm-config.toml"];
 const LLM_PROMPT_STORE_PATH: &str = "llm-prompts.json";
 const DEFAULT_LLM_PROVIDER_BASE_URL: &str = "https://api.openai.com";
@@ -39,7 +38,34 @@ static LLM_API_KEY_ROUND_ROBIN: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 struct LlmCommandRuntime {
-    command_prefix: Arc<str>,
+    command_prefix: Arc<RwLock<String>>,
+}
+
+impl LlmCommandRuntime {
+    fn new(command_prefix: impl Into<String>) -> Self {
+        Self {
+            command_prefix: Arc::new(RwLock::new(command_prefix.into())),
+        }
+    }
+
+    fn command_prefix(&self) -> String {
+        self.command_prefix
+            .read()
+            .expect("llm command prefix lock should not be poisoned")
+            .clone()
+    }
+
+    fn shared_command_prefix(&self) -> Arc<RwLock<String>> {
+        self.command_prefix.clone()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn set_command_prefix(&self, command_prefix: impl Into<String>) {
+        *self
+            .command_prefix
+            .write()
+            .expect("llm command prefix lock should not be poisoned") = command_prefix.into();
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -246,9 +272,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let help_whitelist = Arc::new(RwLock::new(resolve_help_whitelist(&app_config)));
     let tui_config = resolve_tui_config(&app_config);
     let llm_config = resolve_llm_config(&app_config);
-    let llm_runtime = LlmCommandRuntime {
-        command_prefix: Arc::from(llm_config.command_prefix.clone()),
-    };
+    let llm_runtime = LlmCommandRuntime::new(llm_config.command_prefix.clone());
     let external_gateway = ExternalGateway::new();
 
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<tui::UiEvent>();
@@ -268,7 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let _ = ui_tx.send(tui::UiEvent::Log {
         level: tui::UiLevel::Info,
-        message: format!("LLM command prefix: {}", llm_runtime.command_prefix),
+        message: format!("LLM command prefix: {}", llm_runtime.command_prefix()),
     });
     let external_gateway_for_handler = external_gateway.clone();
 
@@ -362,6 +386,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             llm_command_handler: handle_llm_tui_command,
             ask_handler: handle_tui_ask_command,
             help_whitelist: help_whitelist.clone(),
+            llm_command_prefix: llm_runtime.shared_command_prefix(),
         },
         &mut ui_rx,
     )
@@ -580,6 +605,15 @@ fn emit_external_stats(
     });
 }
 
+fn matches_external_ask_command(message: &str, llm_runtime: &LlmCommandRuntime) -> bool {
+    let command_prefix = llm_runtime.command_prefix();
+    parse_command_argument(message, command_prefix.as_str()).is_some()
+}
+
+fn llm_usage_text(command_prefix: &str) -> String {
+    format!("用法: {command_prefix} 你的问题")
+}
+
 fn install_external_event_handlers(
     bot: &LiteyukiBot,
     gateway: ExternalGateway,
@@ -640,14 +674,12 @@ fn install_external_event_handlers(
     let adapter_manager = bot.adapter_manager().clone();
     let gateway_for_ask = gateway.clone();
     let ui_tx_for_ask = ui_tx.clone();
-    let command_prefix = llm_runtime.command_prefix.clone();
+    let llm_runtime_for_rule = llm_runtime.clone();
     bot.on_message(
         "builtin.external.ask",
         Rule::new("command.ask", move |event| {
-            let command_prefix = command_prefix.clone();
-            async move {
-                parse_command_argument(event.message.as_ref(), command_prefix.as_ref()).is_some()
-            }
+            let llm_runtime = llm_runtime_for_rule.clone();
+            async move { matches_external_ask_command(event.message.as_ref(), &llm_runtime) }
         }),
         490,
         true,
@@ -701,11 +733,11 @@ async fn reply_ask_command(
     }
     emit_external_stats(ui_tx, &gateway.record_command_hit());
 
+    let command_prefix = llm_runtime.command_prefix();
     let prompt =
-        parse_command_argument(event.message.as_ref(), llm_runtime.command_prefix.as_ref())
-            .unwrap_or_default();
+        parse_command_argument(event.message.as_ref(), command_prefix.as_str()).unwrap_or_default();
     let reply_text = if prompt.is_empty() {
-        LLM_USAGE_TEXT.to_string()
+        llm_usage_text(command_prefix.as_str())
     } else {
         match generate_llm_reply(&prompt).await {
             Ok(output) => {
@@ -795,7 +827,7 @@ async fn dispatch_onebot_reply(
 
 fn reload_from_config(bot: &LiteyukiBot) -> tui::ReloadFuture<'_> {
     Box::pin(async move {
-        let (app_config, mut warnings) = load_app_config_with_warnings(false);
+        let (app_config, mut warnings) = load_app_config_with_llm_overlay();
         warnings.extend(collect_runtime_reload_warnings(&app_config));
         let adapters = load_adapter_configs(&app_config)
             .map_err(|err| format!("failed to load adapter configs: {err}"))?;
@@ -804,6 +836,7 @@ fn reload_from_config(bot: &LiteyukiBot) -> tui::ReloadFuture<'_> {
             .await
             .map_err(|err| format!("failed to apply adapter reload: {err}"))?;
         let tui_config = resolve_tui_config(&app_config);
+        let llm_command_prefix = resolve_llm_config(&app_config).command_prefix;
         let mut help_whitelist: Vec<String> =
             resolve_help_whitelist(&app_config).into_iter().collect();
         help_whitelist.sort();
@@ -812,6 +845,7 @@ fn reload_from_config(bot: &LiteyukiBot) -> tui::ReloadFuture<'_> {
             adapter_autostart: autostart,
             tui_config,
             help_whitelist,
+            llm_command_prefix,
             warnings,
         })
     })
@@ -1377,5 +1411,34 @@ mod tests {
         assert!(updated.contains("- 'https://tokenflux.dev/v1'"));
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn external_ask_command_prefix_reads_runtime_updates() {
+        let llm_runtime = LlmCommandRuntime::new("/ask");
+
+        assert!(matches_external_ask_command(
+            "/ask hello world",
+            &llm_runtime
+        ));
+        assert_eq!(
+            llm_usage_text(llm_runtime.command_prefix().as_str()),
+            "用法: /ask 你的问题"
+        );
+
+        llm_runtime.set_command_prefix("/qa");
+
+        assert!(!matches_external_ask_command(
+            "/ask hello world",
+            &llm_runtime
+        ));
+        assert!(matches_external_ask_command(
+            "/qa hello world",
+            &llm_runtime
+        ));
+        assert_eq!(
+            llm_usage_text(llm_runtime.command_prefix().as_str()),
+            "用法: /qa 你的问题"
+        );
     }
 }

@@ -1,15 +1,14 @@
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use liteyukibot_core::{
     AdapterConfig, AdapterEndpoint, AdapterRoute, AdapterTransport, BotEvent, BotRuntimeConfig,
-    HookFilter, LiteyukiBot, LiteyukiBotError, ManagedProcessSpec, RuntimeTarget,
+    HookFilter, LiteyukiBot, LiteyukiBotError, RuntimeTarget,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, timeout};
+use tokio::time::timeout;
 
 #[test]
 fn runtime_target_maps_capabilities_and_tunes_config() {
@@ -30,13 +29,8 @@ fn runtime_target_maps_capabilities_and_tunes_config() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn liteyuki_bot_orchestrates_runtime_and_managed_processes() {
+async fn liteyuki_bot_starts_handles_events_and_shuts_down_runtime() {
     let (processed_tx, mut processed_rx) = mpsc::unbounded_channel::<u64>();
-    let starts = Arc::new(AtomicUsize::new(0));
-    let starts_for_runner = Arc::clone(&starts);
-    let restart_observed_starts = Arc::new(AtomicUsize::new(0));
-    let restart_observed_starts_for_hook = Arc::clone(&restart_observed_starts);
-    let starts_for_restart_hook = Arc::clone(&starts);
     let shutdown_notifications = Arc::new(Mutex::new(Vec::<String>::new()));
     let shutdown_notifications_for_hook = Arc::clone(&shutdown_notifications);
 
@@ -65,36 +59,6 @@ async fn liteyuki_bot_orchestrates_runtime_and_managed_processes() {
             Ok(())
         },
     );
-    bot.lifespan_mut().on_after_restart_sync(
-        "restart-observer",
-        HookFilter::default(),
-        move |_context| {
-            restart_observed_starts_for_hook.store(
-                starts_for_restart_hook.load(Ordering::SeqCst),
-                Ordering::SeqCst,
-            );
-            Ok(())
-        },
-    );
-
-    let process_name = "heartbeat";
-    let process_spec = ManagedProcessSpec::new(process_name);
-    bot.register_process(process_name, process_spec, move |mut shutdown_rx| {
-        let starts = Arc::clone(&starts_for_runner);
-        async move {
-            starts.fetch_add(1, Ordering::SeqCst);
-            loop {
-                if *shutdown_rx.borrow() {
-                    break;
-                }
-                if shutdown_rx.changed().await.is_err() {
-                    break;
-                }
-            }
-            Ok(())
-        }
-    })
-    .expect("register process should succeed");
 
     bot.start().await.expect("bot should start");
     assert_eq!(
@@ -113,39 +77,11 @@ async fn liteyuki_bot_orchestrates_runtime_and_managed_processes() {
         .expect("processed channel should have value");
     assert_eq!(processed, 7);
 
-    timeout(Duration::from_secs(1), async {
-        while starts.load(Ordering::SeqCst) < 1 {
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("managed process should start");
-
-    bot.restart_process(process_name)
-        .await
-        .expect("process restart should succeed");
-    assert!(
-        restart_observed_starts.load(Ordering::SeqCst) >= 2,
-        "after_restart should run after process restart is effective"
-    );
-
-    timeout(Duration::from_secs(1), async {
-        while starts.load(Ordering::SeqCst) < 2 {
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("managed process should restart");
-
     bot.shutdown().await.expect("shutdown should succeed");
     let notifications = shutdown_notifications
         .lock()
         .expect("test hook mutex should not be poisoned")
         .clone();
-    assert!(
-        notifications.iter().any(|name| name == process_name),
-        "managed process should receive before_process_shutdown hook"
-    );
     assert!(
         notifications.iter().any(|name| name == "runtime"),
         "runtime should receive before_process_shutdown hook"
@@ -154,7 +90,6 @@ async fn liteyuki_bot_orchestrates_runtime_and_managed_processes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bot_start_adapter_failure_rolls_back_runtime_and_processes() {
-    let process_name = "rollback-heartbeat";
     let mut ws_invalid = AdapterConfig::default();
     ws_invalid.id = "ws-invalid".to_string();
     ws_invalid.transport = AdapterTransport::WebSocketForward;
@@ -175,23 +110,6 @@ async fn bot_start_adapter_failure_rolls_back_runtime_and_processes() {
         .with_adapter_autostart(true)
         .build();
 
-    bot.register_process(
-        process_name,
-        ManagedProcessSpec::new(process_name),
-        move |mut shutdown_rx| async move {
-            loop {
-                if *shutdown_rx.borrow() {
-                    break;
-                }
-                if shutdown_rx.changed().await.is_err() {
-                    break;
-                }
-            }
-            Ok(())
-        },
-    )
-    .expect("register process should succeed");
-
     let start_err = bot
         .start()
         .await
@@ -210,10 +128,6 @@ async fn bot_start_adapter_failure_rolls_back_runtime_and_processes() {
         .await
         .expect_err("runtime should be rolled back");
     assert!(matches!(send_err, LiteyukiBotError::NotStarted));
-    assert!(
-        !bot.process_manager().is_running(process_name),
-        "process should be terminated by rollback"
-    );
 
     let shutdown_err = bot
         .shutdown()

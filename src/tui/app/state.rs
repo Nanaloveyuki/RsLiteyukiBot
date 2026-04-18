@@ -50,6 +50,7 @@ impl AppState {
             view_mode: UiViewMode::Dashboard,
             completion_state: None,
             help_whitelist: None,
+            llm_command_prefix: None,
         };
         state.enforce_resume_limits();
         state
@@ -132,6 +133,24 @@ impl AppState {
             );
         }
 
+        let mut llm_command_prefix_sync_failed = false;
+        if let Some(shared) = self.llm_command_prefix.clone() {
+            match shared.write() {
+                Ok(mut lock) => {
+                    *lock = result.llm_command_prefix.clone();
+                }
+                Err(_) => {
+                    llm_command_prefix_sync_failed = true;
+                }
+            }
+        }
+        if llm_command_prefix_sync_failed {
+            self.push_log(
+                UiLevel::Error,
+                "failed to sync external llm command prefix from reloaded config",
+            );
+        }
+
         self.push_log(
             UiLevel::Info,
             format!(
@@ -140,6 +159,13 @@ impl AppState {
                 result.adapter_autostart,
                 self.resume_max_sessions,
                 bytes_to_mib(self.resume_max_size_bytes),
+            ),
+        );
+        self.push_log(
+            UiLevel::Info,
+            format!(
+                "reload applied external LLM command prefix: {}",
+                result.llm_command_prefix
             ),
         );
         for warning in result.warnings {

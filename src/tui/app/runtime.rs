@@ -25,6 +25,7 @@ pub async fn run(
         llm_command_handler,
         ask_handler,
         help_whitelist,
+        llm_command_prefix,
     } = options;
     let handlers = LoopHandlers {
         reload_handler,
@@ -34,6 +35,7 @@ pub async fn run(
     };
     let mut app = AppState::new(target, settings_desc, adapter_configs, tui_config);
     app.bind_help_whitelist(help_whitelist);
+    app.bind_llm_command_prefix(llm_command_prefix);
     app.push_log(
         UiLevel::Info,
         "TUI ready: type /help in console, Ctrl+C or /quit to exit",

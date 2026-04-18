@@ -409,6 +409,43 @@ fn reload_command_is_recognized() {
 }
 
 #[test]
+fn apply_reload_result_updates_shared_llm_command_prefix() {
+    let path = temp_resume_path("reload-llm-command-prefix");
+    remove_file_if_exists(&path);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    let shared = Arc::new(RwLock::new("/ask".to_string()));
+    app.bind_llm_command_prefix(shared.clone());
+
+    app.apply_reload_result(ReloadResult {
+        adapters: Vec::new(),
+        adapter_autostart: false,
+        tui_config: test_tui_config(path.clone()),
+        help_whitelist: Vec::new(),
+        llm_command_prefix: "/qa".to_string(),
+        warnings: Vec::new(),
+    });
+
+    let prefix = shared
+        .read()
+        .expect("llm command prefix lock should be readable in test")
+        .clone();
+    assert_eq!(prefix, "/qa");
+    assert!(
+        app.logs
+            .iter()
+            .any(|log| log.message.contains("external LLM command prefix: /qa"))
+    );
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
 fn whitelist_command_can_add_remove_and_list_entries() {
     let path = temp_resume_path("whitelist-command");
     remove_file_if_exists(&path);

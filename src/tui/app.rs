@@ -183,6 +183,7 @@ pub struct ReloadResult {
     pub adapter_autostart: bool,
     pub tui_config: TuiConfig,
     pub help_whitelist: Vec<String>,
+    pub llm_command_prefix: String,
     pub warnings: Vec<String>,
 }
 
@@ -205,6 +206,7 @@ pub struct RunOptions {
     pub llm_command_handler: LlmCommandHandler,
     pub ask_handler: AskHandler,
     pub help_whitelist: Arc<RwLock<HashSet<String>>>,
+    pub llm_command_prefix: Arc<RwLock<String>>,
 }
 
 impl Default for TuiConfig {
@@ -337,6 +339,7 @@ struct AppState {
     view_mode: UiViewMode,
     completion_state: Option<CompletionState>,
     help_whitelist: Option<Arc<RwLock<HashSet<String>>>>,
+    llm_command_prefix: Option<Arc<RwLock<String>>>,
 }
 
 fn adapter_transport_label(transport: AdapterTransport) -> &'static str {

@@ -5,6 +5,10 @@ impl AppState {
         self.help_whitelist = Some(whitelist);
     }
 
+    pub(super) fn bind_llm_command_prefix(&mut self, command_prefix: Arc<RwLock<String>>) {
+        self.llm_command_prefix = Some(command_prefix);
+    }
+
     pub(super) fn show_whitelist_usage(&mut self) {
         self.push_log(
             UiLevel::Warn,

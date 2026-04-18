@@ -52,6 +52,32 @@ async fn lifecycle_hooks_share_context_state() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_restart_hooks_run_and_can_update_shared_context() {
+    let mut lifespan = Lifespan::new();
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_for_hook = Arc::clone(&counter);
+
+    lifespan.on_after_restart_sync("after-restart", HookFilter::default(), move |context| {
+        context.set_meta("phase", "after_restart");
+        counter_for_hook.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    });
+
+    let context = Arc::new(LifecycleContext::new(
+        "liteyuki",
+        "0.1.0",
+        RuntimeFlavor::Cli,
+    ));
+    lifespan
+        .after_restart(context.clone())
+        .await
+        .expect("after_restart should succeed");
+
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    assert_eq!(context.get_meta("phase"), Some("after_restart".to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hook_filter_respects_runtime_capabilities() {
     let mut lifespan = Lifespan::new();
     let hit_count = Arc::new(AtomicU32::new(0));
