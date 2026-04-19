@@ -228,6 +228,31 @@ fn autocomplete_commands_scope_hints() {
 }
 
 #[test]
+fn autocomplete_commands_management_hints() {
+    let path = temp_resume_path("autocomplete-commands-manage");
+    remove_file_if_exists(&path);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.plugin_sdk = Some(PluginSdk::default());
+
+    app.console_input = "/commands d".to_string();
+    app.autocomplete_console_input();
+    assert_eq!(app.console_input, "/commands disable ");
+
+    app.console_input = "/commands disable ".to_string();
+    app.clear_completion_state();
+    app.autocomplete_console_input();
+    assert_eq!(app.console_input, "/commands disable tui ");
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
 fn command_cursor_position_tracks_input_width() {
     let area = Rect::new(0, 0, 20, 3);
     let (x, y) = command_cursor_position(area, "/help");
@@ -738,6 +763,53 @@ fn commands_command_lists_scope_filtered_catalog() {
             .logs
             .iter()
             .all(|log| !log.message.contains("/su <password>"))
+    );
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn commands_command_can_disable_and_enable_builtin_scope_command() {
+    let path = temp_resume_path("command-manage-builtin");
+    remove_file_if_exists(&path);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.plugin_sdk = Some(PluginSdk::default());
+
+    app.handle_console_command("/commands disable tui /help");
+    assert!(app.logs.iter().any(|log| {
+        log.message
+            .contains("command '/help' disabled in scope tui")
+    }));
+    assert!(
+        !app.command_completion_candidates("/")
+            .contains(&"/help".to_string())
+    );
+    assert_eq!(
+        app.command_help_for_line("/help").as_deref(),
+        Some("命令说明: /help 当前已禁用")
+    );
+
+    app.handle_console_command("/help");
+    assert!(app.logs.iter().any(|log| {
+        log.message
+            .contains("command '/help' disabled by plugin policy")
+    }));
+
+    app.handle_console_command("/commands enable tui /help");
+    assert!(
+        app.logs
+            .iter()
+            .any(|log| log.message.contains("command '/help' enabled in scope tui"))
+    );
+    assert!(
+        app.command_completion_candidates("/")
+            .contains(&"/help".to_string())
     );
 
     remove_file_if_exists(&path);

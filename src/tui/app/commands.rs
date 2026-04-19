@@ -3,8 +3,18 @@ use crate::command_registry::{
     AdapterProtocol, CommandNameOverrides, CommandScope, builtin_command_names,
     builtin_commands_for_scope, command_completion_trailing_space, command_help_text_for_name,
     command_primary_name, command_scope_label, command_usage_label, is_builtin_command_name,
-    parse_command_scope_token, render_builtin_help_lines,
+    normalize_builtin_command_name_for_scope, parse_command_scope_token,
+    render_builtin_help_lines_filtered,
 };
+
+enum CommandsAction<'a> {
+    List(Option<CommandScope>),
+    SetEnabled {
+        enabled: bool,
+        scope: CommandScope,
+        name: &'a str,
+    },
+}
 
 impl AppState {
     pub(super) fn bind_help_whitelist(&mut self, whitelist: Arc<RwLock<HashSet<String>>>) {
@@ -18,7 +28,7 @@ impl AppState {
     pub(super) fn show_commands_usage(&mut self) {
         self.push_log(
             UiLevel::Warn,
-            "usage: /commands [tui|adapter:onebot11|onebot11|all]",
+            "usage: /commands [tui|adapter:onebot11|onebot11|all] | /commands enable <scope> <name> | /commands disable <scope> <name>",
         );
     }
 
@@ -27,6 +37,26 @@ impl AppState {
             .iter()
             .filter(|candidate| candidate.starts_with(prefix))
             .map(|candidate| format!("/commands {candidate}"))
+            .collect()
+    }
+
+    pub(super) fn command_root_candidates(prefix: &str) -> Vec<String> {
+        let mut candidates = Self::command_scope_candidates(prefix);
+        candidates.extend(
+            COMMAND_MANAGEMENT_VERBS
+                .iter()
+                .filter(|candidate| candidate.starts_with(prefix))
+                .map(|candidate| format!("/commands {candidate} ")),
+        );
+        candidates
+    }
+
+    fn command_scope_candidates_for_action(action: &str, prefix: &str) -> Vec<String> {
+        COMMAND_SCOPE_HINTS
+            .iter()
+            .filter(|candidate| candidate.starts_with(prefix))
+            .filter(|candidate| **candidate != "all")
+            .map(|candidate| format!("/commands {action} {candidate} "))
             .collect()
     }
 
@@ -45,6 +75,41 @@ impl AppState {
         }
     }
 
+    fn parse_manageable_commands_scope(args: &[&str]) -> Result<CommandScope, String> {
+        let scope = Self::parse_commands_scope(args)?
+            .ok_or_else(|| "scope should be tui|adapter:onebot11|onebot11".to_string())?;
+        if matches!(scope, CommandScope::All) {
+            return Err("scope should be tui|adapter:onebot11|onebot11".to_string());
+        }
+        Ok(scope)
+    }
+
+    fn parse_commands_action<'a>(args: &'a [&'a str]) -> Result<CommandsAction<'a>, String> {
+        match args {
+            ["enable", scope, name] => Ok(CommandsAction::SetEnabled {
+                enabled: true,
+                scope: Self::parse_manageable_commands_scope(&[*scope])?,
+                name,
+            }),
+            ["enable", "adapter", protocol, name] => Ok(CommandsAction::SetEnabled {
+                enabled: true,
+                scope: Self::parse_manageable_commands_scope(&["adapter", *protocol])?,
+                name,
+            }),
+            ["disable", scope, name] => Ok(CommandsAction::SetEnabled {
+                enabled: false,
+                scope: Self::parse_manageable_commands_scope(&[*scope])?,
+                name,
+            }),
+            ["disable", "adapter", protocol, name] => Ok(CommandsAction::SetEnabled {
+                enabled: false,
+                scope: Self::parse_manageable_commands_scope(&["adapter", *protocol])?,
+                name,
+            }),
+            _ => Ok(CommandsAction::List(Self::parse_commands_scope(args)?)),
+        }
+    }
+
     fn command_catalog_scopes(scope: Option<CommandScope>) -> Vec<CommandScope> {
         match scope {
             None | Some(CommandScope::All) => vec![
@@ -55,29 +120,88 @@ impl AppState {
         }
     }
 
+    fn current_onebot_command_prefix(&self) -> String {
+        self.llm_command_prefix
+            .as_ref()
+            .and_then(|shared| shared.read().ok().map(|value| value.trim().to_string()))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "/ask".to_string())
+    }
+
+    fn normalize_user_command_name(raw: &str) -> Option<String> {
+        let first = raw.split_whitespace().next()?.trim();
+        if first.is_empty() {
+            return None;
+        }
+        if first.starts_with('/') {
+            Some(first.to_ascii_lowercase())
+        } else {
+            Some(format!("/{}", first.to_ascii_lowercase()))
+        }
+    }
+
+    fn is_builtin_scope_command_enabled(&self, scope: CommandScope, command_name: &str) -> bool {
+        !self.plugin_sdk.as_ref().is_some_and(|sdk| {
+            sdk.is_builtin_command_disabled(command_scope_label(scope), command_name)
+        })
+    }
+
+    fn scope_command_name_candidates(
+        &self,
+        scope: CommandScope,
+        prefix: &str,
+        enabled: Option<bool>,
+    ) -> Vec<String> {
+        let onebot_prefix = self.current_onebot_command_prefix();
+        let overrides = CommandNameOverrides {
+            onebot_ask_prefix: Some(onebot_prefix.as_str()),
+        };
+        let mut candidates: Vec<String> = builtin_commands_for_scope(scope)
+            .filter_map(|command| command_primary_name(command, scope, overrides))
+            .filter(|command| command.starts_with(prefix))
+            .filter(|command| {
+                enabled.map_or(true, |enabled| {
+                    self.is_builtin_scope_command_enabled(scope, command.as_str()) == enabled
+                })
+            })
+            .collect();
+
+        if let Some(plugin_sdk) = self.plugin_sdk.as_ref() {
+            for command in plugin_sdk.list_scope_commands(command_scope_label(scope)) {
+                if !command.name.starts_with(prefix) {
+                    continue;
+                }
+                if enabled.is_some_and(|enabled| command.enabled != enabled) {
+                    continue;
+                }
+                if candidates.iter().any(|existing| existing == &command.name) {
+                    continue;
+                }
+                candidates.push(command.name);
+            }
+        }
+
+        candidates.sort();
+        candidates
+    }
+
     fn command_catalog_lines(&self, selected_scope: Option<CommandScope>) -> Vec<String> {
         let plugin_sdk = self.plugin_sdk.as_ref();
         let mut lines = Vec::new();
+        let onebot_prefix = self.current_onebot_command_prefix();
 
         for scope in Self::command_catalog_scopes(selected_scope) {
+            let overrides = CommandNameOverrides {
+                onebot_ask_prefix: Some(onebot_prefix.as_str()),
+            };
             lines.push(format!("command catalog ({}):", command_scope_label(scope)));
 
             for command in builtin_commands_for_scope(scope) {
-                let Some(label) =
-                    command_usage_label(command, scope, CommandNameOverrides::default())
-                else {
+                let Some(label) = command_usage_label(command, scope, overrides) else {
                     continue;
                 };
-                let enabled = command_primary_name(command, scope, CommandNameOverrides::default())
-                    .map(|name| {
-                        if matches!(scope, CommandScope::Tui) {
-                            !plugin_sdk.is_some_and(|sdk| {
-                                sdk.is_builtin_tui_command_disabled(name.as_str())
-                            })
-                        } else {
-                            true
-                        }
-                    })
+                let enabled = command_primary_name(command, scope, overrides)
+                    .map(|name| self.is_builtin_scope_command_enabled(scope, name.as_str()))
                     .unwrap_or(true);
                 lines.push(format!(
                     "  {} - {} [builtin, {}]",
@@ -115,6 +239,123 @@ impl AppState {
         }
 
         lines
+    }
+
+    fn set_scoped_command_enabled(&mut self, scope: CommandScope, name: &str, enabled: bool) {
+        let Some(plugin_sdk) = self.plugin_sdk.clone() else {
+            self.push_log(
+                UiLevel::Warn,
+                "command manager unavailable in current runtime",
+            );
+            return;
+        };
+
+        let scope_label = command_scope_label(scope);
+        let onebot_prefix = self.current_onebot_command_prefix();
+        let overrides = CommandNameOverrides {
+            onebot_ask_prefix: Some(onebot_prefix.as_str()),
+        };
+        let builtin_name = normalize_builtin_command_name_for_scope(name, scope, overrides);
+        let normalized_name = Self::normalize_user_command_name(name).unwrap_or_else(|| {
+            name.split_whitespace()
+                .next()
+                .unwrap_or(name)
+                .trim()
+                .to_string()
+        });
+        let plugin_matches = plugin_sdk
+            .list_scope_commands(scope_label)
+            .into_iter()
+            .filter(|command| command.name.eq_ignore_ascii_case(normalized_name.as_str()))
+            .collect::<Vec<_>>();
+
+        if builtin_name.is_none() && plugin_matches.is_empty() {
+            self.push_log(
+                UiLevel::Warn,
+                format!(
+                    "command '{}' not found in scope {}",
+                    normalized_name, scope_label
+                ),
+            );
+            return;
+        }
+
+        let builtin_changed = if let Some(command_name) = builtin_name.as_deref() {
+            let current = self.is_builtin_scope_command_enabled(scope, command_name);
+            if current != enabled {
+                if let Err(err) =
+                    plugin_sdk.set_builtin_command_enabled(scope_label, command_name, enabled)
+                {
+                    self.push_log(
+                        UiLevel::Error,
+                        format!(
+                            "failed to update builtin command '{}' in scope {}: {}",
+                            command_name, scope_label, err
+                        ),
+                    );
+                    return;
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let plugin_changed = if plugin_matches.is_empty() {
+            false
+        } else {
+            let changed = plugin_matches
+                .iter()
+                .any(|command| command.enabled != enabled);
+            if let Err(err) =
+                plugin_sdk.set_scope_command_enabled(scope_label, normalized_name.as_str(), enabled)
+            {
+                self.push_log(
+                    UiLevel::Error,
+                    format!(
+                        "failed to update plugin command '{}' in scope {}: {}",
+                        normalized_name, scope_label, err
+                    ),
+                );
+                return;
+            }
+            changed
+        };
+
+        let mut targets = Vec::new();
+        if builtin_name.is_some() {
+            targets.push("builtin".to_string());
+        }
+        if !plugin_matches.is_empty() {
+            targets.push(format!("plugin x{}", plugin_matches.len()));
+        }
+        let command_label = builtin_name.unwrap_or(normalized_name);
+        let state_label = if enabled { "enabled" } else { "disabled" };
+        if builtin_changed || plugin_changed {
+            self.push_log(
+                UiLevel::Info,
+                format!(
+                    "command '{}' {} in scope {} [{}]",
+                    command_label,
+                    state_label,
+                    scope_label,
+                    targets.join(", ")
+                ),
+            );
+        } else {
+            self.push_log(
+                UiLevel::Info,
+                format!(
+                    "command '{}' already {} in scope {} [{}]",
+                    command_label,
+                    state_label,
+                    scope_label,
+                    targets.join(", ")
+                ),
+            );
+        }
     }
 
     pub(super) fn show_whitelist_usage(&mut self) {
@@ -537,6 +778,7 @@ impl AppState {
             builtin_command_names(CommandScope::Tui, CommandNameOverrides::default())
                 .into_iter()
                 .filter(|command| command.starts_with(prefix))
+                .filter(|command| self.is_builtin_scope_command_enabled(CommandScope::Tui, command))
                 .collect();
 
         if let Some(plugin_sdk) = self.plugin_sdk.as_ref() {
@@ -845,13 +1087,96 @@ impl AppState {
         input: &str,
     ) -> Option<(String, CompletionMode, Vec<String>)> {
         let raw = input.strip_prefix("/commands ")?;
+        let raw = raw.trim_start();
+        if raw.is_empty() {
+            let candidates = Self::command_root_candidates("");
+            return Some((
+                "commands:root:".to_string(),
+                CompletionMode::Rendered,
+                candidates,
+            ));
+        }
+
+        let tokens: Vec<&str> = raw.split_whitespace().collect();
+        let trailing_space = input.ends_with(' ');
+        let verb = tokens.first().copied().unwrap_or_default();
+
+        if COMMAND_MANAGEMENT_VERBS.contains(&verb) {
+            if tokens.len() == 1 && !trailing_space {
+                let candidates = Self::command_root_candidates(verb);
+                return Some((
+                    format!("commands:root:{verb}"),
+                    CompletionMode::Rendered,
+                    candidates,
+                ));
+            }
+            if tokens.len() == 1 {
+                let candidates = Self::command_scope_candidates_for_action(verb, "");
+                return Some((
+                    format!("commands:{verb}:scope:"),
+                    CompletionMode::Rendered,
+                    candidates,
+                ));
+            }
+            if tokens.len() == 2 {
+                let scope_prefix = if trailing_space { "" } else { tokens[1] };
+                if trailing_space {
+                    let scope = parse_command_scope_token(tokens[1])?;
+                    if matches!(scope, CommandScope::All) {
+                        return None;
+                    }
+                    let desired_enabled = verb == "enable";
+                    let candidates = self
+                        .scope_command_name_candidates(scope, "", Some(!desired_enabled))
+                        .into_iter()
+                        .map(|name| {
+                            format!("/commands {verb} {} {name}", command_scope_label(scope))
+                        })
+                        .collect();
+                    return Some((
+                        format!("commands:{verb}:name:{}:", command_scope_label(scope)),
+                        CompletionMode::Rendered,
+                        candidates,
+                    ));
+                }
+                let candidates = Self::command_scope_candidates_for_action(verb, scope_prefix);
+                return Some((
+                    format!("commands:{verb}:scope:{scope_prefix}"),
+                    CompletionMode::Rendered,
+                    candidates,
+                ));
+            }
+            if tokens.len() == 3 {
+                let scope = parse_command_scope_token(tokens[1])?;
+                if matches!(scope, CommandScope::All) {
+                    return None;
+                }
+                let desired_enabled = verb == "enable";
+                let prefix = if trailing_space { "" } else { tokens[2] };
+                let candidates = self
+                    .scope_command_name_candidates(scope, prefix, Some(!desired_enabled))
+                    .into_iter()
+                    .map(|name| format!("/commands {verb} {} {name}", command_scope_label(scope)))
+                    .collect();
+                return Some((
+                    format!(
+                        "commands:{verb}:name:{}:{prefix}",
+                        command_scope_label(scope)
+                    ),
+                    CompletionMode::Rendered,
+                    candidates,
+                ));
+            }
+            return None;
+        }
+
         if raw.chars().any(char::is_whitespace) {
             return None;
         }
-        let prefix = if input.ends_with(' ') { "" } else { raw };
-        let candidates = Self::command_scope_candidates(prefix);
+        let prefix = if trailing_space { "" } else { raw };
+        let candidates = Self::command_root_candidates(prefix);
         Some((
-            format!("commands:scope:{prefix}"),
+            format!("commands:root:{prefix}"),
             CompletionMode::Rendered,
             candidates,
         ))
@@ -1076,12 +1401,7 @@ impl AppState {
             CommandScope::Tui,
             CommandNameOverrides::default(),
         );
-        if is_builtin
-            && self
-                .plugin_sdk
-                .as_ref()
-                .is_some_and(|sdk| sdk.is_builtin_tui_command_disabled(command_name))
-        {
+        if is_builtin && !self.is_builtin_scope_command_enabled(CommandScope::Tui, command_name) {
             self.push_log(
                 UiLevel::Warn,
                 format!("command '{}' disabled by plugin policy", command_name),
@@ -1094,9 +1414,11 @@ impl AppState {
                 CommandOutcome::Quit
             }
             "/help" => {
-                for line in
-                    render_builtin_help_lines(CommandScope::Tui, CommandNameOverrides::default())
-                {
+                for line in render_builtin_help_lines_filtered(
+                    CommandScope::Tui,
+                    CommandNameOverrides::default(),
+                    |_, name| self.is_builtin_scope_command_enabled(CommandScope::Tui, name),
+                ) {
                     self.push_log(UiLevel::Info, line);
                 }
                 self.push_log(
@@ -1105,7 +1427,12 @@ impl AppState {
                 );
                 if let Some(plugin_sdk) = self.plugin_sdk.as_ref() {
                     let builtin_names =
-                        builtin_command_names(CommandScope::Tui, CommandNameOverrides::default());
+                        builtin_command_names(CommandScope::Tui, CommandNameOverrides::default())
+                            .into_iter()
+                            .filter(|name| {
+                                self.is_builtin_scope_command_enabled(CommandScope::Tui, name)
+                            })
+                            .collect::<Vec<_>>();
                     let plugin_commands = plugin_sdk
                         .list_scope_commands("tui")
                         .into_iter()
@@ -1218,15 +1545,24 @@ impl AppState {
             }
             "/commands" => {
                 let args: Vec<&str> = parts.collect();
-                let scope = match Self::parse_commands_scope(&args) {
-                    Ok(scope) => scope,
+                let action = match Self::parse_commands_action(&args) {
+                    Ok(action) => action,
                     Err(_) => {
                         self.show_commands_usage();
                         return CommandOutcome::None;
                     }
                 };
-                for line in self.command_catalog_lines(scope) {
-                    self.push_log(UiLevel::Info, line);
+                match action {
+                    CommandsAction::List(scope) => {
+                        for line in self.command_catalog_lines(scope) {
+                            self.push_log(UiLevel::Info, line);
+                        }
+                    }
+                    CommandsAction::SetEnabled {
+                        enabled,
+                        scope,
+                        name,
+                    } => self.set_scoped_command_enabled(scope, name, enabled),
                 }
                 CommandOutcome::None
             }
@@ -1307,7 +1643,7 @@ impl AppState {
             return "命令说明: 普通文本不会执行命令，请以 / 开头；例如 /ask 你好".to_string();
         }
 
-        if let Some(help) = Self::command_help_for_line(input) {
+        if let Some(help) = self.command_help_for_line(input) {
             return help;
         }
         if let Some(help) = self.plugin_command_help_for_line(input) {
@@ -1318,7 +1654,7 @@ impl AppState {
             && let Some(candidate) = candidates.first()
         {
             let rendered = Self::apply_completion_candidate(mode, candidate);
-            if let Some(help) = Self::command_help_for_line(rendered.as_str()) {
+            if let Some(help) = self.command_help_for_line(rendered.as_str()) {
                 return help;
             }
             if let Some(help) = self.plugin_command_help_for_line(rendered.as_str()) {
@@ -1329,9 +1665,17 @@ impl AppState {
         "命令说明: 未知命令，输入 /help 查看可用命令".to_string()
     }
 
-    pub(super) fn command_help_for_line(line: &str) -> Option<String> {
+    pub(super) fn command_help_for_line(&self, line: &str) -> Option<String> {
         let mut parts = line.split_whitespace();
         let command = parts.next()?;
+        if let Some(normalized) = normalize_builtin_command_name_for_scope(
+            command,
+            CommandScope::Tui,
+            CommandNameOverrides::default(),
+        ) && !self.is_builtin_scope_command_enabled(CommandScope::Tui, normalized.as_str())
+        {
+            return Some(format!("命令说明: {} 当前已禁用", normalized));
+        }
         command_help_text_for_name(command, CommandScope::Tui, CommandNameOverrides::default())
     }
 

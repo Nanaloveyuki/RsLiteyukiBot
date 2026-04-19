@@ -121,9 +121,9 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 15] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Commands,
-        summary: "按 scope 查看 builtin/plugin 命令清单",
-        detail: "按 scope 查看 builtin/plugin 命令清单与启用状态",
-        usage_hint: Some("[scope]"),
+        summary: "按 scope 查看或管理 builtin/plugin 命令",
+        detail: "按 scope 查看命令清单，或通过 enable/disable 管理命令启用状态",
+        usage_hint: Some("[scope] | enable <scope> <name> | disable <scope> <name>"),
         accepts_arguments: false,
         completion_trailing_space: true,
         scopes: &SCOPE_TUI,
@@ -360,15 +360,35 @@ pub(crate) fn command_help_text_for_name(
     Some(format!("命令说明: {label} {}", command.detail))
 }
 
-pub(crate) fn render_builtin_help_lines(
+pub(crate) fn normalize_builtin_command_name_for_scope(
+    name: &str,
     scope: CommandScope,
     overrides: CommandNameOverrides<'_>,
-) -> Vec<String> {
+) -> Option<String> {
+    let command = find_builtin_command_by_name(name, scope, overrides)?;
+    command_primary_name(command, scope, overrides)
+}
+
+pub(crate) fn render_builtin_help_lines_filtered<F>(
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+    mut include_command: F,
+) -> Vec<String>
+where
+    F: FnMut(&BuiltinCommandSpec, &str) -> bool,
+{
     let mut lines = vec![format!("可用命令 ({}):", scope_label(scope))];
     for command in builtin_commands_for_scope(scope) {
-        if let Some(label) = command_usage_label(command, scope, overrides) {
-            lines.push(format!("{label} - {}", command.summary));
+        let Some(label) = command_usage_label(command, scope, overrides) else {
+            continue;
+        };
+        let Some(name) = command_primary_name(command, scope, overrides) else {
+            continue;
+        };
+        if !include_command(command, name.as_str()) {
+            continue;
         }
+        lines.push(format!("{label} - {}", command.summary));
     }
 
     match scope {
@@ -391,6 +411,13 @@ pub(crate) fn render_builtin_help_lines(
     }
 
     lines
+}
+
+pub(crate) fn render_builtin_help_lines(
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+) -> Vec<String> {
+    render_builtin_help_lines_filtered(scope, overrides, |_, _| true)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

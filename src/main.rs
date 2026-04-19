@@ -672,6 +672,10 @@ fn llm_usage_text(command_prefix: &str) -> String {
     format!("用法: {command_prefix} 你的问题")
 }
 
+fn command_disabled_text(command_name: &str) -> String {
+    format!("命令 '{}' 当前已禁用。", command_name)
+}
+
 fn install_external_event_handlers(
     bot: &LiteyukiBot,
     gateway: ExternalGateway,
@@ -685,6 +689,7 @@ fn install_external_event_handlers(
     let gateway_for_su = gateway.clone();
     let ui_tx_for_su = ui_tx.clone();
     let superuser_for_su = superuser_manager.clone();
+    let plugin_sdk_for_su = plugin_sdk.clone();
     bot.on_message(
         "builtin.external.su",
         Rule::new("command.su", |event| async move {
@@ -697,11 +702,13 @@ fn install_external_event_handlers(
             let gateway = gateway_for_su.clone();
             let ui_tx = ui_tx_for_su.clone();
             let superuser_manager = superuser_for_su.clone();
+            let plugin_sdk = plugin_sdk_for_su.clone();
             async move {
                 handle_external_su_command(
                     &adapter_manager,
                     &gateway,
                     &ui_tx,
+                    &plugin_sdk,
                     &superuser_manager,
                     event,
                 )
@@ -734,6 +741,18 @@ fn install_external_event_handlers(
             let llm_runtime = llm_runtime_for_help.clone();
             let plugin_sdk = plugin_sdk_for_help.clone();
             async move {
+                if plugin_sdk.is_builtin_command_disabled("adapter:onebot11", "/help") {
+                    let text = command_disabled_text("/help");
+                    return reply_external_text(
+                        &adapter_manager,
+                        &gateway,
+                        &ui_tx,
+                        event.as_ref(),
+                        text.as_str(),
+                        "command-disabled-help",
+                    )
+                    .await;
+                }
                 if !superuser_manager.is_superuser(event.as_ref()) {
                     return reply_external_text(
                         &adapter_manager,
@@ -790,6 +809,7 @@ fn install_external_event_handlers(
     let ui_tx_for_ask = ui_tx.clone();
     let llm_runtime_for_rule = llm_runtime.clone();
     let superuser_for_ask = superuser_manager.clone();
+    let plugin_sdk_for_ask = plugin_sdk.clone();
     bot.on_message(
         "builtin.external.ask",
         Rule::new("command.ask", move |event| {
@@ -804,7 +824,22 @@ fn install_external_event_handlers(
             let ui_tx = ui_tx_for_ask.clone();
             let llm_runtime = llm_runtime.clone();
             let superuser_manager = superuser_for_ask.clone();
+            let plugin_sdk = plugin_sdk_for_ask.clone();
             async move {
+                let ask_command = llm_runtime.command_prefix();
+                if plugin_sdk.is_builtin_command_disabled("adapter:onebot11", ask_command.as_str())
+                {
+                    let text = command_disabled_text(ask_command.as_str());
+                    return reply_external_text(
+                        &adapter_manager,
+                        &gateway,
+                        &ui_tx,
+                        event.as_ref(),
+                        text.as_str(),
+                        "command-disabled-ask",
+                    )
+                    .await;
+                }
                 if !superuser_manager.is_superuser(event.as_ref()) {
                     return reply_external_text(
                         &adapter_manager,
@@ -826,12 +861,25 @@ async fn handle_external_su_command(
     adapter_manager: &AdapterManager,
     gateway: &ExternalGateway,
     ui_tx: &mpsc::UnboundedSender<tui::UiEvent>,
+    plugin_sdk: &PluginSdk,
     superuser_manager: &SuperuserManager,
     event: Arc<SessionEvent>,
 ) -> Result<(), String> {
     let Some(password_raw) = parse_su_password_argument(event.message.as_ref()) else {
         return Ok(());
     };
+    if plugin_sdk.is_builtin_command_disabled("adapter:onebot11", "/su") {
+        let text = command_disabled_text("/su");
+        return reply_external_text(
+            adapter_manager,
+            gateway,
+            ui_tx,
+            event.as_ref(),
+            text.as_str(),
+            "command-disabled-su",
+        )
+        .await;
+    }
 
     if is_onebot_v11_payload(&event.payload) && !is_onebot_private_message(event.as_ref()) {
         return reply_external_text(

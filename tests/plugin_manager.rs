@@ -612,6 +612,127 @@ async def liteecho(event: MessageEvent):
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_manager_can_disable_and_reenable_scoped_adapter_command() {
+    if !python_command_available() {
+        return;
+    }
+
+    let manager = PluginManager::new();
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("legacy_liteecho_toggle");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+    let config_path = dir.path.join("legacy-toggle-config.yaml");
+    std::fs::write(&config_path, "plugin:\n  hit: false\n").expect("config file should be written");
+
+    std::fs::write(
+        plugin_dir.join("liteecho.py"),
+        r#"# -*- coding: utf-8 -*-
+from liteyuki.session.on import on_startswith
+from liteyuki.session.event import MessageEvent
+from liteyuki.session.rule import is_su_rule
+
+@on_startswith(["liteecho"], rule=is_su_rule).handle()
+async def liteecho(event: MessageEvent):
+    event._sdk.config_set("plugin.hit", True)
+"#,
+    )
+    .expect("python module should be written");
+    let config_path_json = config_path.to_string_lossy().replace('\\', "/");
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        format!(
+            r#"{{
+  "id": "legacy-liteecho-toggle",
+  "name": "Legacy LiteEcho Toggle",
+  "type": "service",
+  "commands": [
+    {{
+      "name": "/liteecho",
+      "description": "legacy echo command",
+      "scopes": ["adapter:onebot11"]
+    }}
+  ],
+  "runtime": {{
+    "kind": "python",
+    "entrypoint": "liteecho",
+    "options": {{
+      "event_handler": "liteyuki_handle_event",
+      "config_path": "{}"
+    }}
+  }}
+}}"#,
+            config_path_json
+        ),
+    )
+    .expect("manifest should be written");
+
+    let context = plugin_context();
+    let discovered = manager
+        .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+        .expect("manifest discovery should succeed");
+    assert_eq!(discovered, vec!["legacy-liteecho-toggle".to_string()]);
+
+    manager
+        .load_plugins(discovered, context.clone())
+        .await
+        .expect("legacy liteecho toggle plugin should load");
+
+    context
+        .sdk
+        .set_scope_command_enabled("adapter:onebot11", "/liteecho", false)
+        .expect("command disable should succeed");
+    context.sdk.dispatch_event(
+        &BotEvent::new(
+            101,
+            "adapter.inbound",
+            json!({
+                "_adapter_id": "missing-adapter",
+                "_adapter_protocol": "onebot.v11",
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": "20001",
+                "raw_message": "/liteecho disabled"
+            }),
+        ),
+        &context.logger,
+    );
+
+    let disabled_config =
+        std::fs::read_to_string(&config_path).expect("disabled config should stay readable");
+    assert!(
+        disabled_config.contains("hit: false"),
+        "disabled scoped adapter command should not dispatch into python handler"
+    );
+
+    context
+        .sdk
+        .set_scope_command_enabled("adapter:onebot11", "/liteecho", true)
+        .expect("command enable should succeed");
+    context.sdk.dispatch_event(
+        &BotEvent::new(
+            102,
+            "adapter.inbound",
+            json!({
+                "_adapter_id": "missing-adapter",
+                "_adapter_protocol": "onebot.v11",
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": "20001",
+                "raw_message": "/liteecho enabled"
+            }),
+        ),
+        &context.logger,
+    );
+
+    let enabled_config =
+        std::fs::read_to_string(config_path).expect("enabled config should stay readable");
+    assert!(
+        enabled_config.contains("hit: true"),
+        "reenabled scoped adapter command should dispatch again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_manager_python_sdk_can_disable_builtin_command_and_delete_config_value() {
     if !python_command_available() {
         return;

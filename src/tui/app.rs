@@ -47,6 +47,7 @@ const DEFAULT_RESUME_MAX_SESSIONS: usize = 64;
 const DEFAULT_RESUME_MAX_SIZE_MIB: u64 = 16;
 const LOG_SUBCOMMANDS: [&str; 2] = ["on", "off"];
 const COMMAND_SCOPE_HINTS: [&str; 4] = ["tui", "adapter:onebot11", "onebot11", "all"];
+const COMMAND_MANAGEMENT_VERBS: [&str; 2] = ["disable", "enable"];
 const WHITELIST_SUBCOMMANDS: [&str; 3] = ["add", "remove", "list"];
 const WHITELIST_SCOPE_HINTS: [&str; 4] = ["private", "group", "session", "user"];
 const LLM_SUBCOMMANDS: [&str; 8] = [

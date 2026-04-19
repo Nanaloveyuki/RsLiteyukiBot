@@ -4,7 +4,8 @@ use std::sync::LazyLock;
 use crate::command_registry::{
     AdapterProtocol, BuiltinCommandId, CommandNameOverrides, CommandScope, builtin_command_names,
     command_argument_for_message, matches_builtin_command_message,
-    parse_command_argument as parse_registered_command_argument, render_builtin_help_lines,
+    parse_command_argument as parse_registered_command_argument,
+    render_builtin_help_lines_filtered,
 };
 use liteyukibot_core::PluginSdk;
 use liteyukibot_core::core::BotEvent;
@@ -144,9 +145,16 @@ pub(crate) fn render_external_help_text_with_plugins(
     let overrides = CommandNameOverrides {
         onebot_ask_prefix: Some(llm_command_prefix),
     };
-    let mut lines = render_builtin_help_lines(scope, overrides);
+    let mut lines = render_builtin_help_lines_filtered(scope, overrides, |_, name| {
+        !plugin_sdk.is_some_and(|sdk| sdk.is_builtin_command_disabled("adapter:onebot11", name))
+    });
     if let Some(plugin_sdk) = plugin_sdk {
-        let builtin_names = builtin_command_names(scope, overrides);
+        let builtin_names = builtin_command_names(scope, overrides)
+            .into_iter()
+            .filter(|name| {
+                !plugin_sdk.is_builtin_command_disabled("adapter:onebot11", name.as_str())
+            })
+            .collect::<Vec<_>>();
         let plugin_commands = plugin_sdk
             .list_scope_commands("adapter:onebot11")
             .into_iter()

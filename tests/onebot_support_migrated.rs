@@ -9,6 +9,7 @@ mod onebot_support;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use liteyukibot_core::PluginSdk;
 use liteyukibot_core::core::BotEvent;
 use liteyukibot_core::session::SessionEvent;
 use serde_json::Value;
@@ -83,6 +84,18 @@ fn external_help_text_is_scope_filtered_and_uses_dynamic_ask_prefix() {
     assert!(help_text.contains("/qa <prompt>"));
     assert!(help_text.contains("/su <password>"));
     assert!(!help_text.contains("/reload -"));
+}
+
+#[test]
+fn external_help_text_hides_disabled_builtin_commands() {
+    let sdk = PluginSdk::default();
+    sdk.set_builtin_command_enabled("adapter:onebot11", "/su", false)
+        .expect("builtin disable should succeed");
+
+    let help_text = render_external_help_text_with_plugins("/qa", Some(&sdk));
+    assert!(help_text.contains("/help"));
+    assert!(help_text.contains("/qa <prompt>"));
+    assert!(!help_text.contains("/su <password>"));
 }
 
 #[test]
