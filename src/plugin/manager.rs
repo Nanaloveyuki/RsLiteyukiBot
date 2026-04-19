@@ -312,6 +312,7 @@ impl Plugin for ManifestPlugin {
         let plugin_id = self.descriptor.metadata.id.clone();
         let runtime = self.descriptor.runtime.kind;
         let path = self.manifest_path.display().to_string();
+        let descriptor = self.descriptor.clone();
         Box::pin(async move {
             context.logger.info_in(
                 MODULE_PLUGIN,
@@ -320,6 +321,32 @@ impl Plugin for ManifestPlugin {
                     plugin_id, path, runtime
                 ),
             );
+            match context.sdk.load_manifest_plugin(&descriptor, &context.host) {
+                Ok(true) => {
+                    context.logger.info_in(
+                        MODULE_PLUGIN,
+                        format!(
+                            "manifest plugin '{}' runtime bridge activated (runtime={:?})",
+                            plugin_id, runtime
+                        ),
+                    );
+                }
+                Ok(false) => {
+                    context.logger.warn_in(
+                        MODULE_PLUGIN,
+                        format!(
+                            "manifest plugin '{}' runtime bridge deferred (runtime={:?})",
+                            plugin_id, runtime
+                        ),
+                    );
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "manifest plugin '{}' runtime activation failed: {}",
+                        plugin_id, err
+                    ));
+                }
+            }
             Ok(())
         })
     }

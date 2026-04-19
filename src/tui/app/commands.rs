@@ -424,11 +424,27 @@ impl AppState {
     }
 
     pub(super) fn command_completion_candidates(&self, prefix: &str) -> Vec<String> {
-        TUI_COMMANDS
+        let mut candidates: Vec<String> = TUI_COMMANDS
             .iter()
             .filter(|command| command.starts_with(prefix))
             .map(|command| (*command).to_string())
-            .collect()
+            .collect();
+
+        if let Some(plugin_sdk) = self.plugin_sdk.as_ref() {
+            let plugin_commands = plugin_sdk.list_tui_commands();
+            for command in plugin_commands {
+                if !command.enabled || !command.name.starts_with(prefix) {
+                    continue;
+                }
+                if candidates.iter().any(|existing| existing == &command.name) {
+                    continue;
+                }
+                candidates.push(command.name);
+            }
+            candidates.sort();
+        }
+
+        candidates
     }
 
     pub(super) fn log_completion_candidates(prefix: &str) -> Vec<String> {
@@ -922,6 +938,19 @@ impl AppState {
         let cmd = command.trim();
         let mut parts = cmd.split_whitespace();
         let command_name = parts.next().unwrap_or_default();
+        let is_builtin = TUI_COMMANDS.contains(&command_name);
+        if is_builtin
+            && self
+                .plugin_sdk
+                .as_ref()
+                .is_some_and(|sdk| sdk.is_builtin_tui_command_disabled(command_name))
+        {
+            self.push_log(
+                UiLevel::Warn,
+                format!("command '{}' disabled by plugin policy", command_name),
+            );
+            return CommandOutcome::None;
+        }
         match command_name {
             "/quit" | "/exit" => {
                 self.push_log(UiLevel::Warn, "shutdown requested by console command");
@@ -952,6 +981,25 @@ impl AppState {
                     UiLevel::Info,
                     format!("active resume: {}", self.active_resume_uid),
                 );
+                if let Some(plugin_sdk) = self.plugin_sdk.as_ref() {
+                    let plugin_commands = plugin_sdk
+                        .list_tui_commands()
+                        .into_iter()
+                        .filter(|entry| entry.enabled)
+                        .collect::<Vec<_>>();
+                    if !plugin_commands.is_empty() {
+                        self.push_log(
+                            UiLevel::Info,
+                            format!("plugin commands ({}):", plugin_commands.len()),
+                        );
+                        for command in plugin_commands {
+                            self.push_log(
+                                UiLevel::Info,
+                                format!("  {} - {}", command.name, command.description),
+                            );
+                        }
+                    }
+                }
                 CommandOutcome::None
             }
             "/reload" => {
@@ -1081,6 +1129,22 @@ impl AppState {
                 self.handle_llm_command(&args)
             }
             _ => {
+                if let Some(plugin_sdk) = self.plugin_sdk.as_ref() {
+                    if let Some(plugin_command) = plugin_sdk.get_tui_command(command_name) {
+                        if !plugin_command.enabled {
+                            self.push_log(
+                                UiLevel::Warn,
+                                format!("plugin command '{}' is disabled", plugin_command.name),
+                            );
+                            return CommandOutcome::None;
+                        }
+                        let args = parts.map(ToString::to_string).collect::<Vec<_>>();
+                        return CommandOutcome::PluginCommand {
+                            command: plugin_command.name,
+                            args,
+                        };
+                    }
+                }
                 self.push_log(UiLevel::Warn, format!("unknown command: {cmd}. try /help"));
                 CommandOutcome::None
             }
@@ -1100,6 +1164,9 @@ impl AppState {
         if let Some(help) = Self::command_help_for_line(input) {
             return help.to_string();
         }
+        if let Some(help) = self.plugin_command_help_for_line(input) {
+            return help;
+        }
 
         if let Some((_, mode, candidates)) = self.completion_context()
             && let Some(candidate) = candidates.first()
@@ -1107,6 +1174,9 @@ impl AppState {
             let rendered = Self::apply_completion_candidate(mode, candidate);
             if let Some(help) = Self::command_help_for_line(rendered.as_str()) {
                 return help.to_string();
+            }
+            if let Some(help) = self.plugin_command_help_for_line(rendered.as_str()) {
+                return help;
             }
         }
 
@@ -1130,6 +1200,23 @@ impl AppState {
             "/whitelist" => Some("命令说明: /whitelist 管理 external /help 白名单"),
             "/quit" | "/exit" => Some("命令说明: /quit 或 /exit 安全退出程序"),
             _ => None,
+        }
+    }
+
+    fn plugin_command_help_for_line(&self, line: &str) -> Option<String> {
+        let command = line.split_whitespace().next()?;
+        let plugin_sdk = self.plugin_sdk.as_ref()?;
+        let entry = plugin_sdk.get_tui_command(command)?;
+        if entry.enabled {
+            Some(format!(
+                "命令说明: {} 来自插件 {}，{}",
+                entry.name, entry.plugin_id, entry.description
+            ))
+        } else {
+            Some(format!(
+                "命令说明: {} 来自插件 {}，当前已禁用",
+                entry.name, entry.plugin_id
+            ))
         }
     }
 }

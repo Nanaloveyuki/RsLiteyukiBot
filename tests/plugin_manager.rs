@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -264,6 +265,165 @@ async fn plugin_manager_marks_python_runtime_as_deferred_plan() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_manager_marks_python_runtime_as_ready_when_module_is_importable() {
+    if !python_command_available() {
+        return;
+    }
+
+    let manager = PluginManager::new();
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("py_plugin_ready");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+    let config_path = dir.path.join("plugin-config.yaml");
+    std::fs::write(&config_path, "plugin:\n  value: 1\n").expect("config file should be written");
+
+    std::fs::write(
+        plugin_dir.join("echo_plugin.py"),
+        r#"class Meta:
+    name = "Rust Bridge Echo"
+    type = "service"
+
+__plugin_meta__ = Meta()
+
+def bootstrap(sdk):
+    current = sdk.config_get("plugin.value")
+    if current is None:
+        current = 0
+    sdk.config_set("plugin.value", int(current) + 1)
+
+    def _echo(args, runtime_sdk):
+        prefix = runtime_sdk.config_get("plugin.value")
+        return f"{prefix}:{' '.join(args)}"
+
+    sdk.add_tui_command("/py-echo", _echo, "python echo command")
+"#,
+    )
+    .expect("python module should be written");
+    let config_path_json = config_path.to_string_lossy().replace('\\', "/");
+
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        format!(
+            r#"{{
+  "id": "python-echo-ready",
+  "name": "Python Echo Ready",
+  "type": "service",
+  "runtime": {{
+    "kind": "python",
+    "entrypoint": "echo_plugin:bootstrap",
+    "options": {{
+      "config_path": "{}"
+    }}
+  }}
+}}"#,
+            config_path_json
+        ),
+    )
+    .expect("manifest should be written");
+
+    let context = plugin_context();
+    let discovered = manager
+        .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+        .expect("manifest discovery should succeed");
+    assert_eq!(discovered, vec!["python-echo-ready".to_string()]);
+
+    manager
+        .load_plugins(discovered, context.clone())
+        .await
+        .expect("python descriptor plugin should load in ready mode");
+
+    let loaded = manager.loaded_plugins();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].descriptor.metadata.id, "python-echo-ready");
+    assert_eq!(loaded[0].load_plan.runtime_kind, PluginRuntimeKind::Python);
+    assert_eq!(loaded[0].load_plan.state, PluginLoadState::Ready);
+    assert_eq!(
+        loaded[0].load_plan.contract.abi_name,
+        "liteyuki-python-bridge"
+    );
+
+    let command_result = context
+        .sdk
+        .execute_tui_command("/py-echo", &["hello".to_string(), "world".to_string()])
+        .expect("plugin command should execute")
+        .expect("plugin command should be registered");
+    assert_eq!(command_result, "2:hello world");
+
+    let updated_config =
+        std::fs::read_to_string(config_path).expect("updated config should stay readable");
+    assert!(updated_config.contains("value: 2"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_manager_python_sdk_can_disable_builtin_command_and_delete_config_value() {
+    if !python_command_available() {
+        return;
+    }
+
+    let manager = PluginManager::new();
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("py_plugin_controls");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+    let config_path = dir.path.join("plugin-controls.yaml");
+    std::fs::write(&config_path, "plugin:\n  remove_me: stale\n  keep_me: ok\n")
+        .expect("config file should be written");
+
+    std::fs::write(
+        plugin_dir.join("controls_plugin.py"),
+        r#"class Meta:
+    name = "Rust Bridge Controls"
+    type = "service"
+
+__plugin_meta__ = Meta()
+
+def bootstrap(sdk):
+    sdk.config_delete("plugin.remove_me")
+    sdk.disable_tui_command("/help")
+"#,
+    )
+    .expect("python module should be written");
+    let config_path_json = config_path.to_string_lossy().replace('\\', "/");
+
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        format!(
+            r#"{{
+  "id": "python-controls-ready",
+  "name": "Python Controls Ready",
+  "type": "service",
+  "runtime": {{
+    "kind": "python",
+    "entrypoint": "controls_plugin:bootstrap",
+    "options": {{
+      "config_path": "{}"
+    }}
+  }}
+}}"#,
+            config_path_json
+        ),
+    )
+    .expect("manifest should be written");
+
+    let context = plugin_context();
+    let discovered = manager
+        .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+        .expect("manifest discovery should succeed");
+    assert_eq!(discovered, vec!["python-controls-ready".to_string()]);
+
+    manager
+        .load_plugins(discovered, context.clone())
+        .await
+        .expect("python descriptor plugin should load in ready mode");
+
+    assert!(context.sdk.is_builtin_tui_command_disabled("/help"));
+
+    let updated_config =
+        std::fs::read_to_string(config_path).expect("updated config should stay readable");
+    assert!(!updated_config.contains("remove_me"));
+    assert!(updated_config.contains("keep_me: ok"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_manager_prevents_reentrant_load_for_same_id() {
     let manager = PluginManager::new();
     let loaded = Arc::new(AtomicUsize::new(0));
@@ -394,4 +554,14 @@ fn remove_dir_all_safe(path: &Path) -> std::io::Result<()> {
         std::fs::remove_dir_all(path)?;
     }
     Ok(())
+}
+
+fn python_command_available() -> bool {
+    ["python", "python3", "py"].iter().any(|command| {
+        Command::new(command)
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    })
 }

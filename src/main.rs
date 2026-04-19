@@ -387,6 +387,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ask_handler: handle_tui_ask_command,
             help_whitelist: help_whitelist.clone(),
             llm_command_prefix: llm_runtime.shared_command_prefix(),
+            plugin_sdk: bot.plugin_sdk().clone(),
         },
         &mut ui_rx,
     )

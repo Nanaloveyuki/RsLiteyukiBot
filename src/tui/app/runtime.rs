@@ -26,6 +26,7 @@ pub async fn run(
         ask_handler,
         help_whitelist,
         llm_command_prefix,
+        plugin_sdk,
     } = options;
     let handlers = LoopHandlers {
         reload_handler,
@@ -36,6 +37,7 @@ pub async fn run(
     let mut app = AppState::new(target, settings_desc, adapter_configs, tui_config);
     app.bind_help_whitelist(help_whitelist);
     app.bind_llm_command_prefix(llm_command_prefix);
+    app.bind_plugin_sdk(plugin_sdk);
     app.push_log(
         UiLevel::Info,
         "TUI ready: type /help in console, Ctrl+C or /quit to exit",
@@ -194,6 +196,16 @@ async fn run_tui_loop(
                             );
                             ui_changed = true;
                         }
+                        CommandOutcome::PluginCommand { command, args } => {
+                            spawn_plugin_command(
+                                command,
+                                args,
+                                &async_result_tx,
+                                &async_command_limiter,
+                                app,
+                            );
+                            ui_changed = true;
+                        }
                         CommandOutcome::None => {
                             ui_changed = true;
                         }
@@ -284,6 +296,42 @@ fn spawn_ask_command(
     }
 }
 
+fn spawn_plugin_command(
+    command: String,
+    args: Vec<String>,
+    async_result_tx: &mpsc::Sender<AsyncCommandResult>,
+    async_command_limiter: &Arc<Semaphore>,
+    app: &mut AppState,
+) {
+    let Some(plugin_sdk) = app.plugin_sdk.clone() else {
+        app.push_log(
+            UiLevel::Warn,
+            "plugin sdk unavailable in current runtime, command ignored",
+        );
+        return;
+    };
+
+    if let Ok(permit) = async_command_limiter.clone().try_acquire_owned() {
+        let tx = async_result_tx.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let result = match plugin_sdk.execute_tui_command(command.as_str(), &args) {
+                Ok(Some(output)) => Ok(output),
+                Ok(None) => Err(format!("plugin command '{}' is not registered", command)),
+                Err(err) => Err(err.to_string()),
+            };
+            let _ = tx.send(AsyncCommandResult::PluginCommand(result)).await;
+        });
+    } else {
+        app.push_log(
+            UiLevel::Warn,
+            format!(
+                "too many async commands in flight (limit={ASYNC_COMMAND_CONCURRENCY_LIMIT}), please retry"
+            ),
+        );
+    }
+}
+
 fn apply_async_result(app: &mut AppState, async_result: AsyncCommandResult) {
     match async_result {
         AsyncCommandResult::Llm(result) => match result {
@@ -293,6 +341,10 @@ fn apply_async_result(app: &mut AppState, async_result: AsyncCommandResult) {
         AsyncCommandResult::Ask(result) => match result {
             Ok(message) => push_llm_response_logs(app, message),
             Err(err) => app.push_log(UiLevel::Warn, format!("ask failed: {err}")),
+        },
+        AsyncCommandResult::PluginCommand(result) => match result {
+            Ok(message) => app.push_log(UiLevel::Info, message),
+            Err(err) => app.push_log(UiLevel::Warn, format!("plugin command failed: {err}")),
         },
     }
 }

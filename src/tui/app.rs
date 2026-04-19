@@ -13,7 +13,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use liteyukibot_core::observability::set_console_log_output_enabled;
-use liteyukibot_core::{AdapterConfig, AdapterTransport, LiteyukiBot, RuntimeTarget};
+use liteyukibot_core::{AdapterConfig, AdapterTransport, LiteyukiBot, PluginSdk, RuntimeTarget};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -118,11 +118,13 @@ enum CommandOutcome {
     PersistWhitelist(Vec<String>),
     Llm(LlmCommandRequest),
     Ask(String),
+    PluginCommand { command: String, args: Vec<String> },
 }
 
 enum AsyncCommandResult {
     Llm(Result<String, String>),
     Ask(Result<String, String>),
+    PluginCommand(Result<String, String>),
 }
 
 struct PollKeyEventsOutput {
@@ -207,6 +209,7 @@ pub struct RunOptions {
     pub ask_handler: AskHandler,
     pub help_whitelist: Arc<RwLock<HashSet<String>>>,
     pub llm_command_prefix: Arc<RwLock<String>>,
+    pub plugin_sdk: PluginSdk,
 }
 
 impl Default for TuiConfig {
@@ -340,6 +343,7 @@ struct AppState {
     completion_state: Option<CompletionState>,
     help_whitelist: Option<Arc<RwLock<HashSet<String>>>>,
     llm_command_prefix: Option<Arc<RwLock<String>>>,
+    plugin_sdk: Option<PluginSdk>,
 }
 
 fn adapter_transport_label(transport: AdapterTransport) -> &'static str {

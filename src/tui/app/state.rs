@@ -51,9 +51,14 @@ impl AppState {
             completion_state: None,
             help_whitelist: None,
             llm_command_prefix: None,
+            plugin_sdk: None,
         };
         state.enforce_resume_limits();
         state
+    }
+
+    pub(super) fn bind_plugin_sdk(&mut self, plugin_sdk: PluginSdk) {
+        self.plugin_sdk = Some(plugin_sdk);
     }
 
     pub(super) fn drop_oldest_non_active_resume(&mut self) -> bool {

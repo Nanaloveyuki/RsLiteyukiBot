@@ -18,6 +18,6 @@ pub use model::{
 };
 pub use sdk::{
     LuaRuntimeAdapter, NativeRuntimeAdapter, PluginHostApi, PluginHostBridge, PluginLoadPlan,
-    PluginLoadState, PluginSdk, PluginSdkError, PluginSdkFuture, PythonRuntimeAdapter,
-    RuntimeAdapter, RuntimeAdapterRegistry,
+    PluginLoadState, PluginSdk, PluginSdkError, PluginSdkFuture, PluginTuiCommand,
+    PythonRuntimeAdapter, RuntimeAdapter, RuntimeAdapterRegistry,
 };

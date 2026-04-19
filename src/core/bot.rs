@@ -201,13 +201,16 @@ impl LiteyukiBotBuilder {
         let adapter_manager =
             AdapterManager::with_logger(base_logger.clone()).with_parallelism(adapter_parallelism);
         let plugin_sdk = self.plugin_sdk.unwrap_or_default();
+        let runtime_plugin_sdk = plugin_sdk.clone();
         let custom_handler = self.event_handler.clone();
         let runtime_router = session_router.clone();
 
         let runtime = BotRuntime::with_handler(runtime_config, move |event, logger| {
             let runtime_router = runtime_router.clone();
             let custom_handler = custom_handler.clone();
+            let runtime_plugin_sdk = runtime_plugin_sdk.clone();
             async move {
+                runtime_plugin_sdk.dispatch_event(&event, &logger);
                 let session_event = SessionEvent::from_bot_event(&event);
                 let dispatch_report = runtime_router.dispatch(session_event).await;
                 if !dispatch_report.errors.is_empty() {
