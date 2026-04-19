@@ -10,6 +10,13 @@
       "event_handler": "liteyuki_handle_event"
     }
   },
+  "commands": [
+    {
+      "name": "/liteecho",
+      "description": "Echo back the provided text through the Python bridge",
+      "scopes": ["adapter:onebot11"]
+    }
+  ],
   "sdk": {
     "api_version": "0.1"
   }

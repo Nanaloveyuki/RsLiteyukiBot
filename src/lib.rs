@@ -37,8 +37,9 @@ pub use plugin::{
     PluginErrorCode, PluginFuture, PluginHandshakeRequest, PluginHandshakeResponse, PluginHostApi,
     PluginHostBridge, PluginLoadError, PluginLoadPlan, PluginLoadState, PluginManager,
     PluginManifest, PluginManifestError, PluginManifestLoader, PluginMetadata, PluginRuntimeKind,
-    PluginRuntimeSpec, PluginSdk, PluginSdkError, PluginSdkFuture, PluginSdkSpec, PluginTuiCommand,
-    PluginType, PythonRuntimeAdapter, RuntimeAdapter, RuntimeAdapterRegistry,
+    PluginRuntimeSpec, PluginScopedCommand, PluginSdk, PluginSdkError, PluginSdkFuture,
+    PluginSdkSpec, PluginTuiCommand, PluginType, PythonRuntimeAdapter, RuntimeAdapter,
+    RuntimeAdapterRegistry,
 };
 pub use session::{
     Matcher, MatcherReport, Rule, SessionDispatchReport, SessionEvent, SessionRouter, SessionScope,

@@ -209,6 +209,25 @@ fn autocomplete_log_subcommands() {
 }
 
 #[test]
+fn autocomplete_commands_scope_hints() {
+    let path = temp_resume_path("autocomplete-commands");
+    remove_file_if_exists(&path);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+
+    app.console_input = "/commands ".to_string();
+    app.autocomplete_console_input();
+    assert_eq!(app.console_input, "/commands tui");
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
 fn command_cursor_position_tracks_input_width() {
     let area = Rect::new(0, 0, 20, 3);
     let (x, y) = command_cursor_position(area, "/help");
@@ -641,6 +660,85 @@ fn autocomplete_includes_ask_command() {
     app.console_input = "/as".to_string();
     app.autocomplete_console_input();
     assert_eq!(app.console_input, "/ask ");
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn tui_builtin_completion_excludes_adapter_only_commands() {
+    let path = temp_resume_path("autocomplete-scope-filter");
+    remove_file_if_exists(&path);
+
+    let app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+
+    let candidates = app.command_completion_candidates("/");
+    assert!(candidates.iter().any(|candidate| candidate == "/help"));
+    assert!(!candidates.iter().any(|candidate| candidate == "/su"));
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn commands_command_lists_scope_filtered_catalog() {
+    let path = temp_resume_path("command-catalog");
+    remove_file_if_exists(&path);
+
+    let mut adapter_scope_app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    adapter_scope_app.handle_console_command("/commands adapter:onebot11");
+    assert!(
+        adapter_scope_app
+            .logs
+            .iter()
+            .any(|log| log.message.contains("command catalog (adapter:onebot11):"))
+    );
+    assert!(
+        adapter_scope_app
+            .logs
+            .iter()
+            .any(|log| log.message.contains("/su <password>"))
+    );
+    assert!(
+        adapter_scope_app
+            .logs
+            .iter()
+            .all(|log| !log.message.contains("/reload"))
+    );
+
+    let mut tui_scope_app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    tui_scope_app.handle_console_command("/commands tui");
+    assert!(
+        tui_scope_app
+            .logs
+            .iter()
+            .any(|log| log.message.contains("command catalog (tui):"))
+    );
+    assert!(
+        tui_scope_app
+            .logs
+            .iter()
+            .any(|log| log.message.contains("/reload"))
+    );
+    assert!(
+        tui_scope_app
+            .logs
+            .iter()
+            .all(|log| !log.message.contains("/su <password>"))
+    );
 
     remove_file_if_exists(&path);
 }

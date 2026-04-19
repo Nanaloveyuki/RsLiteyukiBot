@@ -20,7 +20,7 @@ use crate::observability::Logger;
 use crate::session::SessionRouter;
 
 use super::abi::PluginAbiContract;
-use super::{PluginDescriptor, PluginRuntimeKind};
+use super::{PluginCommandDescriptor, PluginDescriptor, PluginRuntimeKind};
 
 const PYTHON_META_ATTRS: [&str; 3] = [
     "__plugin_meta__",
@@ -280,10 +280,21 @@ pub struct PluginTuiCommand {
     pub plugin_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PluginScopedCommand {
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub plugin_id: String,
+    pub scopes: Vec<String>,
+    pub executable_in_tui: bool,
+}
+
 #[derive(Default)]
 struct PythonRuntimeState {
     plugins: HashMap<String, PythonLoadedPlugin>,
     commands: HashMap<String, PythonTuiCommandEntry>,
+    declared_commands: Vec<PythonDeclaredCommandEntry>,
     disabled_builtin_commands: HashSet<String>,
 }
 
@@ -298,6 +309,15 @@ struct PythonTuiCommandEntry {
     enabled: bool,
     plugin_id: String,
     handler: Py<PyAny>,
+}
+
+#[derive(Debug, Clone)]
+struct PythonDeclaredCommandEntry {
+    command: String,
+    description: String,
+    enabled: bool,
+    plugin_id: String,
+    scopes: Vec<String>,
 }
 
 #[pyclass]
@@ -634,6 +654,10 @@ impl PluginSdk {
         list_tui_commands(&self.python_runtime)
     }
 
+    pub fn list_scope_commands(&self, scope: &str) -> Vec<PluginScopedCommand> {
+        list_scope_commands(&self.python_runtime, scope)
+    }
+
     pub fn get_tui_command(&self, command: &str) -> Option<PluginTuiCommand> {
         let command = normalize_tui_command_name(command)?;
         self.python_runtime.lock().ok().and_then(|lock| {
@@ -769,6 +793,11 @@ impl PluginSdk {
             let mut lock = runtime_state
                 .lock()
                 .map_err(|_| PyRuntimeError::new_err("python runtime lock poisoned"))?;
+            register_declared_commands(
+                &mut lock.declared_commands,
+                plugin_id.as_str(),
+                descriptor.commands.as_slice(),
+            );
             lock.plugins
                 .insert(plugin_id.clone(), PythonLoadedPlugin { event_handler, sdk });
             Ok(())
@@ -1405,6 +1434,9 @@ fn remove_plugin_runtime_state(state: &mut PythonRuntimeState, plugin_id: &str) 
     state
         .commands
         .retain(|_, command| command.plugin_id.as_str() != plugin_id);
+    state
+        .declared_commands
+        .retain(|command| command.plugin_id.as_str() != plugin_id);
 }
 
 fn normalize_tui_command_name(raw: &str) -> Option<String> {
@@ -1422,6 +1454,70 @@ fn normalize_tui_command_name(raw: &str) -> Option<String> {
     } else {
         Some(normalized)
     }
+}
+
+fn normalize_plugin_scope(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let compact = trimmed.to_ascii_lowercase().replace([' ', '_', '-'], "");
+    match compact.as_str() {
+        "all" => Some("all".to_string()),
+        "tui" => Some("tui".to_string()),
+        "adapter:onebot11" | "adapter:onebotv11" | "adapteronebot11" | "onebot11" | "onebotv11" => {
+            Some("adapter:onebot11".to_string())
+        }
+        _ => Some(trimmed.to_ascii_lowercase()),
+    }
+}
+
+fn normalize_plugin_scopes(raw_scopes: &[String]) -> Vec<String> {
+    let mut scopes = Vec::new();
+    for scope in raw_scopes {
+        if let Some(normalized) = normalize_plugin_scope(scope)
+            && !scopes.iter().any(|existing| existing == &normalized)
+        {
+            scopes.push(normalized);
+        }
+    }
+    if scopes.is_empty() {
+        scopes.push("all".to_string());
+    }
+    scopes
+}
+
+fn plugin_scope_matches(scopes: &[String], scope: &str) -> bool {
+    let Some(scope) = normalize_plugin_scope(scope) else {
+        return false;
+    };
+    scopes
+        .iter()
+        .filter_map(|entry| normalize_plugin_scope(entry))
+        .any(|entry| entry == "all" || entry == scope)
+}
+
+fn register_declared_commands(
+    commands: &mut Vec<PythonDeclaredCommandEntry>,
+    plugin_id: &str,
+    descriptors: &[PluginCommandDescriptor],
+) {
+    commands.retain(|command| command.plugin_id.as_str() != plugin_id);
+    commands.extend(descriptors.iter().filter_map(|descriptor| {
+        let command = normalize_tui_command_name(descriptor.name.as_str())?;
+        let description = descriptor.description.trim();
+        Some(PythonDeclaredCommandEntry {
+            command,
+            description: if description.is_empty() {
+                "plugin declared command".to_string()
+            } else {
+                description.to_string()
+            },
+            enabled: true,
+            plugin_id: plugin_id.to_string(),
+            scopes: normalize_plugin_scopes(&descriptor.scopes),
+        })
+    }));
 }
 
 fn register_tui_command(
@@ -1537,6 +1633,69 @@ fn list_tui_commands(state: &Arc<Mutex<PythonRuntimeState>>) -> Vec<PluginTuiCom
         })
         .collect();
     commands.sort_by(|a, b| a.name.cmp(&b.name));
+    commands
+}
+
+fn list_scope_commands(
+    state: &Arc<Mutex<PythonRuntimeState>>,
+    scope: &str,
+) -> Vec<PluginScopedCommand> {
+    if normalize_plugin_scope(scope).is_none() {
+        return Vec::new();
+    }
+
+    let Ok(lock) = state.lock() else {
+        return Vec::new();
+    };
+
+    let mut merged: HashMap<String, PluginScopedCommand> = HashMap::new();
+
+    for entry in &lock.declared_commands {
+        if !plugin_scope_matches(&entry.scopes, scope) {
+            continue;
+        }
+        let key = format!("{}::{}", entry.plugin_id, entry.command);
+        merged.insert(
+            key,
+            PluginScopedCommand {
+                name: entry.command.clone(),
+                description: entry.description.clone(),
+                enabled: entry.enabled,
+                plugin_id: entry.plugin_id.clone(),
+                scopes: entry.scopes.clone(),
+                executable_in_tui: false,
+            },
+        );
+    }
+
+    for entry in lock.commands.values() {
+        let scopes = vec!["tui".to_string()];
+        if !plugin_scope_matches(&scopes, scope) {
+            continue;
+        }
+        let key = format!("{}::{}", entry.plugin_id, entry.command);
+        merged
+            .entry(key)
+            .and_modify(|existing| {
+                existing.description = entry.description.clone();
+                existing.enabled = entry.enabled;
+                existing.executable_in_tui = true;
+                if !existing.scopes.iter().any(|scope| scope == "tui") {
+                    existing.scopes.push("tui".to_string());
+                }
+            })
+            .or_insert_with(|| PluginScopedCommand {
+                name: entry.command.clone(),
+                description: entry.description.clone(),
+                enabled: entry.enabled,
+                plugin_id: entry.plugin_id.clone(),
+                scopes,
+                executable_in_tui: true,
+            });
+    }
+
+    let mut commands: Vec<PluginScopedCommand> = merged.into_values().collect();
+    commands.sort_by(|a, b| a.name.cmp(&b.name).then(a.plugin_id.cmp(&b.plugin_id)));
     commands
 }
 

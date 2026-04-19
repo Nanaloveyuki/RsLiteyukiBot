@@ -67,6 +67,15 @@ pub struct PluginSdkSpec {
     pub options: HashMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginCommandDescriptor {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginDescriptor {
     pub metadata: PluginMetadata,
@@ -76,6 +85,8 @@ pub struct PluginDescriptor {
     pub sdk: PluginSdkSpec,
     #[serde(default)]
     pub permissions: Vec<String>,
+    #[serde(default)]
+    pub commands: Vec<PluginCommandDescriptor>,
     #[serde(skip)]
     pub manifest_path: Option<PathBuf>,
 }

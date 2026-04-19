@@ -13,11 +13,11 @@ pub use manager::{
     LoadedPlugin, Plugin, PluginContext, PluginFuture, PluginLoadError, PluginManager,
 };
 pub use model::{
-    PluginDescriptor, PluginMetadata, PluginRuntimeKind, PluginRuntimeSpec, PluginSdkSpec,
-    PluginType,
+    PluginCommandDescriptor, PluginDescriptor, PluginMetadata, PluginRuntimeKind,
+    PluginRuntimeSpec, PluginSdkSpec, PluginType,
 };
 pub use sdk::{
     LuaRuntimeAdapter, NativeRuntimeAdapter, PluginHostApi, PluginHostBridge, PluginLoadPlan,
-    PluginLoadState, PluginSdk, PluginSdkError, PluginSdkFuture, PluginTuiCommand,
-    PythonRuntimeAdapter, RuntimeAdapter, RuntimeAdapterRegistry,
+    PluginLoadState, PluginScopedCommand, PluginSdk, PluginSdkError, PluginSdkFuture,
+    PluginTuiCommand, PythonRuntimeAdapter, RuntimeAdapter, RuntimeAdapterRegistry,
 };

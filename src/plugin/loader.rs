@@ -1,10 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{PluginDescriptor, PluginMetadata, PluginRuntimeSpec, PluginSdkSpec, PluginType};
+use super::{
+    PluginCommandDescriptor, PluginDescriptor, PluginMetadata, PluginRuntimeSpec, PluginSdkSpec,
+    PluginType,
+};
 
 #[derive(Debug, Clone)]
 pub enum PluginManifestError {
@@ -96,7 +99,7 @@ impl PluginManifestLoader {
             ))
         })?;
         let id = raw.id.unwrap_or_else(|| normalize_plugin_id(&raw.name));
-        let descriptor = PluginDescriptor {
+        let mut descriptor = PluginDescriptor {
             metadata: PluginMetadata {
                 id,
                 name: raw.name,
@@ -109,8 +112,10 @@ impl PluginManifestLoader {
             runtime: raw.runtime.unwrap_or_default(),
             sdk: raw.sdk.unwrap_or_default(),
             permissions: raw.permissions.unwrap_or_default(),
+            commands: raw.commands.unwrap_or_default(),
             manifest_path: Some(path.to_path_buf()),
         };
+        validate_manifest_commands(descriptor.commands.as_mut_slice(), path)?;
         Ok(PluginManifest {
             descriptor,
             path: path.to_path_buf(),
@@ -138,6 +143,8 @@ struct RawManifest {
     sdk: Option<PluginSdkSpec>,
     #[serde(default)]
     permissions: Option<Vec<String>>,
+    #[serde(default)]
+    commands: Option<Vec<PluginCommandDescriptor>>,
 }
 
 fn normalize_plugin_id(name: &str) -> String {
@@ -154,4 +161,86 @@ fn normalize_plugin_id(name: &str) -> String {
         }
     }
     id.trim_matches('-').to_string()
+}
+
+fn validate_manifest_commands(
+    commands: &mut [PluginCommandDescriptor],
+    path: &Path,
+) -> Result<(), PluginManifestError> {
+    let mut seen = HashSet::new();
+    for (command_idx, command) in commands.iter_mut().enumerate() {
+        command.name = normalize_manifest_command_name(command.name.as_str()).ok_or_else(|| {
+            PluginManifestError::Parse(format!(
+                "invalid manifest command in {}: commands[{command_idx}].name should not be empty",
+                path.display()
+            ))
+        })?;
+        command.description = command.description.trim().to_string();
+        command.scopes =
+            normalize_manifest_command_scopes(command.scopes.as_slice(), command_idx, path)?;
+        if !seen.insert(command.name.clone()) {
+            return Err(PluginManifestError::Parse(format!(
+                "invalid manifest command in {}: commands[{command_idx}].name '{}' is duplicated",
+                path.display(),
+                command.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_manifest_command_name(raw: &str) -> Option<String> {
+    let name = raw.split_whitespace().next()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if name.starts_with('/') {
+        Some(name.to_ascii_lowercase())
+    } else {
+        Some(format!("/{}", name.to_ascii_lowercase()))
+    }
+}
+
+fn normalize_manifest_command_scopes(
+    raw_scopes: &[String],
+    command_idx: usize,
+    path: &Path,
+) -> Result<Vec<String>, PluginManifestError> {
+    if raw_scopes.is_empty() {
+        return Ok(vec!["all".to_string()]);
+    }
+
+    let mut scopes = Vec::new();
+    for (scope_idx, raw_scope) in raw_scopes.iter().enumerate() {
+        let scope = normalize_manifest_command_scope(raw_scope.as_str()).map_err(|message| {
+            PluginManifestError::Parse(format!(
+                "invalid manifest command in {}: commands[{command_idx}].scopes[{scope_idx}] {}",
+                path.display(),
+                message
+            ))
+        })?;
+        if !scopes.iter().any(|existing| existing == &scope) {
+            scopes.push(scope);
+        }
+    }
+    Ok(scopes)
+}
+
+fn normalize_manifest_command_scope(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("should not be empty".to_string());
+    }
+    let compact = trimmed.to_ascii_lowercase().replace([' ', '_', '-'], "");
+    match compact.as_str() {
+        "all" => Ok("all".to_string()),
+        "tui" => Ok("tui".to_string()),
+        "adapter:onebot11" | "adapter:onebotv11" | "adapteronebot11" | "onebot11" | "onebotv11" => {
+            Ok("adapter:onebot11".to_string())
+        }
+        _ => Err(format!(
+            "uses unsupported scope '{}' (supported: all, tui, adapter:onebot11)",
+            trimmed
+        )),
+    }
 }

@@ -7,8 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use liteyukibot_core::{
     AdapterManager, ChannelRegistry, LifecycleContext, Plugin, PluginAbiMethod, PluginContext,
-    PluginHostBridge, PluginLoadError, PluginLoadState, PluginManager, PluginMetadata,
-    PluginRuntimeKind, PluginSdk, PluginType, RuntimeTarget, SessionRouter, SharedStore,
+    PluginHostBridge, PluginLoadError, PluginLoadState, PluginManager, PluginManifestLoader,
+    PluginMetadata, PluginRuntimeKind, PluginSdk, PluginType, RuntimeTarget, SessionRouter,
+    SharedStore,
 };
 use liteyukibot_core::{BotEvent, Logger, LoggerConfig};
 use liteyukibot_core::{RuntimeCapabilities, RuntimeFlavor};
@@ -225,6 +226,67 @@ async fn plugin_manager_discovers_manifest_plugins() {
     assert_eq!(manager.loaded_plugins().len(), 1);
 }
 
+#[test]
+fn plugin_manifest_loader_normalizes_command_scope_alias() {
+    let dir = TempDir::create();
+    let manifest_path = dir.path.join("plugin.json");
+    std::fs::write(
+        &manifest_path,
+        r#"{
+  "id": "manifest-scope-normalize",
+  "name": "Manifest Scope Normalize",
+  "type": "service",
+  "commands": [
+    {
+      "name": "liteecho",
+      "description": "alias scope test",
+      "scopes": ["onebot11"]
+    }
+  ]
+}"#,
+    )
+    .expect("manifest should be written");
+
+    let manifest =
+        PluginManifestLoader::load_manifest(&manifest_path).expect("manifest should load");
+
+    assert_eq!(manifest.descriptor.commands.len(), 1);
+    assert_eq!(manifest.descriptor.commands[0].name, "/liteecho");
+    assert_eq!(
+        manifest.descriptor.commands[0].scopes,
+        vec!["adapter:onebot11".to_string()]
+    );
+}
+
+#[test]
+fn plugin_manifest_loader_rejects_unknown_command_scope() {
+    let dir = TempDir::create();
+    let manifest_path = dir.path.join("plugin.json");
+    std::fs::write(
+        &manifest_path,
+        r#"{
+  "id": "manifest-scope-invalid",
+  "name": "Manifest Scope Invalid",
+  "type": "service",
+  "commands": [
+    {
+      "name": "/broken",
+      "description": "bad scope",
+      "scopes": ["discord"]
+    }
+  ]
+}"#,
+    )
+    .expect("manifest should be written");
+
+    let err = PluginManifestLoader::load_manifest(&manifest_path)
+        .expect_err("unknown scope should be rejected");
+    assert!(
+        err.to_string().contains("unsupported scope 'discord'"),
+        "unexpected error: {err}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_manager_marks_python_runtime_as_deferred_plan() {
     let manager = PluginManager::new();
@@ -310,6 +372,13 @@ def bootstrap(sdk):
   "id": "python-echo-ready",
   "name": "Python Echo Ready",
   "type": "service",
+  "commands": [
+    {{
+      "name": "/py-echo",
+      "description": "python echo command",
+      "scopes": ["tui"]
+    }}
+  ],
   "runtime": {{
     "kind": "python",
     "entrypoint": "echo_plugin:bootstrap",
@@ -351,6 +420,13 @@ def bootstrap(sdk):
         .expect("plugin command should be registered");
     assert_eq!(command_result, "2:hello world");
 
+    let scoped_commands = context.sdk.list_scope_commands("tui");
+    assert!(scoped_commands.iter().any(|command| {
+        command.name == "/py-echo"
+            && command.plugin_id == "python-echo-ready"
+            && command.executable_in_tui
+    }));
+
     let updated_config =
         std::fs::read_to_string(config_path).expect("updated config should stay readable");
     assert!(updated_config.contains("value: 2"));
@@ -387,6 +463,13 @@ async def liteecho(event: MessageEvent):
   "id": "legacy-liteecho",
   "name": "Legacy LiteEcho",
   "type": "service",
+  "commands": [
+    {
+      "name": "/liteecho",
+      "description": "legacy echo command",
+      "scopes": ["adapter:onebot11"]
+    }
+  ],
   "runtime": {
     "kind": "python",
     "entrypoint": "liteecho_slash",
@@ -414,6 +497,17 @@ async def liteecho(event: MessageEvent):
     assert_eq!(loaded[0].descriptor.metadata.id, "legacy-liteecho");
     assert_eq!(loaded[0].load_plan.runtime_kind, PluginRuntimeKind::Python);
     assert_eq!(loaded[0].load_plan.state, PluginLoadState::Ready);
+    assert!(
+        context
+            .sdk
+            .list_scope_commands("adapter:onebot11")
+            .iter()
+            .any(|command| {
+                command.name == "/liteecho"
+                    && command.plugin_id == "legacy-liteecho"
+                    && !command.executable_in_tui
+            })
+    );
 
     context.sdk.dispatch_event(
         &BotEvent::new(

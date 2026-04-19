@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use liteyukibot_core::PluginSdk;
 use liteyukibot_core::adapter::AdapterManager;
 use liteyukibot_core::session::SessionEvent;
 use liteyukibot_core::{
@@ -15,6 +16,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 mod app_config;
+mod command_registry;
 mod config_edit;
 mod llm;
 mod onebot_support;
@@ -26,6 +28,10 @@ use crate::llm::{
     build_prompt_preview, compose_user_prompt,
 };
 use app_config::*;
+use command_registry::{
+    AdapterProtocol, BuiltinCommandId, CommandNameOverrides, CommandScope,
+    command_argument_for_message, matches_builtin_command_message,
+};
 use onebot_support::*;
 use superuser::SuperuserManager;
 
@@ -402,6 +408,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui_tx.clone(),
         help_whitelist.clone(),
         llm_runtime.clone(),
+        bot.plugin_sdk().clone(),
         superuser_manager.clone(),
     );
 
@@ -651,7 +658,14 @@ fn emit_external_stats(
 
 fn matches_external_ask_command(message: &str, llm_runtime: &LlmCommandRuntime) -> bool {
     let command_prefix = llm_runtime.command_prefix();
-    parse_command_argument(message, command_prefix.as_str()).is_some()
+    matches_builtin_command_message(
+        BuiltinCommandId::Ask,
+        message,
+        CommandScope::Adapter(AdapterProtocol::OneBot11),
+        CommandNameOverrides {
+            onebot_ask_prefix: Some(command_prefix.as_str()),
+        },
+    )
 }
 
 fn llm_usage_text(command_prefix: &str) -> String {
@@ -664,6 +678,7 @@ fn install_external_event_handlers(
     ui_tx: mpsc::UnboundedSender<tui::UiEvent>,
     help_whitelist: Arc<RwLock<HashSet<String>>>,
     llm_runtime: LlmCommandRuntime,
+    plugin_sdk: PluginSdk,
     superuser_manager: SuperuserManager,
 ) {
     let adapter_manager = bot.adapter_manager().clone();
@@ -700,6 +715,8 @@ fn install_external_event_handlers(
     let ui_tx_for_help = ui_tx.clone();
     let help_whitelist_for_help = help_whitelist.clone();
     let superuser_for_help = superuser_manager.clone();
+    let llm_runtime_for_help = llm_runtime.clone();
+    let plugin_sdk_for_help = plugin_sdk.clone();
 
     bot.on_message(
         "builtin.external.help",
@@ -714,6 +731,8 @@ fn install_external_event_handlers(
             let ui_tx = ui_tx_for_help.clone();
             let help_whitelist = help_whitelist_for_help.clone();
             let superuser_manager = superuser_for_help.clone();
+            let llm_runtime = llm_runtime_for_help.clone();
+            let plugin_sdk = plugin_sdk_for_help.clone();
             async move {
                 if !superuser_manager.is_superuser(event.as_ref()) {
                     return reply_external_text(
@@ -753,7 +772,15 @@ fn install_external_event_handlers(
                 if !allowed {
                     return Ok(());
                 }
-                reply_help_command(&adapter_manager, &gateway, &ui_tx, event).await
+                reply_help_command(
+                    &adapter_manager,
+                    &gateway,
+                    &ui_tx,
+                    &llm_runtime,
+                    &plugin_sdk,
+                    event,
+                )
+                .await
             }
         },
     );
@@ -865,24 +892,24 @@ async fn reply_help_command(
     adapter_manager: &AdapterManager,
     gateway: &ExternalGateway,
     ui_tx: &mpsc::UnboundedSender<tui::UiEvent>,
+    llm_runtime: &LlmCommandRuntime,
+    plugin_sdk: &PluginSdk,
     event: Arc<SessionEvent>,
 ) -> Result<(), String> {
     if !is_onebot_v11_payload(&event.payload) {
         return Ok(());
     }
-    emit_external_stats(ui_tx, &gateway.record_command_hit());
-
-    let echo = gateway.next_echo("liteyuki-help");
-    let payload = build_onebot_v11_help_reply_payload(event.as_ref(), &echo)
-        .ok_or_else(|| "failed to build onebot v11 help response".to_string())?;
-    dispatch_onebot_reply(
+    let help_text = render_external_help_text_with_plugins(
+        llm_runtime.command_prefix().as_str(),
+        Some(plugin_sdk),
+    );
+    reply_external_text(
         adapter_manager,
         gateway,
         ui_tx,
         event.as_ref(),
-        format!("help-{}", event.event_id),
-        echo,
-        payload,
+        help_text.as_str(),
+        "liteyuki-help",
     )
     .await
 }
@@ -900,8 +927,15 @@ async fn reply_ask_command(
     emit_external_stats(ui_tx, &gateway.record_command_hit());
 
     let command_prefix = llm_runtime.command_prefix();
-    let prompt =
-        parse_command_argument(event.message.as_ref(), command_prefix.as_str()).unwrap_or_default();
+    let prompt = command_argument_for_message(
+        BuiltinCommandId::Ask,
+        event.message.as_ref(),
+        CommandScope::Adapter(AdapterProtocol::OneBot11),
+        CommandNameOverrides {
+            onebot_ask_prefix: Some(command_prefix.as_str()),
+        },
+    )
+    .unwrap_or_default();
     let reply_text = if prompt.is_empty() {
         llm_usage_text(command_prefix.as_str())
     } else {

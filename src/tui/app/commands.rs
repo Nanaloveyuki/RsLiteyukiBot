@@ -1,4 +1,10 @@
 use super::*;
+use crate::command_registry::{
+    AdapterProtocol, CommandNameOverrides, CommandScope, builtin_command_names,
+    builtin_commands_for_scope, command_completion_trailing_space, command_help_text_for_name,
+    command_primary_name, command_scope_label, command_usage_label, is_builtin_command_name,
+    parse_command_scope_token, render_builtin_help_lines,
+};
 
 impl AppState {
     pub(super) fn bind_help_whitelist(&mut self, whitelist: Arc<RwLock<HashSet<String>>>) {
@@ -7,6 +13,108 @@ impl AppState {
 
     pub(super) fn bind_llm_command_prefix(&mut self, command_prefix: Arc<RwLock<String>>) {
         self.llm_command_prefix = Some(command_prefix);
+    }
+
+    pub(super) fn show_commands_usage(&mut self) {
+        self.push_log(
+            UiLevel::Warn,
+            "usage: /commands [tui|adapter:onebot11|onebot11|all]",
+        );
+    }
+
+    pub(super) fn command_scope_candidates(prefix: &str) -> Vec<String> {
+        COMMAND_SCOPE_HINTS
+            .iter()
+            .filter(|candidate| candidate.starts_with(prefix))
+            .map(|candidate| format!("/commands {candidate}"))
+            .collect()
+    }
+
+    pub(super) fn parse_commands_scope(args: &[&str]) -> Result<Option<CommandScope>, String> {
+        match args {
+            [] => Ok(None),
+            [scope] => parse_command_scope_token(scope)
+                .map(Some)
+                .ok_or_else(|| "scope should be tui|adapter:onebot11|onebot11|all".to_string()),
+            ["adapter", protocol] => {
+                parse_command_scope_token(format!("adapter:{protocol}").as_str())
+                    .map(Some)
+                    .ok_or_else(|| "scope should be tui|adapter:onebot11|onebot11|all".to_string())
+            }
+            _ => Err("scope should be tui|adapter:onebot11|onebot11|all".to_string()),
+        }
+    }
+
+    fn command_catalog_scopes(scope: Option<CommandScope>) -> Vec<CommandScope> {
+        match scope {
+            None | Some(CommandScope::All) => vec![
+                CommandScope::Tui,
+                CommandScope::Adapter(AdapterProtocol::OneBot11),
+            ],
+            Some(scope) => vec![scope],
+        }
+    }
+
+    fn command_catalog_lines(&self, selected_scope: Option<CommandScope>) -> Vec<String> {
+        let plugin_sdk = self.plugin_sdk.as_ref();
+        let mut lines = Vec::new();
+
+        for scope in Self::command_catalog_scopes(selected_scope) {
+            lines.push(format!("command catalog ({}):", command_scope_label(scope)));
+
+            for command in builtin_commands_for_scope(scope) {
+                let Some(label) =
+                    command_usage_label(command, scope, CommandNameOverrides::default())
+                else {
+                    continue;
+                };
+                let enabled = command_primary_name(command, scope, CommandNameOverrides::default())
+                    .map(|name| {
+                        if matches!(scope, CommandScope::Tui) {
+                            !plugin_sdk.is_some_and(|sdk| {
+                                sdk.is_builtin_tui_command_disabled(name.as_str())
+                            })
+                        } else {
+                            true
+                        }
+                    })
+                    .unwrap_or(true);
+                lines.push(format!(
+                    "  {} - {} [builtin, {}]",
+                    label,
+                    command.summary,
+                    if enabled { "enabled" } else { "disabled" }
+                ));
+            }
+
+            if let Some(plugin_sdk) = plugin_sdk {
+                for command in plugin_sdk.list_scope_commands(command_scope_label(scope)) {
+                    let mut tags = vec![
+                        format!("plugin:{}", command.plugin_id),
+                        if command.enabled {
+                            "enabled".to_string()
+                        } else {
+                            "disabled".to_string()
+                        },
+                    ];
+                    if matches!(scope, CommandScope::Tui) {
+                        tags.push(if command.executable_in_tui {
+                            "executable".to_string()
+                        } else {
+                            "declared-only".to_string()
+                        });
+                    }
+                    lines.push(format!(
+                        "  {} - {} [{}]",
+                        command.name,
+                        command.description,
+                        tags.join(", ")
+                    ));
+                }
+            }
+        }
+
+        lines
     }
 
     pub(super) fn show_whitelist_usage(&mut self) {
@@ -425,11 +533,11 @@ impl AppState {
     }
 
     pub(super) fn command_completion_candidates(&self, prefix: &str) -> Vec<String> {
-        let mut candidates: Vec<String> = TUI_COMMANDS
-            .iter()
-            .filter(|command| command.starts_with(prefix))
-            .map(|command| (*command).to_string())
-            .collect();
+        let mut candidates: Vec<String> =
+            builtin_command_names(CommandScope::Tui, CommandNameOverrides::default())
+                .into_iter()
+                .filter(|command| command.starts_with(prefix))
+                .collect();
 
         if let Some(plugin_sdk) = self.plugin_sdk.as_ref() {
             let plugin_commands = plugin_sdk.list_tui_commands();
@@ -732,8 +840,28 @@ impl AppState {
         None
     }
 
+    pub(super) fn commands_completion_context(
+        &self,
+        input: &str,
+    ) -> Option<(String, CompletionMode, Vec<String>)> {
+        let raw = input.strip_prefix("/commands ")?;
+        if raw.chars().any(char::is_whitespace) {
+            return None;
+        }
+        let prefix = if input.ends_with(' ') { "" } else { raw };
+        let candidates = Self::command_scope_candidates(prefix);
+        Some((
+            format!("commands:scope:{prefix}"),
+            CompletionMode::Rendered,
+            candidates,
+        ))
+    }
+
     pub(super) fn completion_context(&self) -> Option<(String, CompletionMode, Vec<String>)> {
         let input = self.console_input.trim_start();
+        if let Some(ctx) = self.commands_completion_context(input) {
+            return Some(ctx);
+        }
         if let Some(ctx) = self.whitelist_completion_context(input) {
             return Some(ctx);
         }
@@ -767,7 +895,11 @@ impl AppState {
     pub(super) fn apply_completion_candidate(mode: CompletionMode, candidate: &str) -> String {
         match mode {
             CompletionMode::Command => {
-                if matches!(candidate, "/resume" | "/whitelist" | "/llm" | "/ask") {
+                if command_completion_trailing_space(
+                    candidate,
+                    CommandScope::Tui,
+                    CommandNameOverrides::default(),
+                ) {
                     format!("{candidate} ")
                 } else {
                     candidate.to_string()
@@ -939,7 +1071,11 @@ impl AppState {
         let cmd = command.trim();
         let mut parts = cmd.split_whitespace();
         let command_name = parts.next().unwrap_or_default();
-        let is_builtin = TUI_COMMANDS.contains(&command_name);
+        let is_builtin = is_builtin_command_name(
+            command_name,
+            CommandScope::Tui,
+            CommandNameOverrides::default(),
+        );
         if is_builtin
             && self
                 .plugin_sdk
@@ -958,45 +1094,40 @@ impl AppState {
                 CommandOutcome::Quit
             }
             "/help" => {
-                self.push_log(
-                    UiLevel::Info,
-                    "commands: /help /reload /log [on|off] /clear /adapters /ask <prompt> /resumes /history /resume <uid> /llm ... /whitelist ... /quit /exit",
-                );
-                self.push_log(
-                    UiLevel::Info,
-                    "whitelist: /whitelist list | /whitelist add <id|scope:id|scope id> | /whitelist remove <id|scope:id|scope id>",
-                );
-                self.push_log(
-                    UiLevel::Info,
-                    "llm: /llm model <name> | /llm apikey <k1> [k2 ...] | /llm provider [name] | /llm provider add|remove|use <base-url> | /llm provider list | /llm on|off|enable|disable [provider] | /llm prompt list|use <name>|set <name> <soul>|remove <name>|preview [user_prompt]",
-                );
-                self.push_log(
-                    UiLevel::Info,
-                    "keys: Up/Down history, Tab cycle-complete (e.g. / and /h), PgUp/PgDn/Home/End scroll logs",
-                );
-                self.push_log(
-                    UiLevel::Info,
-                    "in /log view: empty input + Up/Down scroll logs by line",
-                );
+                for line in
+                    render_builtin_help_lines(CommandScope::Tui, CommandNameOverrides::default())
+                {
+                    self.push_log(UiLevel::Info, line);
+                }
                 self.push_log(
                     UiLevel::Info,
                     format!("active resume: {}", self.active_resume_uid),
                 );
                 if let Some(plugin_sdk) = self.plugin_sdk.as_ref() {
+                    let builtin_names =
+                        builtin_command_names(CommandScope::Tui, CommandNameOverrides::default());
                     let plugin_commands = plugin_sdk
-                        .list_tui_commands()
+                        .list_scope_commands("tui")
                         .into_iter()
-                        .filter(|entry| entry.enabled)
+                        .filter(|entry| entry.enabled && entry.executable_in_tui)
+                        .filter(|entry| {
+                            builtin_names
+                                .iter()
+                                .all(|builtin_name| builtin_name != &entry.name)
+                        })
                         .collect::<Vec<_>>();
                     if !plugin_commands.is_empty() {
                         self.push_log(
                             UiLevel::Info,
-                            format!("plugin commands ({}):", plugin_commands.len()),
+                            format!("plugin commands (tui, {}):", plugin_commands.len()),
                         );
                         for command in plugin_commands {
                             self.push_log(
                                 UiLevel::Info,
-                                format!("  {} - {}", command.name, command.description),
+                                format!(
+                                    "  {} - {} [plugin:{}]",
+                                    command.name, command.description, command.plugin_id
+                                ),
                             );
                         }
                     }
@@ -1085,6 +1216,20 @@ impl AppState {
                 }
                 CommandOutcome::None
             }
+            "/commands" => {
+                let args: Vec<&str> = parts.collect();
+                let scope = match Self::parse_commands_scope(&args) {
+                    Ok(scope) => scope,
+                    Err(_) => {
+                        self.show_commands_usage();
+                        return CommandOutcome::None;
+                    }
+                };
+                for line in self.command_catalog_lines(scope) {
+                    self.push_log(UiLevel::Info, line);
+                }
+                CommandOutcome::None
+            }
             "/ask" => {
                 let prompt = parts.collect::<Vec<&str>>().join(" ").trim().to_string();
                 if prompt.is_empty() {
@@ -1163,7 +1308,7 @@ impl AppState {
         }
 
         if let Some(help) = Self::command_help_for_line(input) {
-            return help.to_string();
+            return help;
         }
         if let Some(help) = self.plugin_command_help_for_line(input) {
             return help;
@@ -1174,7 +1319,7 @@ impl AppState {
         {
             let rendered = Self::apply_completion_candidate(mode, candidate);
             if let Some(help) = Self::command_help_for_line(rendered.as_str()) {
-                return help.to_string();
+                return help;
             }
             if let Some(help) = self.plugin_command_help_for_line(rendered.as_str()) {
                 return help;
@@ -1184,24 +1329,10 @@ impl AppState {
         "命令说明: 未知命令，输入 /help 查看可用命令".to_string()
     }
 
-    pub(super) fn command_help_for_line(line: &str) -> Option<&'static str> {
+    pub(super) fn command_help_for_line(line: &str) -> Option<String> {
         let mut parts = line.split_whitespace();
         let command = parts.next()?;
-
-        match command {
-            "/help" => Some("命令说明: /help 显示全部命令与快捷键"),
-            "/reload" => Some("命令说明: /reload 重新加载配置与适配器状态"),
-            "/log" => Some("命令说明: /log [on|off] 切换日志控制台视图"),
-            "/clear" => Some("命令说明: /clear 清空当前日志窗口"),
-            "/adapters" => Some("命令说明: /adapters 列出适配器连接状态与端点"),
-            "/ask" => Some("命令说明: /ask <prompt> 后台请求 LLM，不阻塞终端刷新"),
-            "/resumes" | "/history" => Some("命令说明: /resumes 或 /history 查看历史会话快照"),
-            "/resume" => Some("命令说明: /resume <uid> 切换到指定历史会话"),
-            "/llm" => Some("命令说明: /llm 管理模型、Key、provider 与 prompt profile"),
-            "/whitelist" => Some("命令说明: /whitelist 管理 external /help 白名单"),
-            "/quit" | "/exit" => Some("命令说明: /quit 或 /exit 安全退出程序"),
-            _ => None,
-        }
+        command_help_text_for_name(command, CommandScope::Tui, CommandNameOverrides::default())
     }
 
     fn plugin_command_help_for_line(&self, line: &str) -> Option<String> {

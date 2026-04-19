@@ -45,22 +45,8 @@ const ASYNC_COMMAND_CONCURRENCY_LIMIT: usize = 4;
 const DEFAULT_LOG_VIEW_ROWS: usize = 12;
 const DEFAULT_RESUME_MAX_SESSIONS: usize = 64;
 const DEFAULT_RESUME_MAX_SIZE_MIB: u64 = 16;
-const TUI_COMMANDS: [&str; 13] = [
-    "/help",
-    "/reload",
-    "/log",
-    "/clear",
-    "/adapters",
-    "/ask",
-    "/resumes",
-    "/history",
-    "/resume",
-    "/llm",
-    "/whitelist",
-    "/quit",
-    "/exit",
-];
 const LOG_SUBCOMMANDS: [&str; 2] = ["on", "off"];
+const COMMAND_SCOPE_HINTS: [&str; 4] = ["tui", "adapter:onebot11", "onebot11", "all"];
 const WHITELIST_SUBCOMMANDS: [&str; 3] = ["add", "remove", "list"];
 const WHITELIST_SCOPE_HINTS: [&str; 4] = ["private", "group", "session", "user"];
 const LLM_SUBCOMMANDS: [&str; 8] = [

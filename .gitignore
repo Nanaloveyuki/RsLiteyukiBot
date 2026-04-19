@@ -13,6 +13,7 @@
 venv/
 .target/
 target/
+target-codex/
 node_modules/
 data/
 db/
