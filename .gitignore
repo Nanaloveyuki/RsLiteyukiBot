@@ -89,8 +89,8 @@ config.yaml
 config.toml
 llm-config.yaml
 llm-config.toml
-passworld.yaml
-passworld.toml
+password.yaml
+password.toml
 
 # dev doc
 dev-docs/
