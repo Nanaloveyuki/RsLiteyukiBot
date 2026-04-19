@@ -6,12 +6,13 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use liteyukibot_core::{
-    ChannelRegistry, LifecycleContext, Plugin, PluginAbiMethod, PluginContext, PluginHostBridge,
-    PluginLoadError, PluginLoadState, PluginManager, PluginMetadata, PluginRuntimeKind, PluginSdk,
-    PluginType, RuntimeTarget, SessionRouter, SharedStore,
+    AdapterManager, ChannelRegistry, LifecycleContext, Plugin, PluginAbiMethod, PluginContext,
+    PluginHostBridge, PluginLoadError, PluginLoadState, PluginManager, PluginMetadata,
+    PluginRuntimeKind, PluginSdk, PluginType, RuntimeTarget, SessionRouter, SharedStore,
 };
-use liteyukibot_core::{Logger, LoggerConfig};
+use liteyukibot_core::{BotEvent, Logger, LoggerConfig};
 use liteyukibot_core::{RuntimeCapabilities, RuntimeFlavor};
+use serde_json::json;
 use tokio::sync::Notify;
 use tokio::time::{Duration, timeout};
 
@@ -135,6 +136,7 @@ fn plugin_context() -> PluginContext {
         channels.clone(),
         shared_store.clone(),
         session_router.clone(),
+        AdapterManager::default(),
         logger.clone(),
     );
     PluginContext {
@@ -352,6 +354,81 @@ def bootstrap(sdk):
     let updated_config =
         std::fs::read_to_string(config_path).expect("updated config should stay readable");
     assert!(updated_config.contains("value: 2"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_manager_loads_legacy_liteecho_python_plugin() {
+    if !python_command_available() {
+        return;
+    }
+
+    let manager = PluginManager::new();
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("legacy_liteecho");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+
+    std::fs::write(
+        plugin_dir.join("liteecho.py"),
+        r#"# -*- coding: utf-8 -*-
+from liteyuki.session.on import on_startswith
+from liteyuki.session.event import MessageEvent
+from liteyuki.session.rule import is_su_rule
+
+@on_startswith(["liteecho"], rule=is_su_rule).handle()
+async def liteecho(event: MessageEvent):
+    event.reply(event.raw_message.strip()[8:].strip())
+"#,
+    )
+    .expect("python module should be written");
+
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "id": "legacy-liteecho",
+  "name": "Legacy LiteEcho",
+  "type": "service",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "liteecho",
+    "options": {
+      "event_handler": "liteyuki_handle_event"
+    }
+  }
+}"#,
+    )
+    .expect("manifest should be written");
+
+    let context = plugin_context();
+    let discovered = manager
+        .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+        .expect("manifest discovery should succeed");
+    assert_eq!(discovered, vec!["legacy-liteecho".to_string()]);
+
+    manager
+        .load_plugins(discovered, context.clone())
+        .await
+        .expect("legacy liteecho plugin should load");
+
+    let loaded = manager.loaded_plugins();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].descriptor.metadata.id, "legacy-liteecho");
+    assert_eq!(loaded[0].load_plan.runtime_kind, PluginRuntimeKind::Python);
+    assert_eq!(loaded[0].load_plan.state, PluginLoadState::Ready);
+
+    context.sdk.dispatch_event(
+        &BotEvent::new(
+            42,
+            "adapter.inbound",
+            json!({
+                "_adapter_id": "missing-adapter",
+                "message_type": "group",
+                "group_id": "10001",
+                "user_id": "20001",
+                "raw_message": "liteecho hello from legacy"
+            }),
+        ),
+        &context.logger,
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

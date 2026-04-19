@@ -5,6 +5,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -12,6 +13,7 @@ use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::adapter::{AdapterManager, AdapterPacket};
 use crate::comm::{ChannelMessage, ChannelRegistry, SharedStore};
 use crate::core::{BotEvent, LifecycleContext};
 use crate::observability::Logger;
@@ -113,6 +115,7 @@ pub struct PluginHostBridge {
     channels: ChannelRegistry,
     shared_store: SharedStore,
     session_router: SessionRouter,
+    adapter_manager: AdapterManager,
     logger: Logger,
 }
 
@@ -122,6 +125,7 @@ impl PluginHostBridge {
         channels: ChannelRegistry,
         shared_store: SharedStore,
         session_router: SessionRouter,
+        adapter_manager: AdapterManager,
         logger: Logger,
     ) -> Self {
         Self {
@@ -129,6 +133,7 @@ impl PluginHostBridge {
             channels,
             shared_store,
             session_router,
+            adapter_manager,
             logger,
         }
     }
@@ -149,8 +154,52 @@ impl PluginHostBridge {
         &self.session_router
     }
 
+    pub fn adapter_manager(&self) -> &AdapterManager {
+        &self.adapter_manager
+    }
+
     pub fn logger(&self) -> &Logger {
         &self.logger
+    }
+
+    pub fn reply_onebot_text(
+        &self,
+        event: &Value,
+        message: &str,
+        plugin_id: &str,
+    ) -> Result<bool, String> {
+        let text = message.trim();
+        if text.is_empty() {
+            return Ok(false);
+        }
+        let payload = event
+            .get("payload")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "event payload is missing for onebot reply".to_string())?;
+        let adapter_id = payload
+            .get("_adapter_id")
+            .and_then(value_to_string)
+            .ok_or_else(|| "event payload missing _adapter_id".to_string())?;
+
+        let send_payload = build_onebot_v11_text_reply_payload(payload, text)
+            .ok_or_else(|| "event payload is not a supported onebot message event".to_string())?;
+        let packet_id = format!("plugin-{}-{}", plugin_id, now_millis());
+        let adapter_manager = self.adapter_manager.clone();
+        let logger = self.logger.clone();
+        let plugin_id = plugin_id.to_string();
+        tokio::spawn(async move {
+            let packet = AdapterPacket::new(packet_id, "onebot.v11.api.send_msg", send_payload);
+            if let Err(err) = adapter_manager.send(&adapter_id, packet).await {
+                logger.warn_in(
+                    "plugin.python",
+                    format!(
+                        "plugin '{}' onebot reply send failed (adapter={}): {}",
+                        plugin_id, adapter_id, err
+                    ),
+                );
+            }
+        });
+        Ok(true)
     }
 }
 
@@ -351,6 +400,13 @@ impl PyPluginSdk {
             .shared_store()
             .publish(channel_name, message)
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))
+    }
+
+    fn reply_text(&self, py: Python<'_>, event: Py<PyAny>, message: String) -> PyResult<bool> {
+        let event = py_any_to_json(event.bind(py))?;
+        self.host
+            .reply_onebot_text(&event, message.as_str(), self.plugin_id.as_str())
+            .map_err(PyRuntimeError::new_err)
     }
 
     fn config_get(&self, py: Python<'_>, key: String) -> PyResult<PyObject> {
@@ -686,8 +742,6 @@ impl PluginSdk {
 
         Python::with_gil(|py| -> PyResult<()> {
             ensure_python_search_paths(py, probe.search_paths.as_slice())?;
-            let module = PyModule::import(py, probe.entrypoint.module.as_str())?;
-            inspect_python_legacy_metadata(&module);
 
             let sdk = Py::new(
                 py,
@@ -698,7 +752,9 @@ impl PluginSdk {
                     config_path.clone(),
                 ),
             )?;
-            install_python_sdk_bridge(py, &sdk)?;
+            install_python_sdk_bridge(py, Some(&sdk))?;
+            let module = PyModule::import(py, probe.entrypoint.module.as_str())?;
+            inspect_python_legacy_metadata(&module);
 
             {
                 let mut lock = runtime_state
@@ -847,6 +903,7 @@ fn probe_python_plugin_compatibility(
     let search_paths = collect_python_search_paths(descriptor);
     Python::with_gil(|py| -> PyResult<()> {
         ensure_python_search_paths(py, search_paths.as_slice())?;
+        install_python_sdk_bridge(py, None)?;
         let module = PyModule::import(py, entrypoint.module.as_str())?;
         inspect_python_legacy_metadata(&module);
         if let Some(callable_name) = entrypoint.callable.as_deref() {
@@ -1075,9 +1132,13 @@ fn resolve_python_event_handler(
     Ok(None)
 }
 
-fn install_python_sdk_bridge(py: Python<'_>, sdk: &Py<PyPluginSdk>) -> PyResult<()> {
+fn install_python_sdk_bridge(py: Python<'_>, sdk: Option<&Py<PyPluginSdk>>) -> PyResult<()> {
     let sdk_module = PyModule::new(py, "liteyuki_sdk")?;
-    sdk_module.add("sdk", sdk.clone_ref(py))?;
+    if let Some(sdk) = sdk {
+        sdk_module.add("sdk", sdk.clone_ref(py))?;
+    } else {
+        sdk_module.add("sdk", py.None())?;
+    }
 
     let compat_code = r#"
 from dataclasses import dataclass, field
@@ -1098,22 +1159,176 @@ class PluginMetadata:
     author: str = ""
     homepage: str = ""
     extra: dict = field(default_factory=dict)
+
+def _is_awaitable(value):
+    return hasattr(value, "__await__")
+
+def _normalize_prefixes(prefixes):
+    if isinstance(prefixes, str):
+        return [prefixes]
+    if isinstance(prefixes, (list, tuple, set)):
+        out = []
+        for item in prefixes:
+            text = str(item).strip()
+            if text:
+                out.append(text)
+        return out
+    return []
+
+def _extract_message_text(payload):
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("raw_message", "text"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            return value
+    message = payload.get("message")
+    if isinstance(message, str):
+        return message
+    if isinstance(message, list):
+        parts = []
+        for segment in message:
+            if isinstance(segment, str):
+                parts.append(segment)
+                continue
+            if not isinstance(segment, dict):
+                continue
+            data = segment.get("data")
+            if isinstance(data, dict):
+                text = data.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                    continue
+            text = segment.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts)
+    return ""
+
+class MessageEvent:
+    def __init__(self, event, sdk=None):
+        self._event = event if isinstance(event, dict) else {}
+        self._payload = self._event.get("payload", {})
+        if not isinstance(self._payload, dict):
+            self._payload = {}
+        self._sdk = sdk
+        self.raw_message = _extract_message_text(self._payload)
+
+    @property
+    def payload(self):
+        return self._payload
+
+    def reply(self, message):
+        if self._sdk is None:
+            return False
+        text = str(message).strip()
+        if not text:
+            return False
+        if hasattr(self._sdk, "reply_text"):
+            try:
+                return bool(self._sdk.reply_text(self._event, text))
+            except Exception:
+                return False
+        if hasattr(self._sdk, "log"):
+            self._sdk.log(text)
+        return False
+
+async def _dispatch_legacy_handlers(event, sdk, module_globals):
+    handlers = module_globals.get("__liteyuki_legacy_handlers__", [])
+    message_event = MessageEvent(event, sdk)
+    for item in list(handlers):
+        handler = item.get("handler")
+        prefixes = item.get("prefixes", [])
+        rule = item.get("rule")
+        if not callable(handler):
+            continue
+        if prefixes and not any(message_event.raw_message.startswith(prefix) for prefix in prefixes):
+            continue
+        if callable(rule):
+            try:
+                allowed = rule(message_event)
+                if _is_awaitable(allowed):
+                    allowed = await allowed
+                if not bool(allowed):
+                    continue
+            except Exception:
+                continue
+        result = handler(message_event)
+        if _is_awaitable(result):
+            await result
+
+def _ensure_legacy_dispatcher(module_globals):
+    if "liteyuki_handle_event" in module_globals:
+        return
+    async def _compat_dispatch(event, sdk=None):
+        await _dispatch_legacy_handlers(event, sdk, module_globals)
+    module_globals["liteyuki_handle_event"] = _compat_dispatch
+
+class _OnStartswith:
+    def __init__(self, prefixes, rule=None):
+        self._prefixes = _normalize_prefixes(prefixes)
+        self._rule = rule
+
+    def handle(self):
+        def decorator(func):
+            module_globals = getattr(func, "__globals__", {})
+            handlers = module_globals.setdefault("__liteyuki_legacy_handlers__", [])
+            handlers.append({
+                "kind": "startswith",
+                "prefixes": self._prefixes,
+                "rule": self._rule,
+                "handler": func
+            })
+            _ensure_legacy_dispatcher(module_globals)
+            return func
+        return decorator
+
+def on_startswith(prefixes, rule=None):
+    return _OnStartswith(prefixes, rule=rule)
+
+def is_su_rule(event):
+    return True
 "#;
-    let plugin_module = PyModule::new(py, "liteyuki.plugin")?;
-    let plugin_dict = plugin_module.dict();
+    let root_module = PyModule::new(py, "liteyuki")?;
+    let root_dict = root_module.dict();
     let builtins = py.import("builtins")?;
     builtins
         .getattr("exec")?
-        .call1((compat_code, &plugin_dict, &plugin_dict))?;
-    let root_module = PyModule::new(py, "liteyuki")?;
+        .call1((compat_code, &root_dict, &root_dict))?;
+
+    let plugin_module = PyModule::new(py, "liteyuki.plugin")?;
+    plugin_module.add("PluginType", root_module.getattr("PluginType")?)?;
+    plugin_module.add("PluginMetadata", root_module.getattr("PluginMetadata")?)?;
+
+    let session_module = PyModule::new(py, "liteyuki.session")?;
+    let session_on_module = PyModule::new(py, "liteyuki.session.on")?;
+    session_on_module.add("on_startswith", root_module.getattr("on_startswith")?)?;
+    let session_event_module = PyModule::new(py, "liteyuki.session.event")?;
+    session_event_module.add("MessageEvent", root_module.getattr("MessageEvent")?)?;
+    let session_rule_module = PyModule::new(py, "liteyuki.session.rule")?;
+    session_rule_module.add("is_su_rule", root_module.getattr("is_su_rule")?)?;
+
+    session_module.add("on", &session_on_module)?;
+    session_module.add("event", &session_event_module)?;
+    session_module.add("rule", &session_rule_module)?;
+
     root_module.add("plugin", &plugin_module)?;
-    root_module.add("sdk", sdk.clone_ref(py))?;
+    root_module.add("session", &session_module)?;
+    if let Some(sdk) = sdk {
+        root_module.add("sdk", sdk.clone_ref(py))?;
+    } else {
+        root_module.add("sdk", py.None())?;
+    }
 
     let sys = py.import("sys")?;
     let modules = sys.getattr("modules")?.downcast_into::<PyDict>()?;
-    modules.set_item("liteyuki_sdk", sdk_module)?;
-    modules.set_item("liteyuki", root_module)?;
-    modules.set_item("liteyuki.plugin", plugin_module)?;
+    modules.set_item("liteyuki_sdk", &sdk_module)?;
+    modules.set_item("liteyuki", &root_module)?;
+    modules.set_item("liteyuki.plugin", &plugin_module)?;
+    modules.set_item("liteyuki.session", &session_module)?;
+    modules.set_item("liteyuki.session.on", &session_on_module)?;
+    modules.set_item("liteyuki.session.event", &session_event_module)?;
+    modules.set_item("liteyuki.session.rule", &session_rule_module)?;
     Ok(())
 }
 
@@ -1518,6 +1733,60 @@ fn delete_value_at_path(value: &mut Value, segments: &[&str]) -> bool {
             .expect("segments is not empty by construction"),
     )
     .is_some()
+}
+
+fn value_to_string(value: &Value) -> Option<String> {
+    if let Some(raw) = value.as_str() {
+        return Some(raw.to_string());
+    }
+    if let Some(raw) = value.as_u64() {
+        return Some(raw.to_string());
+    }
+    if let Some(raw) = value.as_i64() {
+        return Some(raw.to_string());
+    }
+    if let Some(raw) = value.as_bool() {
+        return Some(raw.to_string());
+    }
+    None
+}
+
+fn build_onebot_v11_text_reply_payload(
+    event_payload: &serde_json::Map<String, Value>,
+    text: &str,
+) -> Option<Value> {
+    let message_type = event_payload
+        .get("message_type")
+        .and_then(Value::as_str)
+        .unwrap_or("private")
+        .to_ascii_lowercase();
+    let echo = format!("plugin-reply-{}", now_millis());
+    let mut payload = serde_json::json!({
+        "message_type": message_type,
+        "message": text,
+        "auto_escape": false,
+        "echo": echo,
+    });
+
+    match message_type.as_str() {
+        "group" => {
+            let group_id = event_payload.get("group_id").and_then(value_to_string)?;
+            payload["group_id"] = Value::String(group_id);
+        }
+        _ => {
+            let user_id = event_payload.get("user_id").and_then(value_to_string)?;
+            payload["user_id"] = Value::String(user_id);
+            payload["message_type"] = Value::String("private".to_string());
+        }
+    }
+    Some(payload)
+}
+
+fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 fn py_any_to_json(value: &pyo3::Bound<'_, PyAny>) -> PyResult<Value> {

@@ -1,0 +1,16 @@
+{
+  "id": "builtin-liteecho",
+  "name": "Builtin LiteEcho",
+  "description": "Legacy liteecho plugin running on Python compatibility bridge",
+  "type": "service",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "liteecho",
+    "options": {
+      "event_handler": "liteyuki_handle_event"
+    }
+  },
+  "sdk": {
+    "api_version": "0.1"
+  }
+}

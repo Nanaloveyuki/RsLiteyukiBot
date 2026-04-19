@@ -33,6 +33,7 @@ const EXTERNAL_API_TIMEOUT: Duration = Duration::from_secs(12);
 const LLM_CONFIG_PATHS: [&str; 2] = ["llm-config.yaml", "llm-config.toml"];
 const LLM_PROMPT_STORE_PATH: &str = "llm-prompts.json";
 const DEFAULT_LLM_PROVIDER_BASE_URL: &str = "https://api.openai.com";
+const BUILTIN_PLUGIN_DIR: &str = "src/builtin_plugin";
 
 static LLM_API_KEY_ROUND_ROBIN: AtomicU64 = AtomicU64::new(0);
 
@@ -301,6 +302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_runtime_config(runtime_config)
         .with_adapter_configs(adapter_configs.clone())
         .with_adapter_autostart(adapter_autostart)
+        .with_plugin_dirs([PathBuf::from(BUILTIN_PLUGIN_DIR)])
         .with_event_handler(move |event, _logger| {
             let ui_tx_for_handler = ui_tx_for_handler.clone();
             let external_gateway_for_handler = external_gateway_for_handler.clone();

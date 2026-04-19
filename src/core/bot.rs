@@ -744,6 +744,7 @@ impl LiteyukiBot {
             self.channels.clone(),
             self.shared_store.clone(),
             self.session_router.clone(),
+            self.adapter_manager.clone(),
             self.logger.clone(),
         );
         PluginContext {
