@@ -407,6 +407,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn log_window_bounds(&self) -> (usize, usize) {
         let len = self.logs.len();
         if len == 0 {

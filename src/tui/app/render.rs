@@ -208,38 +208,31 @@ fn render_logs_panel(frame: &mut ratatui::Frame<'_>, app: &mut AppState, area: R
     let log_rows = (area.height as usize).saturating_sub(2).max(1);
     let log_text_width = (area.width as usize).saturating_sub(2).max(1);
     app.set_log_view_rows(log_rows);
+    app.set_log_text_width(log_text_width);
     let max_scroll = app.max_log_scroll();
-    let (start, end) = app.log_window_bounds();
-
-    let logs: Vec<ListItem<'_>> = app
+    let scroll = app.log_scroll.min(max_scroll);
+    let rendered_lines: Vec<Line<'_>> = app
         .logs
         .iter()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .map(|log| {
-            let (tag, tag_style, message_style) = match log.level {
+        .flat_map(|log| {
+            let (tag_style, message_style) = match log.level {
                 UiLevel::Info => (
-                    "INFO",
                     Style::default().fg(Color::Blue),
                     Style::default().fg(Color::White),
                 ),
                 UiLevel::Warn => (
-                    "WARN",
                     Style::default().fg(Color::Yellow),
                     Style::default().fg(Color::Yellow),
                 ),
                 UiLevel::Error => (
-                    "ERR ",
                     Style::default().fg(Color::Red),
                     Style::default().fg(Color::Red),
                 ),
                 UiLevel::Event => (
-                    "EVT ",
                     Style::default().fg(Color::Green),
                     Style::default().fg(Color::Green),
                 ),
                 UiLevel::Llm => (
-                    "LLM ",
                     Style::default()
                         .fg(Color::Black)
                         .bg(Color::LightCyan)
@@ -249,6 +242,7 @@ fn render_logs_panel(frame: &mut ratatui::Frame<'_>, app: &mut AppState, area: R
                         .add_modifier(Modifier::BOLD),
                 ),
             };
+            let tag = log_level_tag(log.level);
             let prefix = format!("{} [{}] ", log.timestamp, tag);
             let prefix_width = UnicodeWidthStr::width(prefix.as_str());
             let message_width = log_text_width.saturating_sub(prefix_width).max(1);
@@ -269,16 +263,24 @@ fn render_logs_panel(frame: &mut ratatui::Frame<'_>, app: &mut AppState, area: R
                     Span::styled(segment.clone(), message_style),
                 ]));
             }
-            ListItem::new(Text::from(lines))
+            lines
         })
         .collect();
-
-    let panel_title = if app.log_scroll > 0 {
-        format!("{title} (scroll {}/{max_scroll})", app.log_scroll)
+    let total_lines = rendered_lines.len();
+    let end = total_lines.saturating_sub(scroll);
+    let start = end.saturating_sub(log_rows);
+    let visible_lines = if start < end {
+        rendered_lines[start..end].to_vec()
+    } else {
+        Vec::new()
+    };
+    let panel_title = if scroll > 0 {
+        format!("{title} (scroll {}/{max_scroll})", scroll)
     } else {
         title.to_string()
     };
-    let logs_widget = List::new(logs).block(rounded_block(panel_title.as_str()));
+    let logs_widget =
+        Paragraph::new(Text::from(visible_lines)).block(rounded_block(panel_title.as_str()));
     frame.render_widget(logs_widget, area);
 }
 

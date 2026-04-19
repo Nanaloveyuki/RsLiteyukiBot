@@ -504,11 +504,12 @@ impl AdapterManager {
                 Ok(RunningAdapter::WebSocket { handles, sender })
             }
             AdapterTransport::WebSocketReverse => {
+                let max_connections = resolve_reverse_ws_max_connections(config.max_connections);
                 let handle = start_reverse_adapter(
                     config.endpoint.clone(),
                     config.queue_capacity,
                     config.max_payload_size,
-                    config.max_connections,
+                    max_connections,
                     adapter_parallelism,
                     sink,
                 )
@@ -606,6 +607,10 @@ where
     Fut: Future<Output = ()> + Send + 'static,
 {
     Arc::new(move |packet| Box::pin(handler(packet)))
+}
+
+fn resolve_reverse_ws_max_connections(configured: Option<usize>) -> Option<usize> {
+    configured.or(Some(1))
 }
 
 fn with_inbound_topic(
@@ -789,5 +794,11 @@ mod tests {
 
         manager.set_parallelism(4);
         assert_eq!(manager.parallelism(), 4);
+    }
+
+    #[test]
+    fn reverse_ws_max_connections_defaults_to_single_connection() {
+        assert_eq!(resolve_reverse_ws_max_connections(None), Some(1));
+        assert_eq!(resolve_reverse_ws_max_connections(Some(3)), Some(3));
     }
 }

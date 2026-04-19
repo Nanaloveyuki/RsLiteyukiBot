@@ -18,6 +18,7 @@ mod app_config;
 mod config_edit;
 mod llm;
 mod onebot_support;
+mod superuser;
 mod tui;
 
 use crate::llm::{
@@ -26,12 +27,14 @@ use crate::llm::{
 };
 use app_config::*;
 use onebot_support::*;
+use superuser::SuperuserManager;
 
 const APP_TITLE: &str = "RsLiteyukiBot";
 const DEFAULT_RUNTIME_TARGET: RuntimeTarget = RuntimeTarget::Cli;
 const EXTERNAL_API_TIMEOUT: Duration = Duration::from_secs(12);
 const LLM_CONFIG_PATHS: [&str; 2] = ["llm-config.yaml", "llm-config.toml"];
 const LLM_PROMPT_STORE_PATH: &str = "llm-prompts.json";
+const PASSWORD_CONFIG_PATH: &str = "password.yaml";
 const DEFAULT_LLM_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 const BUILTIN_PLUGIN_DIR: &str = "src/builtin_plugin";
 
@@ -275,6 +278,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let llm_config = resolve_llm_config(&app_config);
     let llm_runtime = LlmCommandRuntime::new(llm_config.command_prefix.clone());
     let external_gateway = ExternalGateway::new();
+    let superuser_manager =
+        match SuperuserManager::load_or_init(resolve_password_config_path().as_path()) {
+            Ok(manager) => manager,
+            Err(err) => {
+                eprintln!(
+                    "failed to load password config, fallback to in-memory superuser manager: {err}"
+                );
+                SuperuserManager::in_memory()
+            }
+        };
 
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<tui::UiEvent>();
     let ui_tx_for_handler = ui_tx.clone();
@@ -294,6 +307,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = ui_tx.send(tui::UiEvent::Log {
         level: tui::UiLevel::Info,
         message: format!("LLM command prefix: {}", llm_runtime.command_prefix()),
+    });
+    if superuser_manager.using_dynamic_password() {
+        let _ = ui_tx.send(tui::UiEvent::Log {
+            level: tui::UiLevel::Warn,
+            message: format!(
+                "SU dynamic password (this startup only): {}",
+                superuser_manager.active_password()
+            ),
+        });
+    } else {
+        let _ = ui_tx.send(tui::UiEvent::Log {
+            level: tui::UiLevel::Info,
+            message: "SU fixed password loaded from password.yaml".to_string(),
+        });
+    }
+    let _ = ui_tx.send(tui::UiEvent::Log {
+        level: tui::UiLevel::Info,
+        message: "TUI defaults to SU mode; external sessions need /su <password>.".to_string(),
     });
     let external_gateway_for_handler = external_gateway.clone();
 
@@ -371,6 +402,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui_tx.clone(),
         help_whitelist.clone(),
         llm_runtime.clone(),
+        superuser_manager.clone(),
     );
 
     bot.start().await?;
@@ -410,6 +442,15 @@ fn resolve_runtime_target() -> RuntimeTarget {
         .as_deref()
         .and_then(RuntimeTarget::parse)
         .unwrap_or(DEFAULT_RUNTIME_TARGET)
+}
+
+fn resolve_password_config_path() -> PathBuf {
+    if let Ok(path) = std::env::var("LY_PASSWORD_PATH")
+        && !path.trim().is_empty()
+    {
+        return PathBuf::from(path);
+    }
+    PathBuf::from(PASSWORD_CONFIG_PATH)
 }
 
 fn ensure_default_llm_config_file() -> Result<(), String> {
@@ -623,11 +664,42 @@ fn install_external_event_handlers(
     ui_tx: mpsc::UnboundedSender<tui::UiEvent>,
     help_whitelist: Arc<RwLock<HashSet<String>>>,
     llm_runtime: LlmCommandRuntime,
+    superuser_manager: SuperuserManager,
 ) {
+    let adapter_manager = bot.adapter_manager().clone();
+    let gateway_for_su = gateway.clone();
+    let ui_tx_for_su = ui_tx.clone();
+    let superuser_for_su = superuser_manager.clone();
+    bot.on_message(
+        "builtin.external.su",
+        Rule::new("command.su", |event| async move {
+            parse_su_password_argument(event.message.as_ref()).is_some()
+        }),
+        510,
+        true,
+        move |event| {
+            let adapter_manager = adapter_manager.clone();
+            let gateway = gateway_for_su.clone();
+            let ui_tx = ui_tx_for_su.clone();
+            let superuser_manager = superuser_for_su.clone();
+            async move {
+                handle_external_su_command(
+                    &adapter_manager,
+                    &gateway,
+                    &ui_tx,
+                    &superuser_manager,
+                    event,
+                )
+                .await
+            }
+        },
+    );
+
     let adapter_manager = bot.adapter_manager().clone();
     let gateway_for_help = gateway.clone();
     let ui_tx_for_help = ui_tx.clone();
     let help_whitelist_for_help = help_whitelist.clone();
+    let superuser_for_help = superuser_manager.clone();
 
     bot.on_message(
         "builtin.external.help",
@@ -641,7 +713,19 @@ fn install_external_event_handlers(
             let gateway = gateway_for_help.clone();
             let ui_tx = ui_tx_for_help.clone();
             let help_whitelist = help_whitelist_for_help.clone();
+            let superuser_manager = superuser_for_help.clone();
             async move {
+                if !superuser_manager.is_superuser(event.as_ref()) {
+                    return reply_external_text(
+                        &adapter_manager,
+                        &gateway,
+                        &ui_tx,
+                        event.as_ref(),
+                        "当前会话未进入 SU 模式，请先发送 /su <password> 完成认证。",
+                        "su-required-help",
+                    )
+                    .await;
+                }
                 let debug_mode = whitelist_debug_enabled();
                 let (allowed, matched_entry, whitelist_size) = help_whitelist
                     .read()
@@ -678,6 +762,7 @@ fn install_external_event_handlers(
     let gateway_for_ask = gateway.clone();
     let ui_tx_for_ask = ui_tx.clone();
     let llm_runtime_for_rule = llm_runtime.clone();
+    let superuser_for_ask = superuser_manager.clone();
     bot.on_message(
         "builtin.external.ask",
         Rule::new("command.ask", move |event| {
@@ -691,11 +776,89 @@ fn install_external_event_handlers(
             let gateway = gateway_for_ask.clone();
             let ui_tx = ui_tx_for_ask.clone();
             let llm_runtime = llm_runtime.clone();
+            let superuser_manager = superuser_for_ask.clone();
             async move {
+                if !superuser_manager.is_superuser(event.as_ref()) {
+                    return reply_external_text(
+                        &adapter_manager,
+                        &gateway,
+                        &ui_tx,
+                        event.as_ref(),
+                        "当前会话未进入 SU 模式，请先发送 /su <password> 完成认证。",
+                        "su-required-ask",
+                    )
+                    .await;
+                }
                 reply_ask_command(&adapter_manager, &gateway, &ui_tx, &llm_runtime, event).await
             }
         },
     );
+}
+
+async fn handle_external_su_command(
+    adapter_manager: &AdapterManager,
+    gateway: &ExternalGateway,
+    ui_tx: &mpsc::UnboundedSender<tui::UiEvent>,
+    superuser_manager: &SuperuserManager,
+    event: Arc<SessionEvent>,
+) -> Result<(), String> {
+    let Some(password_raw) = parse_su_password_argument(event.message.as_ref()) else {
+        return Ok(());
+    };
+
+    if is_onebot_v11_payload(&event.payload) && !is_onebot_private_message(event.as_ref()) {
+        return reply_external_text(
+            adapter_manager,
+            gateway,
+            ui_tx,
+            event.as_ref(),
+            "出于安全考虑，OneBot 的 /su 仅允许私聊发送。",
+            "su-private-only",
+        )
+        .await;
+    }
+
+    if password_raw.trim().is_empty() {
+        return reply_external_text(
+            adapter_manager,
+            gateway,
+            ui_tx,
+            event.as_ref(),
+            "用法: /su <password>",
+            "su-usage",
+        )
+        .await;
+    }
+
+    if !superuser_manager.verify_password(password_raw.as_str()) {
+        return reply_external_text(
+            adapter_manager,
+            gateway,
+            ui_tx,
+            event.as_ref(),
+            "SU 认证失败：密码错误。",
+            "su-denied",
+        )
+        .await;
+    }
+
+    let promoted = superuser_manager
+        .promote_user(event.as_ref())
+        .map_err(|err| format!("failed to persist superuser: {err}"))?;
+    let text = if promoted.added {
+        "SU 模式已启用，你已被加入 superuser 列表。"
+    } else {
+        "SU 模式已启用。"
+    };
+    reply_external_text(
+        adapter_manager,
+        gateway,
+        ui_tx,
+        event.as_ref(),
+        text,
+        "su-granted",
+    )
+    .await
 }
 
 async fn reply_help_command(
@@ -763,6 +926,33 @@ async fn reply_ask_command(
         ui_tx,
         event.as_ref(),
         format!("ask-{}", event.event_id),
+        echo,
+        payload,
+    )
+    .await
+}
+
+async fn reply_external_text(
+    adapter_manager: &AdapterManager,
+    gateway: &ExternalGateway,
+    ui_tx: &mpsc::UnboundedSender<tui::UiEvent>,
+    event: &SessionEvent,
+    text: &str,
+    echo_prefix: &str,
+) -> Result<(), String> {
+    if !is_onebot_v11_payload(&event.payload) {
+        return Ok(());
+    }
+    emit_external_stats(ui_tx, &gateway.record_command_hit());
+    let echo = gateway.next_echo(echo_prefix);
+    let payload = build_onebot_v11_text_reply_payload(event, &echo, text)
+        .ok_or_else(|| "failed to build onebot v11 text response".to_string())?;
+    dispatch_onebot_reply(
+        adapter_manager,
+        gateway,
+        ui_tx,
+        event,
+        format!("{echo_prefix}-{}", event.event_id),
         echo,
         payload,
     )

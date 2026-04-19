@@ -368,7 +368,7 @@ async fn plugin_manager_loads_legacy_liteecho_python_plugin() {
     std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
 
     std::fs::write(
-        plugin_dir.join("liteecho.py"),
+        plugin_dir.join("liteecho_slash.py"),
         r#"# -*- coding: utf-8 -*-
 from liteyuki.session.on import on_startswith
 from liteyuki.session.event import MessageEvent
@@ -389,7 +389,7 @@ async def liteecho(event: MessageEvent):
   "type": "service",
   "runtime": {
     "kind": "python",
-    "entrypoint": "liteecho",
+    "entrypoint": "liteecho_slash",
     "options": {
       "event_handler": "liteyuki_handle_event"
     }
@@ -421,13 +421,99 @@ async def liteecho(event: MessageEvent):
             "adapter.inbound",
             json!({
                 "_adapter_id": "missing-adapter",
+                "_adapter_protocol": "onebot.v11",
+                "post_type": "message",
                 "message_type": "group",
                 "group_id": "10001",
                 "user_id": "20001",
-                "raw_message": "liteecho hello from legacy"
+                "raw_message": "/liteecho hello from legacy"
             }),
         ),
         &context.logger,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_manager_legacy_on_startswith_matches_slash_prefixed_command() {
+    if !python_command_available() {
+        return;
+    }
+
+    let manager = PluginManager::new();
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("legacy_liteecho_slash");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+    let config_path = dir.path.join("legacy-plugin-config.yaml");
+    std::fs::write(&config_path, "plugin:\n  hit: false\n").expect("config file should be written");
+
+    std::fs::write(
+        plugin_dir.join("liteecho.py"),
+        r#"# -*- coding: utf-8 -*-
+from liteyuki.session.on import on_startswith
+from liteyuki.session.event import MessageEvent
+from liteyuki.session.rule import is_su_rule
+import liteyuki
+
+@on_startswith(["liteecho"], rule=is_su_rule).handle()
+async def liteecho(event: MessageEvent):
+    event._sdk.config_set("plugin.hit", True)
+"#,
+    )
+    .expect("python module should be written");
+    let config_path_json = config_path.to_string_lossy().replace('\\', "/");
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        format!(
+            r#"{{
+  "id": "legacy-liteecho-slash",
+  "name": "Legacy LiteEcho Slash",
+  "type": "service",
+  "runtime": {{
+    "kind": "python",
+    "entrypoint": "liteecho",
+    "options": {{
+      "event_handler": "liteyuki_handle_event",
+      "config_path": "{}"
+    }}
+  }}
+}}"#,
+            config_path_json
+        ),
+    )
+    .expect("manifest should be written");
+
+    let context = plugin_context();
+    let discovered = manager
+        .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+        .expect("manifest discovery should succeed");
+    assert_eq!(discovered, vec!["legacy-liteecho-slash".to_string()]);
+
+    manager
+        .load_plugins(discovered, context.clone())
+        .await
+        .expect("legacy liteecho slash plugin should load");
+
+    context.sdk.dispatch_event(
+        &BotEvent::new(
+            100,
+            "adapter.inbound",
+            json!({
+                "_adapter_id": "missing-adapter",
+                "_adapter_protocol": "onebot.v11",
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": "20001",
+                "raw_message": "/liteecho slash-test"
+            }),
+        ),
+        &context.logger,
+    );
+
+    let updated_config =
+        std::fs::read_to_string(config_path).expect("updated config should stay readable");
+    assert!(
+        updated_config.contains("hit: true"),
+        "slash-prefixed command should trigger legacy on_startswith handler"
     );
 }
 

@@ -331,6 +331,7 @@ struct AppState {
     history_draft: String,
     log_scroll: usize,
     log_view_rows: usize,
+    log_text_width: usize,
     resume_store_path: PathBuf,
     resume_store: ResumeStore,
     resume_max_sessions: usize,
@@ -352,6 +353,16 @@ fn adapter_transport_label(transport: AdapterTransport) -> &'static str {
         AdapterTransport::WebSocketReverse => "ws-reverse",
         AdapterTransport::Sse => "sse",
         AdapterTransport::Http => "http",
+    }
+}
+
+fn log_level_tag(level: UiLevel) -> &'static str {
+    match level {
+        UiLevel::Info => "INFO",
+        UiLevel::Warn => "WARN",
+        UiLevel::Error => "ERR ",
+        UiLevel::Event => "EVT ",
+        UiLevel::Llm => "LLM ",
     }
 }
 

@@ -39,6 +39,10 @@ pub(crate) fn parse_command_argument(message: &str, command_prefix: &str) -> Opt
     Some(remainder.trim().to_string())
 }
 
+pub(crate) fn parse_su_password_argument(message: &str) -> Option<String> {
+    parse_command_argument(message, "/su").or_else(|| parse_command_argument(message, "su"))
+}
+
 pub(crate) fn is_help_session_allowed(event: &SessionEvent, whitelist: &HashSet<String>) -> bool {
     whitelist.is_empty() || matched_help_whitelist_entry(event, whitelist).is_some()
 }
@@ -107,6 +111,10 @@ fn is_private_semantic(event: &SessionEvent) -> bool {
     matches!(event.scope, liteyukibot_core::SessionScope::Private)
         || payload_message_type(event).is_some_and(|ty| ty.eq_ignore_ascii_case("private"))
         || event.session_id == event.user_id
+}
+
+pub(crate) fn is_onebot_private_message(event: &SessionEvent) -> bool {
+    is_onebot_v11_payload(&event.payload) && is_private_semantic(event)
 }
 
 pub(crate) fn is_onebot_v11_payload(payload: &Value) -> bool {
@@ -379,5 +387,78 @@ pub(crate) fn truncate_preview(raw: &str, max_chars: usize) -> String {
         format!("{preview}...")
     } else {
         preview
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use liteyukibot_core::{SessionEvent, SessionScope};
+    use serde_json::Value;
+    use std::sync::Arc;
+
+    fn mock_onebot_event(message_type: &str, raw_message: &str) -> SessionEvent {
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "_adapter_protocol".to_string(),
+            Value::String("onebot.v11".to_string()),
+        );
+        payload.insert(
+            "post_type".to_string(),
+            Value::String("message".to_string()),
+        );
+        payload.insert(
+            "message_type".to_string(),
+            Value::String(message_type.to_string()),
+        );
+        payload.insert(
+            "raw_message".to_string(),
+            Value::String(raw_message.to_string()),
+        );
+        payload.insert("user_id".to_string(), Value::String("10001".to_string()));
+        if message_type == "group" {
+            payload.insert("group_id".to_string(), Value::String("2333".to_string()));
+        }
+        SessionEvent {
+            event_id: 1,
+            topic: Arc::from("adapter.inbound"),
+            message: Arc::from(raw_message),
+            payload: Value::Object(payload),
+            timestamp_ms: 0,
+            bot_id: Arc::from("bot"),
+            session_id: Arc::from(if message_type == "group" {
+                "2333"
+            } else {
+                "10001"
+            }),
+            user_id: Arc::from("10001"),
+            scope: if message_type == "group" {
+                SessionScope::Group
+            } else {
+                SessionScope::Private
+            },
+        }
+    }
+
+    #[test]
+    fn parse_su_password_argument_supports_slash_and_plain_command() {
+        assert_eq!(
+            parse_su_password_argument("/su abc123"),
+            Some("abc123".to_string())
+        );
+        assert_eq!(
+            parse_su_password_argument("su abc123"),
+            Some("abc123".to_string())
+        );
+        assert_eq!(parse_su_password_argument("/su"), Some(String::new()));
+    }
+
+    #[test]
+    fn onebot_private_message_detection_respects_message_type() {
+        let private_event = mock_onebot_event("private", "/su secret");
+        assert!(is_onebot_private_message(&private_event));
+
+        let group_event = mock_onebot_event("group", "/su secret");
+        assert!(!is_onebot_private_message(&group_event));
     }
 }

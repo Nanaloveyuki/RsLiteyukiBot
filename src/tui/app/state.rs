@@ -39,6 +39,7 @@ impl AppState {
             history_draft: String::new(),
             log_scroll: 0,
             log_view_rows: DEFAULT_LOG_VIEW_ROWS,
+            log_text_width: 1,
             resume_store_path: tui_config.resume_store_path,
             resume_store,
             resume_max_sessions: tui_config.resume_max_sessions,
@@ -184,12 +185,13 @@ impl AppState {
             timestamp: Local::now().format("%H:%M:%S").to_string(),
             message: message.into(),
         };
+        let added_lines = self.rendered_lines_for_log(&log);
         if self.logs.len() >= UI_LOG_CAPACITY {
             self.logs.pop_front();
         }
         self.logs.push_back(log);
         if self.log_scroll > 0 {
-            self.log_scroll = self.log_scroll.saturating_add(1);
+            self.log_scroll = self.log_scroll.saturating_add(added_lines);
         }
         self.clamp_log_scroll();
         self.resume_dirty = true;
@@ -372,8 +374,31 @@ impl AppState {
         self.clamp_log_scroll();
     }
 
+    pub(super) fn set_log_text_width(&mut self, width: usize) {
+        self.log_text_width = width.max(1);
+        self.clamp_log_scroll();
+    }
+
+    pub(super) fn total_rendered_log_lines(&self) -> usize {
+        self.logs
+            .iter()
+            .map(|log| self.rendered_lines_for_log(log))
+            .sum()
+    }
+
+    fn rendered_lines_for_log(&self, log: &UiLog) -> usize {
+        let tag = log_level_tag(log.level);
+        let prefix = format!("{} [{}] ", log.timestamp, tag);
+        let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+        let message_width = self.log_text_width.saturating_sub(prefix_width).max(1);
+        wrap_text_hard(log.message.as_str(), message_width)
+            .len()
+            .max(1)
+    }
+
     pub(super) fn max_log_scroll(&self) -> usize {
-        self.logs.len().saturating_sub(self.log_view_rows)
+        self.total_rendered_log_lines()
+            .saturating_sub(self.log_view_rows)
     }
 
     pub(super) fn clamp_log_scroll(&mut self) {

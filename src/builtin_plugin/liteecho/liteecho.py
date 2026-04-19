@@ -16,4 +16,8 @@ from liteyuki.session.rule import is_su_rule
 
 @on_startswith(["liteecho"], rule=is_su_rule).handle()
 async def liteecho(event: MessageEvent):
-    event.reply(event.raw_message.strip()[8:].strip())
+    message = event.raw_message.strip()
+    for prefix in ("/liteecho", "liteecho"):
+        if message.startswith(prefix):
+            event.reply(message[len(prefix):].strip())
+            return

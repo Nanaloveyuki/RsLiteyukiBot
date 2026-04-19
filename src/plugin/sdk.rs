@@ -1242,7 +1242,7 @@ async def _dispatch_legacy_handlers(event, sdk, module_globals):
         rule = item.get("rule")
         if not callable(handler):
             continue
-        if prefixes and not any(message_event.raw_message.startswith(prefix) for prefix in prefixes):
+        if prefixes and not any(_legacy_startswith(message_event.raw_message, prefix) for prefix in prefixes):
             continue
         if callable(rule):
             try:
@@ -1285,6 +1285,17 @@ class _OnStartswith:
 
 def on_startswith(prefixes, rule=None):
     return _OnStartswith(prefixes, rule=rule)
+
+def _legacy_startswith(raw_message, prefix):
+    raw_message = str(raw_message or "")
+    prefix = str(prefix or "").strip()
+    if not prefix:
+        return False
+    if raw_message.startswith(prefix):
+        return True
+    if prefix.startswith("/"):
+        return False
+    return raw_message.startswith("/" + prefix)
 
 def is_su_rule(event):
     return True
@@ -1761,25 +1772,88 @@ fn build_onebot_v11_text_reply_payload(
         .unwrap_or("private")
         .to_ascii_lowercase();
     let echo = format!("plugin-reply-{}", now_millis());
-    let mut payload = serde_json::json!({
-        "message_type": message_type,
-        "message": text,
-        "auto_escape": false,
-        "echo": echo,
-    });
+    let mut params = serde_json::Map::new();
+    params.insert(
+        "message_type".to_string(),
+        Value::String(message_type.clone()),
+    );
+    params.insert("message".to_string(), Value::String(text.to_string()));
+    params.insert("auto_escape".to_string(), Value::Bool(false));
 
     match message_type.as_str() {
         "group" => {
-            let group_id = event_payload.get("group_id").and_then(value_to_string)?;
-            payload["group_id"] = Value::String(group_id);
+            params.insert(
+                "group_id".to_string(),
+                event_payload.get("group_id")?.clone(),
+            );
         }
         _ => {
-            let user_id = event_payload.get("user_id").and_then(value_to_string)?;
-            payload["user_id"] = Value::String(user_id);
-            payload["message_type"] = Value::String("private".to_string());
+            params.insert("user_id".to_string(), event_payload.get("user_id")?.clone());
+            params.insert(
+                "message_type".to_string(),
+                Value::String("private".to_string()),
+            );
         }
     }
-    Some(payload)
+    Some(Value::Object(serde_json::Map::from_iter([
+        ("action".to_string(), Value::String("send_msg".to_string())),
+        ("params".to_string(), Value::Object(params)),
+        ("echo".to_string(), Value::String(echo)),
+    ])))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn onebot_reply_payload_uses_action_envelope_for_group() {
+        let payload = json!({
+            "message_type": "group",
+            "group_id": 112233
+        });
+        let built = build_onebot_v11_text_reply_payload(
+            payload.as_object().expect("test payload should be object"),
+            "hello",
+        )
+        .expect("group payload should build");
+
+        assert_eq!(
+            built.get("action").and_then(Value::as_str),
+            Some("send_msg")
+        );
+        assert_eq!(
+            built.get("params").and_then(|v| v.get("group_id")),
+            Some(&json!(112233))
+        );
+        assert_eq!(
+            built.get("params").and_then(|v| v.get("message")),
+            Some(&json!("hello"))
+        );
+    }
+
+    #[test]
+    fn onebot_reply_payload_uses_private_target_for_direct_message() {
+        let payload = json!({
+            "message_type": "private",
+            "user_id": "445566"
+        });
+        let built = build_onebot_v11_text_reply_payload(
+            payload.as_object().expect("test payload should be object"),
+            "pong",
+        )
+        .expect("private payload should build");
+
+        assert_eq!(
+            built.get("params").and_then(|v| v.get("message_type")),
+            Some(&json!("private"))
+        );
+        assert_eq!(
+            built.get("params").and_then(|v| v.get("user_id")),
+            Some(&json!("445566"))
+        );
+    }
 }
 
 fn now_millis() -> u128 {

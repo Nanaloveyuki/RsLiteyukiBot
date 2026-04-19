@@ -7,6 +7,7 @@
 .cache/
 .zed.sessions/
 .claude/
+.codex/
 
 # env
 venv/
@@ -88,6 +89,8 @@ config.yaml
 config.toml
 llm-config.yaml
 llm-config.toml
+passworld.yaml
+passworld.toml
 
 # dev doc
 dev-docs/

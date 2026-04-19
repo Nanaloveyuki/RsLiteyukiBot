@@ -360,6 +360,29 @@ fn log_window_keeps_chronological_order_with_scroll() {
 }
 
 #[test]
+fn max_log_scroll_accounts_for_wrapped_visual_lines() {
+    let path = temp_resume_path("log-visual-scroll");
+    remove_file_if_exists(&path);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.set_log_text_width(24);
+    app.set_log_view_rows(2);
+    app.push_log(UiLevel::Info, "0123456789 abcdefghij klmnopqrst uvwxyz");
+
+    assert!(
+        app.max_log_scroll() > 0,
+        "wrapped log should produce scrollable visual lines"
+    );
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
 fn log_command_switches_view_mode() {
     let path = temp_resume_path("log-view-mode");
     remove_file_if_exists(&path);
