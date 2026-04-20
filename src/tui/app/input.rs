@@ -1,4 +1,5 @@
 use super::*;
+use crate::i18n::tr;
 
 pub(super) fn poll_key_events(
     should_quit: &mut bool,
@@ -17,7 +18,7 @@ pub(super) fn poll_key_events(
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
         {
-            app.push_log(UiLevel::Warn, "Ctrl+C key event received");
+            app.push_log(UiLevel::Warn, tr("tui.signal.ctrl_c.key_event"));
             *should_quit = true;
             had_ui_change = true;
             continue;

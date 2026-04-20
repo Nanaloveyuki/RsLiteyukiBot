@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 mod app_config;
 mod command_registry;
 mod config_edit;
+mod i18n;
 mod llm;
 mod onebot_support;
 mod superuser;
@@ -32,6 +33,7 @@ use command_registry::{
     AdapterProtocol, BuiltinCommandId, CommandNameOverrides, CommandScope,
     command_argument_for_message, matches_builtin_command_message,
 };
+use i18n::{reload_catalog as reload_i18n_catalog, set_current_locale, tr, trf};
 use onebot_support::*;
 use superuser::SuperuserManager;
 
@@ -42,7 +44,8 @@ const LLM_CONFIG_PATHS: [&str; 2] = ["llm-config.yaml", "llm-config.toml"];
 const LLM_PROMPT_STORE_PATH: &str = "llm-prompts.json";
 const PASSWORD_CONFIG_PATH: &str = "password.yaml";
 const DEFAULT_LLM_PROVIDER_BASE_URL: &str = "https://api.openai.com";
-const BUILTIN_PLUGIN_DIR: &str = "src/builtin_plugin";
+const BUILTIN_PLUGIN_DIRS: [&str; 2] = ["builtin_plugin", "resources/builtin_plugin"];
+const DEV_BUILTIN_PLUGIN_DIRS: [&str; 1] = ["src/builtin_plugin"];
 
 static LLM_API_KEY_ROUND_ROBIN: AtomicU64 = AtomicU64::new(0);
 
@@ -252,16 +255,34 @@ fn parse_onebot_v11_api_response(payload: &Value) -> Option<(String, bool)> {
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(err) = ensure_default_config_files() {
-        eprintln!("failed to ensure default config files: {err}");
+        eprintln!(
+            "{}",
+            trf(
+                "startup.ensure_default_config_failed",
+                &[("err", err.to_string().as_str())],
+            )
+        );
     }
     if let Err(err) = ensure_default_llm_config_file() {
-        eprintln!("failed to ensure default llm config file: {err}");
+        eprintln!(
+            "{}",
+            trf(
+                "startup.ensure_default_llm_config_failed",
+                &[("err", err.as_str())],
+            )
+        );
     }
 
     let settings = match RuntimeSettings::try_load() {
         Ok(settings) => settings,
         Err(err) => {
-            eprintln!("failed to load runtime config from file/env, fallback to default: {err}");
+            eprintln!(
+                "{}",
+                trf(
+                    "startup.runtime_settings_fallback",
+                    &[("err", err.to_string().as_str())],
+                )
+            );
             RuntimeSettings::default()
         }
     };
@@ -281,17 +302,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let adapter_autostart = !adapter_configs.is_empty();
     let help_whitelist = Arc::new(RwLock::new(resolve_help_whitelist(&app_config)));
     let tui_config = resolve_tui_config(&app_config);
+    let locale = resolve_app_locale(&app_config);
     let llm_config = resolve_llm_config(&app_config);
     let disabled_commands = resolve_disabled_scope_commands(&app_config);
     let disabled_plugins = resolve_disabled_plugins(&app_config);
     let llm_runtime = LlmCommandRuntime::new(llm_config.command_prefix.clone());
     let external_gateway = ExternalGateway::new();
+    let plugin_dirs = resolve_builtin_plugin_dirs();
+    set_current_locale(locale);
+    for warning in reload_i18n_catalog(plugin_dirs.iter()) {
+        eprintln!("{warning}");
+    }
     let superuser_manager =
         match SuperuserManager::load_or_init(resolve_password_config_path().as_path()) {
             Ok(manager) => manager,
             Err(err) => {
                 eprintln!(
-                    "failed to load password config, fallback to in-memory superuser manager: {err}"
+                    "{}",
+                    trf(
+                        "startup.password_config_fallback",
+                        &[("err", err.to_string().as_str())],
+                    )
                 );
                 SuperuserManager::in_memory()
             }
@@ -306,33 +337,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if whitelist_size > 0 {
         let _ = ui_tx.send(tui::UiEvent::Log {
             level: tui::UiLevel::Info,
-            message: format!(
-                "external /help whitelist enabled (sessions={})",
-                whitelist_size
+            message: trf(
+                "startup.whitelist_enabled",
+                &[("count", whitelist_size.to_string().as_str())],
             ),
         });
     }
     let _ = ui_tx.send(tui::UiEvent::Log {
         level: tui::UiLevel::Info,
-        message: format!("LLM command prefix: {}", llm_runtime.command_prefix()),
+        message: trf(
+            "startup.llm_prefix",
+            &[("prefix", llm_runtime.command_prefix().as_str())],
+        ),
     });
     if superuser_manager.using_dynamic_password() {
         let _ = ui_tx.send(tui::UiEvent::Log {
             level: tui::UiLevel::Warn,
-            message: format!(
-                "SU dynamic password (this startup only): {}",
-                superuser_manager.active_password()
+            message: trf(
+                "startup.su_dynamic",
+                &[("password", superuser_manager.active_password().as_str())],
             ),
         });
     } else {
         let _ = ui_tx.send(tui::UiEvent::Log {
             level: tui::UiLevel::Info,
-            message: "SU fixed password loaded from password.yaml".to_string(),
+            message: tr("startup.su_fixed"),
         });
     }
     let _ = ui_tx.send(tui::UiEvent::Log {
         level: tui::UiLevel::Info,
-        message: "TUI defaults to SU mode; external sessions need /su <password>.".to_string(),
+        message: tr("startup.tui_su_default"),
     });
     let external_gateway_for_handler = external_gateway.clone();
 
@@ -341,7 +375,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_runtime_config(runtime_config)
         .with_adapter_configs(adapter_configs.clone())
         .with_adapter_autostart(adapter_autostart)
-        .with_plugin_dirs([PathBuf::from(BUILTIN_PLUGIN_DIR)])
+        .with_plugin_dirs(plugin_dirs.clone())
         .with_event_handler(move |event, _logger| {
             let ui_tx_for_handler = ui_tx_for_handler.clone();
             let external_gateway_for_handler = external_gateway_for_handler.clone();
@@ -364,7 +398,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .plugin_sdk()
         .sync_disabled_scope_commands(&disabled_commands)
     {
-        eprintln!("failed to apply persisted command policy at startup: {err}");
+        eprintln!(
+            "{}",
+            trf(
+                "startup.command_policy_sync_failed",
+                &[("err", err.to_string().as_str())],
+            )
+        );
     }
     bot.set_disabled_plugin_ids(disabled_plugins.clone());
 
@@ -384,7 +424,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bot.on_before_start_sync("tui-before-start", Default::default(), move |_context| {
         let _ = tx_before.send(tui::UiEvent::Log {
             level: tui::UiLevel::Info,
-            message: "runtime preparing...".to_string(),
+            message: tr("startup.runtime_preparing"),
         });
         Ok(())
     });
@@ -393,7 +433,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bot.on_after_start_sync("tui-after-start", Default::default(), move |_context| {
         let _ = tx_after.send(tui::UiEvent::Log {
             level: tui::UiLevel::Info,
-            message: "runtime started".to_string(),
+            message: tr("startup.runtime_started"),
         });
         Ok(())
     });
@@ -405,7 +445,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         move |_context, process_name| {
             let _ = tx_before_shutdown.send(tui::UiEvent::Log {
                 level: tui::UiLevel::Warn,
-                message: format!("shutting down process: {}", process_name),
+                message: trf(
+                    "startup.shutting_down_process",
+                    &[("process", process_name.as_ref())],
+                ),
             });
             Ok(())
         },
@@ -432,6 +475,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             adapter_autostart,
             tui_config,
             reload_handler: reload_from_config,
+            plugin_policy_handler: apply_plugin_policy,
             whitelist_persist_handler: persist_help_whitelist,
             disabled_commands_persist_handler: persist_disabled_commands_config,
             disabled_plugins_persist_handler: persist_disabled_plugins_config,
@@ -449,7 +493,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let shutdown_result = bot.shutdown().await;
     if let Err(err) = shutdown_result {
-        eprintln!("bot shutdown failed: {err}");
+        eprintln!(
+            "{}",
+            trf(
+                "startup.bot_shutdown_failed",
+                &[("err", err.to_string().as_str())]
+            )
+        );
     }
 
     tui_result?;
@@ -471,6 +521,60 @@ fn resolve_password_config_path() -> PathBuf {
         return PathBuf::from(path);
     }
     PathBuf::from(PASSWORD_CONFIG_PATH)
+}
+
+fn resolve_builtin_plugin_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Ok(raw) = std::env::var("LY_PLUGIN_DIRS") {
+        for path in std::env::split_paths(&raw) {
+            push_explicit_plugin_dir_candidates(&mut dirs, &mut seen, path.as_path());
+        }
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        push_runtime_plugin_dir_candidates(&mut dirs, &mut seen, current_dir.as_path(), true);
+    }
+
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(parent) = exe_path.parent()
+    {
+        push_runtime_plugin_dir_candidates(&mut dirs, &mut seen, parent, false);
+    }
+
+    dirs
+}
+
+fn push_explicit_plugin_dir_candidates(
+    dirs: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    path: &std::path::Path,
+) {
+    push_unique_plugin_path(dirs, seen, path.to_path_buf());
+    push_runtime_plugin_dir_candidates(dirs, seen, path, true);
+}
+
+fn push_runtime_plugin_dir_candidates(
+    dirs: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    root: &std::path::Path,
+    include_dev_fallback: bool,
+) {
+    for candidate in BUILTIN_PLUGIN_DIRS {
+        push_unique_plugin_path(dirs, seen, root.join(candidate));
+    }
+    if include_dev_fallback {
+        for candidate in DEV_BUILTIN_PLUGIN_DIRS {
+            push_unique_plugin_path(dirs, seen, root.join(candidate));
+        }
+    }
+}
+
+fn push_unique_plugin_path(dirs: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
+    if seen.insert(path.clone()) {
+        dirs.push(path);
+    }
 }
 
 fn ensure_default_llm_config_file() -> Result<(), String> {
@@ -505,8 +609,14 @@ fn load_app_config_with_llm_overlay() -> (AppConfigDoc, Vec<String>) {
             }
             Err(err) => {
                 warnings.push(format!(
-                    "failed to load llm config from {}: {err}",
-                    path.display()
+                    "{}",
+                    trf(
+                        "startup.llm_overlay_load_failed",
+                        &[
+                            ("path", path.display().to_string().as_str()),
+                            ("err", err.to_string().as_str()),
+                        ],
+                    )
                 ));
             }
         }
@@ -682,11 +792,11 @@ fn matches_external_ask_command(message: &str, llm_runtime: &LlmCommandRuntime) 
 }
 
 fn llm_usage_text(command_prefix: &str) -> String {
-    format!("用法: {command_prefix} 你的问题")
+    trf("main.ask.usage", &[("command", command_prefix)])
 }
 
 fn command_disabled_text(command_name: &str) -> String {
-    format!("命令 '{}' 当前已禁用。", command_name)
+    trf("main.command.disabled", &[("command", command_name)])
 }
 
 fn install_external_event_handlers(
@@ -772,7 +882,7 @@ fn install_external_event_handlers(
                         &gateway,
                         &ui_tx,
                         event.as_ref(),
-                        "当前会话未进入 SU 模式，请先发送 /su <password> 完成认证。",
+                        tr("main.auth.su_required").as_str(),
                         "su-required-help",
                     )
                     .await;
@@ -859,7 +969,7 @@ fn install_external_event_handlers(
                         &gateway,
                         &ui_tx,
                         event.as_ref(),
-                        "当前会话未进入 SU 模式，请先发送 /su <password> 完成认证。",
+                        tr("main.auth.su_required").as_str(),
                         "su-required-ask",
                     )
                     .await;
@@ -900,7 +1010,7 @@ async fn handle_external_su_command(
             gateway,
             ui_tx,
             event.as_ref(),
-            "出于安全考虑，OneBot 的 /su 仅允许私聊发送。",
+            tr("main.su.private_only").as_str(),
             "su-private-only",
         )
         .await;
@@ -912,7 +1022,7 @@ async fn handle_external_su_command(
             gateway,
             ui_tx,
             event.as_ref(),
-            "用法: /su <password>",
+            tr("main.su.usage").as_str(),
             "su-usage",
         )
         .await;
@@ -924,7 +1034,7 @@ async fn handle_external_su_command(
             gateway,
             ui_tx,
             event.as_ref(),
-            "SU 认证失败：密码错误。",
+            tr("main.su.denied").as_str(),
             "su-denied",
         )
         .await;
@@ -934,16 +1044,16 @@ async fn handle_external_su_command(
         .promote_user(event.as_ref())
         .map_err(|err| format!("failed to persist superuser: {err}"))?;
     let text = if promoted.added {
-        "SU 模式已启用，你已被加入 superuser 列表。"
+        tr("main.su.enabled.added")
     } else {
-        "SU 模式已启用。"
+        tr("main.su.enabled")
     };
     reply_external_text(
         adapter_manager,
         gateway,
         ui_tx,
         event.as_ref(),
-        text,
+        text.as_str(),
         "su-granted",
     )
     .await
@@ -1003,12 +1113,12 @@ async fn reply_ask_command(
         match generate_llm_reply(&prompt).await {
             Ok(output) => {
                 if output.trim().is_empty() {
-                    "LLM 返回空内容".to_string()
+                    tr("main.llm.empty")
                 } else {
                     output
                 }
             }
-            Err(err) => format!("LLM 调用失败: {err}"),
+            Err(err) => trf("main.llm.failed", &[("err", err.as_str())]),
         }
     };
 
@@ -1057,16 +1167,16 @@ async fn reply_external_text(
 async fn generate_llm_reply(prompt: &str) -> Result<String, String> {
     let llm_config = current_llm_runtime_config()?;
     if !llm_config.enabled {
-        return Err("LLM 当前未启用，请在 TUI 输入 /llm on openai".to_string());
+        return Err(tr("main.llm.disabled"));
     }
     if !llm_config.provider.eq_ignore_ascii_case("openai") {
-        return Err(format!(
-            "provider '{}' 暂未内建，仅支持 openai 兼容接口",
-            llm_config.provider
+        return Err(trf(
+            "main.llm.provider.unsupported",
+            &[("provider", llm_config.provider.as_str())],
         ));
     }
     let Some(api_key) = pick_next_api_key(&llm_config) else {
-        return Err("缺少 API Key，请在 TUI 输入 /llm apikey <key>".to_string());
+        return Err(tr("main.llm.api_key_missing"));
     };
     let prompt_profile = current_active_prompt_profile()?;
     let composed_prompt = compose_user_prompt(prompt, prompt_profile.soul.as_str());
@@ -1120,6 +1230,7 @@ fn reload_from_config(bot: &LiteyukiBot) -> tui::ReloadFuture<'_> {
         let adapters = load_adapter_configs(&app_config)
             .map_err(|err| format!("failed to load adapter configs: {err}"))?;
         let autostart = !adapters.is_empty();
+        let locale = resolve_app_locale(&app_config);
         bot.reload_adapters(adapters.clone(), autostart)
             .await
             .map_err(|err| format!("failed to apply adapter reload: {err}"))?;
@@ -1133,10 +1244,13 @@ fn reload_from_config(bot: &LiteyukiBot) -> tui::ReloadFuture<'_> {
         bot.reload_plugins(disabled_plugins.clone())
             .await
             .map_err(|err| format!("failed to apply plugin reload: {err}"))?;
+        set_current_locale(locale);
+        warnings.extend(reload_i18n_catalog(bot.plugin_dirs().iter()));
         Ok(tui::ReloadResult {
             adapters,
             adapter_autostart: autostart,
             tui_config,
+            locale,
             help_whitelist,
             llm_command_prefix,
             disabled_commands,
@@ -1146,15 +1260,39 @@ fn reload_from_config(bot: &LiteyukiBot) -> tui::ReloadFuture<'_> {
     })
 }
 
+fn apply_plugin_policy(
+    bot: &LiteyukiBot,
+    disabled_plugins: Vec<String>,
+) -> tui::PluginPolicyFuture<'_> {
+    Box::pin(async move {
+        bot.reload_plugins(disabled_plugins)
+            .await
+            .map_err(|err| format!("failed to apply plugin reload: {err}"))?;
+        let warnings = reload_i18n_catalog(bot.plugin_dirs().iter());
+        let disabled_count = bot.disabled_plugin_ids().len().to_string();
+        let mut message = tr("plugin.reload.success").replace("{count}", disabled_count.as_str());
+        if !warnings.is_empty() {
+            message.push_str(" | ");
+            message.push_str(warnings.join(" | ").as_str());
+        }
+        Ok(message)
+    })
+}
+
 fn persist_help_whitelist(entries: Vec<String>) -> Result<String, String> {
     let path = resolve_app_config_path().unwrap_or_else(|| PathBuf::from("config.yaml"));
     write_default_config_if_missing(path.as_path())
         .map_err(|err| format!("failed to ensure config exists: {err}"))?;
     config_edit::persist_onebot_v11_whitelist(path.as_path(), &entries)?;
     Ok(format!(
-        "whitelist persisted to {} (entries={})",
-        path.display(),
-        entries.len()
+        "{}",
+        trf(
+            "whitelist.persist.success",
+            &[
+                ("path", path.display().to_string().as_str()),
+                ("count", entries.len().to_string().as_str()),
+            ],
+        )
     ))
 }
 
@@ -1164,9 +1302,14 @@ fn persist_disabled_commands_config(entries: Vec<String>) -> Result<String, Stri
         .map_err(|err| format!("failed to ensure config exists: {err}"))?;
     config_edit::persist_disabled_commands(path.as_path(), &entries)?;
     Ok(format!(
-        "command policy persisted to {} (disabled={})",
-        path.display(),
-        entries.len()
+        "{}",
+        trf(
+            "command_policy.persist.success",
+            &[
+                ("path", path.display().to_string().as_str()),
+                ("count", entries.len().to_string().as_str()),
+            ],
+        )
     ))
 }
 
@@ -1176,9 +1319,14 @@ fn persist_disabled_plugins_config(entries: Vec<String>) -> Result<String, Strin
         .map_err(|err| format!("failed to ensure config exists: {err}"))?;
     config_edit::persist_disabled_plugins(path.as_path(), &entries)?;
     Ok(format!(
-        "plugin policy persisted to {} (disabled={})",
-        path.display(),
-        entries.len()
+        "{}",
+        trf(
+            "plugin_policy.persist.success",
+            &[
+                ("path", path.display().to_string().as_str()),
+                ("count", entries.len().to_string().as_str()),
+            ],
+        )
     ))
 }
 
@@ -1191,9 +1339,12 @@ fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFutu
                     ..Default::default()
                 };
                 let path = persist_llm_patch(&patch)?;
-                Ok(format!(
-                    "llm.model updated to '{model}' ({})",
-                    path.display()
+                Ok(trf(
+                    "llm.tui.model_updated",
+                    &[
+                        ("model", model.as_str()),
+                        ("path", path.display().to_string().as_str()),
+                    ],
                 ))
             }
             tui::LlmCommandRequest::AddApiKeys(new_keys) => {
@@ -1202,7 +1353,7 @@ fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFutu
                 merged.extend(new_keys);
                 merged = normalize_string_list(merged);
                 if merged.is_empty() {
-                    return Err("no valid api key provided".to_string());
+                    return Err(tr("llm.tui.no_valid_api_key"));
                 }
 
                 let patch = config_edit::LlmConfigPatch {
@@ -1210,10 +1361,12 @@ fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFutu
                     ..Default::default()
                 };
                 let path = persist_llm_patch(&patch)?;
-                Ok(format!(
-                    "llm.api_keys updated (count={}) ({})",
-                    merged.len(),
-                    path.display()
+                Ok(trf(
+                    "llm.tui.api_keys_updated",
+                    &[
+                        ("count", merged.len().to_string().as_str()),
+                        ("path", path.display().to_string().as_str()),
+                    ],
                 ))
             }
             tui::LlmCommandRequest::ProbeProvider(provider_override) => {
@@ -1228,9 +1381,9 @@ fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFutu
                 let doc = load_current_app_config_doc()?;
                 let mut provider_urls = extract_llm_provider_urls_from_doc(&doc);
                 if provider_urls.iter().any(|value| value == &provider_url) {
-                    return Ok(format!(
-                        "llm provider base-url already exists: {}",
-                        provider_url
+                    return Ok(trf(
+                        "llm.tui.provider_exists",
+                        &[("provider_url", provider_url.as_str())],
                     ));
                 }
 
@@ -1245,12 +1398,14 @@ fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFutu
                     ..Default::default()
                 };
                 let path = persist_llm_patch(&patch)?;
-                Ok(format!(
-                    "llm provider base-url added: {} (count={}, active={}) ({})",
-                    provider_url,
-                    provider_urls.len(),
-                    active_base_url,
-                    path.display()
+                Ok(trf(
+                    "llm.tui.provider_added",
+                    &[
+                        ("provider_url", provider_url.as_str()),
+                        ("count", provider_urls.len().to_string().as_str()),
+                        ("active_base_url", active_base_url.as_str()),
+                        ("path", path.display().to_string().as_str()),
+                    ],
                 ))
             }
             tui::LlmCommandRequest::RemoveProviderUrl(provider_url) => {
@@ -1276,12 +1431,14 @@ fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFutu
                     ..Default::default()
                 };
                 let path = persist_llm_patch(&patch)?;
-                Ok(format!(
-                    "llm provider base-url removed: {} (count={}, active={}) ({})",
-                    provider_url,
-                    provider_urls.len(),
-                    active_base_url,
-                    path.display()
+                Ok(trf(
+                    "llm.tui.provider_removed",
+                    &[
+                        ("provider_url", provider_url.as_str()),
+                        ("count", provider_urls.len().to_string().as_str()),
+                        ("active_base_url", active_base_url.as_str()),
+                        ("path", path.display().to_string().as_str()),
+                    ],
                 ))
             }
             tui::LlmCommandRequest::ListProviderUrls => {
@@ -1296,10 +1453,12 @@ fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFutu
                         .filter(|url| **url != llm_config.base_url)
                         .map(|url| format!("  {url}")),
                 );
-                Ok(format!(
-                    "llm provider base-url list ({})\n{}",
-                    path.display(),
-                    lines.join("\n")
+                Ok(trf(
+                    "llm.tui.provider_list",
+                    &[
+                        ("path", path.display().to_string().as_str()),
+                        ("lines", lines.join("\n").as_str()),
+                    ],
                 ))
             }
             tui::LlmCommandRequest::UseProviderUrl(provider_url) => {
@@ -1313,11 +1472,13 @@ fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFutu
                     ..Default::default()
                 };
                 let path = persist_llm_patch(&patch)?;
-                Ok(format!(
-                    "llm provider base-url switched: {} (count={}) ({})",
-                    provider_url,
-                    provider_urls.len(),
-                    path.display()
+                Ok(trf(
+                    "llm.tui.provider_switched",
+                    &[
+                        ("provider_url", provider_url.as_str()),
+                        ("count", provider_urls.len().to_string().as_str()),
+                        ("path", path.display().to_string().as_str()),
+                    ],
                 ))
             }
             tui::LlmCommandRequest::SetEnabled { enabled, provider } => {
@@ -1327,10 +1488,20 @@ fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFutu
                     ..Default::default()
                 };
                 let path = persist_llm_patch(&patch)?;
-                Ok(format!(
-                    "llm {} ({})",
-                    if enabled { "enabled" } else { "disabled" },
-                    path.display()
+                Ok(trf(
+                    "llm.tui.enabled_state",
+                    &[
+                        (
+                            "state",
+                            if enabled {
+                                tr("llm.tui.state.enabled")
+                            } else {
+                                tr("llm.tui.state.disabled")
+                            }
+                            .as_str(),
+                        ),
+                        ("path", path.display().to_string().as_str()),
+                    ],
                 ))
             }
             tui::LlmCommandRequest::PromptList => {
@@ -1351,40 +1522,48 @@ fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFutu
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                Ok(format!(
-                    "llm prompt profiles ({})\n{}",
-                    path.display(),
-                    lines
+                Ok(trf(
+                    "llm.tui.prompt_profiles",
+                    &[
+                        ("path", path.display().to_string().as_str()),
+                        ("lines", lines.as_str()),
+                    ],
                 ))
             }
             tui::LlmCommandRequest::PromptUse(name) => {
                 let mut store = load_llm_prompt_store()?;
                 store.set_active_profile(name.as_str())?;
                 let path = persist_llm_prompt_store(&store)?;
-                Ok(format!(
-                    "llm active prompt profile -> '{}' ({})",
-                    store.active_profile,
-                    path.display()
+                Ok(trf(
+                    "llm.tui.prompt_used",
+                    &[
+                        ("name", store.active_profile.as_str()),
+                        ("path", path.display().to_string().as_str()),
+                    ],
                 ))
             }
             tui::LlmCommandRequest::PromptSet { name, soul } => {
                 let mut store = load_llm_prompt_store()?;
                 store.upsert_profile(name.as_str(), soul.as_str())?;
                 let path = persist_llm_prompt_store(&store)?;
-                Ok(format!(
-                    "llm prompt profile '{}' updated ({})",
-                    name,
-                    path.display()
+                Ok(trf(
+                    "llm.tui.prompt_updated",
+                    &[
+                        ("name", name.as_str()),
+                        ("path", path.display().to_string().as_str()),
+                    ],
                 ))
             }
             tui::LlmCommandRequest::PromptRemove(name) => {
                 let mut store = load_llm_prompt_store()?;
                 store.remove_profile(name.as_str())?;
                 let path = persist_llm_prompt_store(&store)?;
-                Ok(format!(
-                    "llm prompt profile '{}' removed ({})",
-                    name,
-                    path.display()
+                Ok(trf(
+                    "llm.tui.prompt_removed",
+                    &[
+                        ("name", name.as_str()),
+                        ("path", path.display().to_string().as_str()),
+                    ],
                 ))
             }
             tui::LlmCommandRequest::PromptPreview { user_prompt } => {
@@ -1405,7 +1584,7 @@ fn handle_tui_ask_command(prompt: String) -> tui::AskFuture<'static> {
     Box::pin(async move {
         let output = generate_llm_reply(&prompt).await?;
         if output.trim().is_empty() {
-            Ok("LLM 返回空内容".to_string())
+            Ok(tr("main.llm.empty"))
         } else {
             Ok(output)
         }
@@ -1562,27 +1741,31 @@ fn ensure_registered_provider_url(
     provider_urls: &[String],
 ) -> Result<(), String> {
     if provider_urls.is_empty() {
-        return Err(
-            "no provider base-url configured, run /llm provider add <base-url>".to_string(),
-        );
+        return Err(tr("llm.tui.provider_none_configured"));
     }
     if provider_urls.iter().all(|value| value != provider_url) {
-        return Err(format!("llm provider base-url not found: {}", provider_url));
+        return Err(trf(
+            "llm.tui.provider_not_found",
+            &[("provider_url", provider_url)],
+        ));
     }
     Ok(())
 }
 
 async fn probe_llm_configuration(llm_config: &LlmRuntimeConfig) -> Result<String, String> {
     if !llm_config.provider.eq_ignore_ascii_case("openai") {
-        return Err(format!(
-            "provider '{}' 暂未内建，仅支持 openai 兼容接口",
-            llm_config.provider
+        return Err(trf(
+            "main.llm.provider.unsupported",
+            &[("provider", llm_config.provider.as_str())],
         ));
     }
     let Some(api_key) = llm_config.api_keys.first() else {
-        return Ok(format!(
-            "llm probe skipped remote request: provider={} base_url={} (no api key configured)",
-            llm_config.provider, llm_config.base_url
+        return Ok(trf(
+            "llm.tui.probe_skipped",
+            &[
+                ("provider", llm_config.provider.as_str()),
+                ("base_url", llm_config.base_url.as_str()),
+            ],
         ));
     };
 
@@ -1593,27 +1776,36 @@ async fn probe_llm_configuration(llm_config: &LlmRuntimeConfig) -> Result<String
         .await
         .map_err(|err| err.to_string())?;
     let preview = truncate_text_for_log(output.trim(), 80);
-    Ok(format!(
-        "llm probe success: provider={} model={} output={}",
-        llm_config.provider, llm_config.model, preview
+    Ok(trf(
+        "llm.tui.probe_success",
+        &[
+            ("provider", llm_config.provider.as_str()),
+            ("model", llm_config.model.as_str()),
+            ("output", preview.as_str()),
+        ],
     ))
 }
 
 fn format_prompt_preview(profile_name: &str, preview: &LlmPromptPreview) -> String {
     let system_prompt = if preview.system_prompt.trim().is_empty() {
-        "<empty>".to_string()
+        tr("llm.tui.empty_value")
     } else {
         preview.system_prompt.clone()
     };
     let composed_user_prompt = if preview.composed_user_prompt.trim().is_empty() {
-        "<empty>".to_string()
+        tr("llm.tui.empty_value")
     } else {
         preview.composed_user_prompt.clone()
     };
 
-    format!(
-        "active profile: {profile_name}\nsystem prompt:\n{system_prompt}\n\ncomposed user prompt:\n{composed_user_prompt}\n\ncombined prompt preview:\n{}",
-        preview.combined_prompt
+    trf(
+        "llm.tui.prompt_preview",
+        &[
+            ("profile", profile_name),
+            ("system_prompt", system_prompt.as_str()),
+            ("composed_user_prompt", composed_user_prompt.as_str()),
+            ("combined_prompt", preview.combined_prompt.as_str()),
+        ],
     )
 }
 
@@ -1759,5 +1951,30 @@ mod tests {
             llm_usage_text(llm_runtime.command_prefix().as_str()),
             "用法: /qa 你的问题"
         );
+    }
+
+    #[test]
+    fn builtin_plugin_candidates_cover_runtime_and_dev_layouts() {
+        let mut dirs = Vec::new();
+        let mut seen = HashSet::new();
+        let root = PathBuf::from("C:/liteyuki");
+        push_runtime_plugin_dir_candidates(&mut dirs, &mut seen, root.as_path(), true);
+
+        assert!(dirs.contains(&root.join("builtin_plugin")));
+        assert!(dirs.contains(&root.join("resources").join("builtin_plugin")));
+        assert!(dirs.contains(&root.join("src").join("builtin_plugin")));
+    }
+
+    #[test]
+    fn explicit_plugin_paths_support_directories_and_install_roots() {
+        let mut dirs = Vec::new();
+        let mut seen = HashSet::new();
+        let root = PathBuf::from("C:/liteyuki");
+        push_explicit_plugin_dir_candidates(&mut dirs, &mut seen, root.as_path());
+
+        assert!(dirs.contains(&root));
+        assert!(dirs.contains(&root.join("builtin_plugin")));
+        assert!(dirs.contains(&root.join("resources").join("builtin_plugin")));
+        assert!(dirs.contains(&root.join("src").join("builtin_plugin")));
     }
 }

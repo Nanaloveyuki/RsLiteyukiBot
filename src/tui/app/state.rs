@@ -1,4 +1,5 @@
 use super::*;
+use crate::i18n::{set_current_locale, tr, trf};
 
 impl AppState {
     pub(super) fn new(
@@ -149,10 +150,7 @@ impl AppState {
             }
         }
         if whitelist_sync_failed {
-            self.push_log(
-                UiLevel::Error,
-                "failed to sync whitelist from reloaded config",
-            );
+            self.push_log(UiLevel::Error, tr("reload.sync.whitelist_failed"));
         }
 
         let mut llm_command_prefix_sync_failed = false;
@@ -167,10 +165,7 @@ impl AppState {
             }
         }
         if llm_command_prefix_sync_failed {
-            self.push_log(
-                UiLevel::Error,
-                "failed to sync external llm command prefix from reloaded config",
-            );
+            self.push_log(UiLevel::Error, tr("reload.sync.llm_prefix_failed"));
         }
 
         let mut disabled_commands_sync_failed = None;
@@ -182,44 +177,61 @@ impl AppState {
         if let Some(err) = disabled_commands_sync_failed {
             self.push_log(
                 UiLevel::Error,
-                format!("failed to sync command policy from reloaded config: {err}"),
+                trf(
+                    "reload.sync.command_policy_failed",
+                    &[("err", err.as_str())],
+                ),
             );
         }
+        set_current_locale(result.locale);
         self.sync_disabled_plugins(&result.disabled_plugins);
 
         self.push_log(
             UiLevel::Info,
-            format!(
-                "reload applied: adapters={} autostart={} resume_max_sessions={} resume_max_size={} MiB",
-                self.adapters.len(),
-                result.adapter_autostart,
-                self.resume_max_sessions,
-                bytes_to_mib(self.resume_max_size_bytes),
+            trf(
+                "reload.applied.summary",
+                &[
+                    ("adapters", self.adapters.len().to_string().as_str()),
+                    ("autostart", result.adapter_autostart.to_string().as_str()),
+                    (
+                        "resume_max_sessions",
+                        self.resume_max_sessions.to_string().as_str(),
+                    ),
+                    (
+                        "resume_max_size_mib",
+                        bytes_to_mib(self.resume_max_size_bytes)
+                            .to_string()
+                            .as_str(),
+                    ),
+                ],
             ),
         );
         self.push_log(
             UiLevel::Info,
-            format!(
-                "reload applied external LLM command prefix: {}",
-                result.llm_command_prefix
+            trf(
+                "reload.applied.llm_prefix",
+                &[("prefix", result.llm_command_prefix.as_str())],
             ),
         );
         self.push_log(
             UiLevel::Info,
-            format!(
-                "reload applied disabled command entries: {}",
-                result.disabled_commands.len()
+            trf(
+                "reload.applied.disabled_commands",
+                &[("count", result.disabled_commands.len().to_string().as_str())],
             ),
         );
         self.push_log(
             UiLevel::Info,
-            format!(
-                "reload applied disabled plugin entries: {}",
-                result.disabled_plugins.len()
+            trf(
+                "reload.applied.disabled_plugins",
+                &[("count", result.disabled_plugins.len().to_string().as_str())],
             ),
         );
         for warning in result.warnings {
-            self.push_log(UiLevel::Warn, format!("reload notice: {warning}"));
+            self.push_log(
+                UiLevel::Warn,
+                trf("reload.notice", &[("warning", warning.as_str())]),
+            );
         }
     }
 
@@ -293,14 +305,19 @@ impl AppState {
             if running {
                 self.push_log(
                     UiLevel::Info,
-                    format!(
-                        "adapter '{}' connected ({})",
-                        id,
-                        adapter_transport_label(transport)
+                    trf(
+                        "adapter.connected",
+                        &[
+                            ("adapter", id.as_str()),
+                            ("transport", adapter_transport_label(transport)),
+                        ],
                     ),
                 );
             } else {
-                self.push_log(UiLevel::Warn, format!("adapter '{}' disconnected", id));
+                self.push_log(
+                    UiLevel::Warn,
+                    trf("adapter.disconnected", &[("adapter", id.as_str())]),
+                );
             }
         }
         has_state_change
@@ -326,8 +343,17 @@ impl AppState {
         self.sync_active_resume_snapshot();
         if let Err(err) = self.resume_store.save(&self.resume_store_path) {
             let message = format!(
-                "failed to persist resume store to {}: {err}",
-                self.resume_store_path.display()
+                "{}",
+                trf(
+                    "resume.persist.failed",
+                    &[
+                        (
+                            "path",
+                            self.resume_store_path.display().to_string().as_str()
+                        ),
+                        ("err", err.to_string().as_str()),
+                    ],
+                )
             );
             if self.last_resume_save_error.as_deref() != Some(message.as_str()) {
                 self.push_log(UiLevel::Error, message.clone());

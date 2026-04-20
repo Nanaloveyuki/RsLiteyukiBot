@@ -1,3 +1,5 @@
+use crate::i18n::tr;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum AdapterProtocol {
     OneBot11,
@@ -62,8 +64,8 @@ const SCOPE_TUI_ONEBOT: [CommandScope; 2] = [
 const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     BuiltinCommandSpec {
         id: BuiltinCommandId::Help,
-        summary: "显示当前作用域可用命令",
-        detail: "显示当前作用域可用命令",
+        summary: "command.spec.help.summary",
+        detail: "command.spec.help.detail",
         usage_hint: None,
         accepts_arguments: false,
         completion_trailing_space: false,
@@ -74,8 +76,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Reload,
-        summary: "重新加载配置与适配器状态",
-        detail: "重新加载配置与适配器状态",
+        summary: "command.spec.reload.summary",
+        detail: "command.spec.reload.detail",
         usage_hint: None,
         accepts_arguments: false,
         completion_trailing_space: false,
@@ -86,8 +88,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Log,
-        summary: "切换日志控制台视图",
-        detail: "切换日志控制台视图",
+        summary: "command.spec.log.summary",
+        detail: "command.spec.log.detail",
         usage_hint: Some("[on|off]"),
         accepts_arguments: false,
         completion_trailing_space: false,
@@ -98,8 +100,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Clear,
-        summary: "清空当前日志窗口",
-        detail: "清空当前日志窗口",
+        summary: "command.spec.clear.summary",
+        detail: "command.spec.clear.detail",
         usage_hint: None,
         accepts_arguments: false,
         completion_trailing_space: false,
@@ -110,8 +112,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Adapters,
-        summary: "列出适配器连接状态与端点",
-        detail: "列出适配器连接状态与端点",
+        summary: "command.spec.adapters.summary",
+        detail: "command.spec.adapters.detail",
         usage_hint: None,
         accepts_arguments: false,
         completion_trailing_space: false,
@@ -122,8 +124,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Commands,
-        summary: "按 scope 查看或管理 builtin/plugin 命令",
-        detail: "按 scope 查看命令清单，或通过 enable/disable 管理命令启用状态",
+        summary: "command.spec.commands.summary",
+        detail: "command.spec.commands.detail",
         usage_hint: Some("[scope] | enable <scope> <name> | disable <scope> <name>"),
         accepts_arguments: false,
         completion_trailing_space: true,
@@ -134,8 +136,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Plugins,
-        summary: "查看或管理插件启用状态",
-        detail: "列出插件目录中的插件，并通过 enable/disable 开关插件后自动 reload",
+        summary: "command.spec.plugins.summary",
+        detail: "command.spec.plugins.detail",
         usage_hint: Some("[list] | enable <plugin-id> | disable <plugin-id>"),
         accepts_arguments: false,
         completion_trailing_space: true,
@@ -146,8 +148,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Ask,
-        summary: "请求 LLM 生成回复",
-        detail: "后台请求 LLM，不阻塞终端刷新",
+        summary: "command.spec.ask.summary",
+        detail: "command.spec.ask.detail",
         usage_hint: Some("<prompt>"),
         accepts_arguments: true,
         completion_trailing_space: true,
@@ -158,8 +160,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Resumes,
-        summary: "查看历史会话快照",
-        detail: "查看历史会话快照",
+        summary: "command.spec.resumes.summary",
+        detail: "command.spec.resumes.detail",
         usage_hint: None,
         accepts_arguments: false,
         completion_trailing_space: false,
@@ -170,8 +172,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::History,
-        summary: "查看历史会话快照",
-        detail: "查看历史会话快照",
+        summary: "command.spec.history.summary",
+        detail: "command.spec.history.detail",
         usage_hint: None,
         accepts_arguments: false,
         completion_trailing_space: false,
@@ -182,8 +184,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Resume,
-        summary: "切换到指定历史会话",
-        detail: "切换到指定历史会话",
+        summary: "command.spec.resume.summary",
+        detail: "command.spec.resume.detail",
         usage_hint: Some("<uid>"),
         accepts_arguments: true,
         completion_trailing_space: true,
@@ -194,8 +196,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Llm,
-        summary: "管理模型、Key、provider 与 prompt profile",
-        detail: "管理模型、Key、provider 与 prompt profile",
+        summary: "command.spec.llm.summary",
+        detail: "command.spec.llm.detail",
         usage_hint: Some("..."),
         accepts_arguments: false,
         completion_trailing_space: true,
@@ -206,8 +208,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Whitelist,
-        summary: "管理 external /help 白名单",
-        detail: "管理 external /help 白名单",
+        summary: "command.spec.whitelist.summary",
+        detail: "command.spec.whitelist.detail",
         usage_hint: Some("..."),
         accepts_arguments: false,
         completion_trailing_space: true,
@@ -218,8 +220,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Quit,
-        summary: "安全退出程序",
-        detail: "安全退出程序",
+        summary: "command.spec.quit.summary",
+        detail: "command.spec.quit.detail",
         usage_hint: None,
         accepts_arguments: false,
         completion_trailing_space: false,
@@ -230,8 +232,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Exit,
-        summary: "安全退出程序",
-        detail: "安全退出程序",
+        summary: "command.spec.exit.summary",
+        detail: "command.spec.exit.detail",
         usage_hint: None,
         accepts_arguments: false,
         completion_trailing_space: false,
@@ -242,8 +244,8 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     },
     BuiltinCommandSpec {
         id: BuiltinCommandId::Su,
-        summary: "认证当前会话为 superuser",
-        detail: "认证当前会话为 superuser",
+        summary: "command.spec.su.summary",
+        detail: "command.spec.su.detail",
         usage_hint: Some("<password>"),
         accepts_arguments: true,
         completion_trailing_space: false,
@@ -370,7 +372,11 @@ pub(crate) fn command_help_text_for_name(
 ) -> Option<String> {
     let command = find_builtin_command_by_name(name, scope, overrides)?;
     let label = command_usage_label(command, scope, overrides)?;
-    Some(format!("命令说明: {label} {}", command.detail))
+    Some(format!(
+        "{} {label} {}",
+        tr("command.help.prefix"),
+        tr(command.detail)
+    ))
 }
 
 pub(crate) fn normalize_builtin_command_name_for_scope(
@@ -390,7 +396,8 @@ pub(crate) fn render_builtin_help_lines_filtered<F>(
 where
     F: FnMut(&BuiltinCommandSpec, &str) -> bool,
 {
-    let mut lines = vec![format!("可用命令 ({}):", scope_label(scope))];
+    let scope_label = scope_label(scope);
+    let mut lines = vec![tr("help.available_commands").replace("{scope}", scope_label.as_str())];
     for command in builtin_commands_for_scope(scope) {
         let Some(label) = command_usage_label(command, scope, overrides) else {
             continue;
@@ -401,24 +408,19 @@ where
         if !include_command(command, name.as_str()) {
             continue;
         }
-        lines.push(format!("{label} - {}", command.summary));
+        lines.push(format!("{label} - {}", tr(command.summary)));
     }
 
     match scope {
         CommandScope::Tui => {
-            lines.push(
-                "快捷键: Up/Down history, Tab cycle-complete, PgUp/PgDn/Home/End scroll logs"
-                    .to_string(),
-            );
-            lines.push("日志视图: 空输入 + Up/Down 按行滚动日志".to_string());
-            lines.push(
-                "说明: adapter 外部命令会按 scope 过滤，例如 /su 不会出现在 TUI 中".to_string(),
-            );
+            lines.push(tr("help.tui.shortcuts").to_string());
+            lines.push(tr("help.tui.log_view").to_string());
+            lines.push(tr("help.tui.scope_note").to_string());
         }
         CommandScope::Adapter(AdapterProtocol::OneBot11) => {
-            lines.push("说明: /reload /log 等控制台管理命令仅在 TUI 可用".to_string());
-            lines.push("说明: 外部 /help 与外部 LLM 命令需先通过 /su 完成认证".to_string());
-            lines.push("说明: OneBot 的 /su 仅允许私聊发送".to_string());
+            lines.push(tr("help.onebot.tui_only").to_string());
+            lines.push(tr("help.onebot.auth_required").to_string());
+            lines.push(tr("help.onebot.su_private_only").to_string());
         }
         CommandScope::All => {}
     }
@@ -527,8 +529,12 @@ pub(crate) fn command_scope_label(scope: CommandScope) -> &'static str {
     }
 }
 
-fn scope_label(scope: CommandScope) -> &'static str {
-    command_scope_label(scope)
+fn scope_label(scope: CommandScope) -> String {
+    match scope {
+        CommandScope::All => tr("help.scope.all"),
+        CommandScope::Tui => tr("help.scope.tui"),
+        CommandScope::Adapter(AdapterProtocol::OneBot11) => tr("help.scope.adapter.onebot11"),
+    }
 }
 
 #[cfg(test)]

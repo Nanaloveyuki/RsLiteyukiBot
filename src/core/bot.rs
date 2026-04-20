@@ -329,6 +329,10 @@ impl LiteyukiBot {
         &self.plugin_manager
     }
 
+    pub fn plugin_dirs(&self) -> &[PathBuf] {
+        self.plugin_dirs.as_slice()
+    }
+
     pub fn plugin_sdk(&self) -> &PluginSdk {
         &self.plugin_sdk
     }

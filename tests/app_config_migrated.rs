@@ -5,6 +5,9 @@ mod app_config;
 #[path = "../src/command_registry.rs"]
 mod command_registry;
 #[allow(dead_code, unused_imports)]
+#[path = "../src/i18n.rs"]
+mod i18n;
+#[allow(dead_code, unused_imports)]
 #[path = "../src/llm/mod.rs"]
 mod llm;
 #[allow(dead_code, unused_imports)]
@@ -61,6 +64,7 @@ fn validate_app_config_reports_invalid_values() {
                     max_size_mib: Some(0),
                 }),
             }),
+            i18n: None,
             commands: None,
             plugins: None,
         }),
@@ -69,6 +73,7 @@ fn validate_app_config_reports_invalid_values() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: None,
         commands: None,
         plugins: None,
@@ -95,6 +100,7 @@ fn runtime_reload_warnings_detect_low_level_runtime_fields() {
             log: None,
             adapters: None,
             tui: None,
+            i18n: None,
             commands: None,
             plugins: None,
         }),
@@ -103,6 +109,7 @@ fn runtime_reload_warnings_detect_low_level_runtime_fields() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: None,
         commands: None,
         plugins: None,
@@ -136,6 +143,7 @@ fn runtime_reload_warnings_skip_when_sensitive_fields_unchanged() {
             }),
             adapters: None,
             tui: None,
+            i18n: None,
             commands: None,
             plugins: None,
         }),
@@ -144,6 +152,7 @@ fn runtime_reload_warnings_skip_when_sensitive_fields_unchanged() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: None,
         commands: None,
         plugins: None,
@@ -186,6 +195,7 @@ fn connect_websocket_both_mode_generates_forward_and_reverse_adapters() {
             sse: None,
         }),
         tui: None,
+        i18n: None,
         llm: None,
         commands: None,
         plugins: None,
@@ -236,6 +246,7 @@ fn connect_websocket_port_without_mode_defaults_to_reverse() {
             sse: None,
         }),
         tui: None,
+        i18n: None,
         llm: None,
         commands: None,
         plugins: None,
@@ -283,6 +294,7 @@ fn connect_websocket_urls_expand_to_multiple_adapters() {
             sse: None,
         }),
         tui: None,
+        i18n: None,
         llm: None,
         commands: None,
         plugins: None,
@@ -328,6 +340,7 @@ fn connect_http_urls_expand_to_multiple_adapters() {
             sse: None,
         }),
         tui: None,
+        i18n: None,
         llm: None,
         commands: None,
         plugins: None,
@@ -368,6 +381,7 @@ fn resolve_help_whitelist_accepts_numeric_and_prefixed_entries() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: None,
         commands: None,
         plugins: None,
@@ -395,6 +409,7 @@ fn validate_app_config_warns_empty_onebot_whitelist_entry() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: None,
         commands: None,
         plugins: None,
@@ -418,6 +433,7 @@ fn resolve_disabled_scope_commands_normalizes_and_deduplicates_entries() {
             log: None,
             adapters: None,
             tui: None,
+            i18n: None,
             commands: Some(CommandConfigSection {
                 disabled: vec![
                     " onebot11 liteecho ".to_string(),
@@ -433,6 +449,7 @@ fn resolve_disabled_scope_commands_normalizes_and_deduplicates_entries() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: None,
         commands: None,
         plugins: None,
@@ -458,6 +475,7 @@ fn validate_app_config_warns_invalid_disabled_command_entry() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: None,
         commands: Some(CommandConfigSection {
             disabled: vec!["adapter:discord ping".to_string()],
@@ -483,6 +501,7 @@ fn resolve_disabled_plugins_normalizes_and_deduplicates_entries() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: None,
         commands: None,
         plugins: Some(PluginConfigSection {
@@ -512,6 +531,7 @@ fn validate_app_config_warns_invalid_disabled_plugin_entry() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: None,
         commands: None,
         plugins: Some(PluginConfigSection {
@@ -537,6 +557,7 @@ fn resolve_llm_config_reads_values_from_config() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: Some(LlmConfigSection {
             enabled: Some(true),
             provider: Some("openai".to_string()),
@@ -575,6 +596,7 @@ fn resolve_llm_config_falls_back_to_provider_urls_when_base_url_missing() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: Some(LlmConfigSection {
             enabled: Some(true),
             provider: Some("openai".to_string()),
@@ -608,6 +630,7 @@ fn validate_app_config_warns_when_llm_is_enabled_without_api_key() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: Some(LlmConfigSection {
             enabled: Some(true),
             provider: Some("not-built-in".to_string()),
@@ -653,6 +676,7 @@ fn validate_app_config_warns_llm_base_url_in_main_config() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: Some(LlmConfigSection {
             enabled: Some(true),
             provider: Some("openai".to_string()),

@@ -5,6 +5,7 @@ use std::sync::{LazyLock, Mutex};
 use liteyukibot_core::AdapterConfig;
 use serde::Deserialize;
 
+use crate::i18n::{AppLocale, tr, trf, trf_for};
 use crate::llm;
 use crate::tui;
 
@@ -26,6 +27,14 @@ const DEFAULT_LLM_MODEL: &str = "gpt-4.1-mini";
 const DEFAULT_LLM_TIMEOUT_SECONDS: u64 = 20;
 const DEFAULT_LLM_COMMAND_PREFIX: &str = "/ask";
 
+fn localized_doc_text(doc: &AppConfigDoc, key: &str) -> String {
+    trf_for(resolve_app_locale(doc), key, &[])
+}
+
+fn localized_doc_textf(doc: &AppConfigDoc, key: &str, args: &[(&str, &str)]) -> String {
+    trf_for(resolve_app_locale(doc), key, args)
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub(crate) struct AppConfigDoc {
     #[serde(default, rename = "core")]
@@ -40,6 +49,8 @@ pub(crate) struct AppConfigDoc {
     pub(crate) connect: Option<ConnectConfigSection>,
     #[serde(default)]
     pub(crate) tui: Option<TuiConfigSection>,
+    #[serde(default)]
+    pub(crate) i18n: Option<I18nConfigSection>,
     #[serde(default)]
     pub(crate) llm: Option<LlmConfigSection>,
     #[serde(default)]
@@ -96,6 +107,8 @@ pub(crate) struct AppRustSection {
     pub(crate) adapters: Option<Vec<AdapterConfig>>,
     #[serde(default)]
     pub(crate) tui: Option<TuiConfigSection>,
+    #[serde(default)]
+    pub(crate) i18n: Option<I18nConfigSection>,
     #[serde(default)]
     pub(crate) commands: Option<CommandConfigSection>,
     #[serde(default)]
@@ -287,6 +300,12 @@ pub(crate) struct TuiResumeSection {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct I18nConfigSection {
+    #[serde(default)]
+    pub(crate) locale: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
 pub(crate) struct LlmConfigSection {
     #[serde(default)]
     pub(crate) enabled: Option<bool>,
@@ -370,13 +389,29 @@ pub(crate) fn load_app_config_with_warnings(emit_stderr: bool) -> (AppConfigDoc,
             let warnings = validate_app_config(&doc);
             if emit_stderr {
                 for warning in &warnings {
-                    eprintln!("config warning ({}): {warning}", path.display());
+                    eprintln!(
+                        "{}",
+                        localized_doc_textf(
+                            &doc,
+                            "config.stderr.warning",
+                            &[
+                                ("source", path.display().to_string().as_str()),
+                                ("warning", warning.as_str()),
+                            ],
+                        )
+                    );
                 }
             }
             (doc, warnings)
         }
         Err(err) => {
-            let message = format!("failed to load app config from {}: {err}", path.display());
+            let message = trf(
+                "config.stderr.load_failed",
+                &[
+                    ("path", path.display().to_string().as_str()),
+                    ("err", err.to_string().as_str()),
+                ],
+            );
             if emit_stderr {
                 eprintln!("{message}");
             }
@@ -421,7 +456,13 @@ pub(crate) fn write_default_config_if_missing(
 
     let template = default_config_template(path);
     std::fs::write(path, template)?;
-    eprintln!("created default config file: {}", path.display());
+    eprintln!(
+        "{}",
+        trf(
+            "config.stderr.created_default",
+            &[("path", path.display().to_string().as_str())],
+        )
+    );
     Ok(())
 }
 
@@ -455,6 +496,10 @@ const DEFAULT_YAML_CONFIG_TEMPLATE: &str = r#"core:
       store_path: ./.liteyuki-tui-resumes.json
       max_sessions: 64
       max_size_mib: 16
+
+i18n:
+  # "zh-CN" | "en-US"
+  locale: "zh-CN"
 
 connect:
   websocket:
@@ -553,6 +598,10 @@ store_path = "./.liteyuki-tui-resumes.json"
 max_sessions = 64
 max_size_mib = 16
 
+[i18n]
+# locale = "zh-CN" # or "en-US"
+locale = "zh-CN"
+
 [connect.websocket]
 enabled = true
 mode = "reverse" # forward | reverse | both
@@ -644,6 +693,13 @@ fn config_tui_resume(doc: &AppConfigDoc) -> Option<&TuiResumeSection> {
         .and_then(|section| section.tui.as_ref())
         .and_then(|tui| tui.resume.as_ref())
         .or(doc.tui.as_ref().and_then(|tui| tui.resume.as_ref()))
+}
+
+fn config_i18n(doc: &AppConfigDoc) -> Option<&I18nConfigSection> {
+    doc.rust
+        .as_ref()
+        .and_then(|section| section.i18n.as_ref())
+        .or(doc.i18n.as_ref())
 }
 
 fn config_llm(doc: &AppConfigDoc) -> Option<&LlmConfigSection> {
@@ -844,6 +900,21 @@ pub(crate) fn resolve_tui_config(app_config: &AppConfigDoc) -> tui::TuiConfig {
     }
 
     config
+}
+
+pub(crate) fn resolve_app_locale(app_config: &AppConfigDoc) -> AppLocale {
+    let mut locale = config_i18n(app_config)
+        .and_then(|section| section.locale.as_deref())
+        .and_then(AppLocale::parse)
+        .unwrap_or_default();
+
+    if let Ok(raw) = std::env::var("LY_LOCALE")
+        && let Some(parsed) = AppLocale::parse(raw.as_str())
+    {
+        locale = parsed;
+    }
+
+    locale
 }
 
 pub(crate) fn resolve_llm_config(app_config: &AppConfigDoc) -> LlmRuntimeConfig {
@@ -1293,15 +1364,25 @@ pub(crate) fn sanitize_adapter_configs(
     for config in configs {
         if let Err(err) = config.validate() {
             eprintln!(
-                "config warning ({}): skip invalid adapter '{}': {}",
-                source, config.id, err
+                "{}",
+                trf(
+                    "config.stderr.skip_invalid_adapter",
+                    &[
+                        ("source", source),
+                        ("adapter", config.id.as_str()),
+                        ("err", err.as_str()),
+                    ],
+                )
             );
             continue;
         }
         if !seen.insert(config.id.clone()) {
             eprintln!(
-                "config warning ({}): skip duplicated adapter id '{}'",
-                source, config.id
+                "{}",
+                trf(
+                    "config.stderr.skip_duplicate_adapter",
+                    &[("source", source), ("adapter", config.id.as_str())],
+                )
             );
             continue;
         }
@@ -1311,15 +1392,24 @@ pub(crate) fn sanitize_adapter_configs(
 }
 
 pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
+    let locale = resolve_app_locale(doc);
     let mut warnings = Vec::new();
     if let Some(adapters) = config_adapters(doc) {
         let mut seen = HashSet::new();
         for adapter in adapters {
             if let Err(err) = adapter.validate() {
-                warnings.push(format!("invalid adapter '{}': {}", adapter.id, err));
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.invalid_adapter",
+                    &[("adapter", adapter.id.as_str()), ("err", err.as_str())],
+                ));
             }
             if !seen.insert(adapter.id.clone()) {
-                warnings.push(format!("duplicated adapter id '{}'", adapter.id));
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.duplicate_adapter",
+                    &[("adapter", adapter.id.as_str())],
+                ));
             }
         }
     }
@@ -1328,30 +1418,65 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
         if let Some(path) = resume.store_path.as_deref()
             && path.trim().is_empty()
         {
-            warnings.push("tui.resume.store_path should not be empty".to_string());
+            warnings.push(trf_for(
+                locale,
+                "config.warn.should_not_be_empty",
+                &[("field", "tui.resume.store_path")],
+            ));
         }
         if let Some(max_sessions) = resume.max_sessions
             && max_sessions == 0
         {
-            warnings.push("tui.resume.max_sessions should be > 0".to_string());
+            warnings.push(trf_for(
+                locale,
+                "config.warn.should_be_positive",
+                &[("field", "tui.resume.max_sessions")],
+            ));
         }
         if let Some(max_size_mib) = resume.max_size_mib
             && max_size_mib == 0
         {
-            warnings.push("tui.resume.max_size_mib should be > 0".to_string());
+            warnings.push(trf_for(
+                locale,
+                "config.warn.should_be_positive",
+                &[("field", "tui.resume.max_size_mib")],
+            ));
         }
+    }
+
+    if let Some(i18n) = config_i18n(doc)
+        && let Some(locale) = i18n.locale.as_deref()
+        && AppLocale::parse(locale).is_none()
+    {
+        warnings.push(trf_for(
+            resolve_app_locale(doc),
+            "config.warn.locale_supported",
+            &[("field", "i18n.locale"), ("choices", "zh-CN|en-US")],
+        ));
     }
 
     if let Some(connect) = config_connect(doc) {
         if let Some(ws) = &connect.websocket {
             if ws.max_payload_size.is_some_and(|value| value == 0) {
-                warnings.push("connect.websocket.max_payload_size should be > 0".to_string());
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.should_be_positive",
+                    &[("field", "connect.websocket.max_payload_size")],
+                ));
             }
             if ws.max_connections.is_some_and(|value| value == 0) {
-                warnings.push("connect.websocket.max_connections should be > 0".to_string());
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.should_be_positive",
+                    &[("field", "connect.websocket.max_connections")],
+                ));
             }
             if has_empty_item(ws.urls.as_ref()) {
-                warnings.push("connect.websocket.urls should not contain empty values".to_string());
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.empty_values",
+                    &[("field", "connect.websocket.urls")],
+                ));
             }
             if ws.enabled.unwrap_or(false) {
                 let has_nested = ws.forward.is_some() || ws.reverse.is_some();
@@ -1360,17 +1485,19 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
                     && !has_non_empty_list(ws.urls.as_ref())
                     && ws.port.is_none()
                 {
-                    warnings.push(
-                        "connect.websocket enabled but neither url nor port is set".to_string(),
-                    );
+                    warnings.push(localized_doc_text(
+                        doc,
+                        "config.warn.websocket_missing_url_or_port",
+                    ));
                 }
             }
             if let Some(forward) = &ws.forward {
                 if has_empty_item(forward.urls.as_ref()) {
-                    warnings.push(
-                        "connect.websocket.forward.urls should not contain empty values"
-                            .to_string(),
-                    );
+                    warnings.push(trf_for(
+                        locale,
+                        "config.warn.empty_values",
+                        &[("field", "connect.websocket.forward.urls")],
+                    ));
                 }
                 let host = forward.host.as_deref().or(ws.host.as_deref());
                 let port = forward.port.or(ws.port);
@@ -1380,30 +1507,37 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
                     && ws.url.is_none()
                     && (port.is_none() || host.is_none())
                 {
-                    warnings.push(
-                        "connect.websocket.forward enabled but url(s) is missing and host/port is incomplete"
-                            .to_string(),
-                    );
+                    warnings.push(localized_doc_text(
+                        doc,
+                        "config.warn.websocket_forward_incomplete",
+                    ));
                 }
             }
             if let Some(forward) = &ws.forward
                 && forward.max_payload_size.is_some_and(|value| value == 0)
             {
-                warnings
-                    .push("connect.websocket.forward.max_payload_size should be > 0".to_string());
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.should_be_positive",
+                    &[("field", "connect.websocket.forward.max_payload_size")],
+                ));
             }
             if let Some(forward) = &ws.forward
                 && forward.max_connections.is_some_and(|value| value == 0)
             {
-                warnings
-                    .push("connect.websocket.forward.max_connections should be > 0".to_string());
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.should_be_positive",
+                    &[("field", "connect.websocket.forward.max_connections")],
+                ));
             }
             if let Some(reverse) = &ws.reverse {
                 if has_empty_item(reverse.urls.as_ref()) {
-                    warnings.push(
-                        "connect.websocket.reverse.urls should not contain empty values"
-                            .to_string(),
-                    );
+                    warnings.push(trf_for(
+                        locale,
+                        "config.warn.empty_values",
+                        &[("field", "connect.websocket.reverse.urls")],
+                    ));
                 }
                 let port = reverse.port.or(ws.port);
                 if reverse.enabled.unwrap_or(false)
@@ -1412,75 +1546,120 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
                     && ws.url.is_none()
                     && port.is_none()
                 {
-                    warnings.push(
-                        "connect.websocket.reverse enabled but url(s)/port is missing".to_string(),
-                    );
+                    warnings.push(localized_doc_text(
+                        doc,
+                        "config.warn.websocket_reverse_incomplete",
+                    ));
                 }
             }
             if let Some(reverse) = &ws.reverse
                 && reverse.max_payload_size.is_some_and(|value| value == 0)
             {
-                warnings
-                    .push("connect.websocket.reverse.max_payload_size should be > 0".to_string());
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.should_be_positive",
+                    &[("field", "connect.websocket.reverse.max_payload_size")],
+                ));
             }
             if let Some(reverse) = &ws.reverse
                 && reverse.max_connections.is_some_and(|value| value == 0)
             {
-                warnings
-                    .push("connect.websocket.reverse.max_connections should be > 0".to_string());
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.should_be_positive",
+                    &[("field", "connect.websocket.reverse.max_connections")],
+                ));
             }
         }
 
         if let Some(http) = &connect.tcp_http {
             if http.max_payload_size.is_some_and(|value| value == 0) {
-                warnings.push("connect.tcp-http.max_payload_size should be > 0".to_string());
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.should_be_positive",
+                    &[("field", "connect.tcp-http.max_payload_size")],
+                ));
             }
             if http.max_connections.is_some_and(|value| value == 0) {
-                warnings.push("connect.tcp-http.max_connections should be > 0".to_string());
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.should_be_positive",
+                    &[("field", "connect.tcp-http.max_connections")],
+                ));
             }
             if has_empty_item(http.urls.as_ref()) {
-                warnings.push("connect.tcp-http.urls should not contain empty values".to_string());
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.empty_values",
+                    &[("field", "connect.tcp-http.urls")],
+                ));
             }
         }
 
         if let Some(sse) = &connect.sse {
             if sse.max_payload_size.is_some_and(|value| value == 0) {
-                warnings.push("connect.sse.max_payload_size should be > 0".to_string());
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.should_be_positive",
+                    &[("field", "connect.sse.max_payload_size")],
+                ));
             }
             if sse.max_connections.is_some_and(|value| value == 0) {
-                warnings.push("connect.sse.max_connections should be > 0".to_string());
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.should_be_positive",
+                    &[("field", "connect.sse.max_connections")],
+                ));
             }
             if has_empty_item(sse.urls.as_ref()) {
-                warnings.push("connect.sse.urls should not contain empty values".to_string());
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.empty_values",
+                    &[("field", "connect.sse.urls")],
+                ));
             }
         }
     }
 
     if let Some(llm) = config_llm(doc) {
         if llm.timeout_seconds.is_some_and(|value| value == 0) {
-            warnings.push("llm.timeout_seconds should be > 0".to_string());
+            warnings.push(trf_for(
+                locale,
+                "config.warn.should_be_positive",
+                &[("field", "llm.timeout_seconds")],
+            ));
         }
         if llm
             .base_url
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
         {
-            warnings.push(
-                "llm.base_url in main config is deprecated, move it to llm-config.yaml".to_string(),
-            );
+            warnings.push(trf_for(
+                locale,
+                "config.warn.deprecated_move",
+                &[("field", "llm.base_url"), ("target", "llm-config.yaml")],
+            ));
         }
         if llm
             .api_keys
             .as_ref()
             .is_some_and(|keys| keys.iter().any(|key| key.trim().is_empty()))
         {
-            warnings.push("llm.api_keys should not contain empty values".to_string());
+            warnings.push(trf_for(
+                locale,
+                "config.warn.empty_values",
+                &[("field", "llm.api_keys")],
+            ));
         }
         if llm.provider_urls.as_ref().is_some_and(|urls| {
             urls.iter()
                 .any(|url| normalize_llm_provider_url(url).is_none())
         }) {
-            warnings.push("llm.provider_urls should not contain empty values".to_string());
+            warnings.push(trf_for(
+                locale,
+                "config.warn.empty_values",
+                &[("field", "llm.provider_urls")],
+            ));
         }
         if llm.enabled.unwrap_or(false) {
             let has_non_empty_api_key = llm
@@ -1492,24 +1671,27 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
                 .as_ref()
                 .is_some_and(|keys| keys.iter().any(|value| !value.trim().is_empty()));
             if !has_non_empty_api_key && !has_non_empty_api_keys {
-                warnings.push("llm.enabled is true but llm.api_key/api_keys is empty".to_string());
+                warnings.push(localized_doc_text(doc, "config.warn.llm_api_key_missing"));
             }
             if llm
                 .model
                 .as_deref()
                 .is_none_or(|value| value.trim().is_empty())
             {
-                warnings.push("llm.enabled is true but llm.model is empty".to_string());
+                warnings.push(localized_doc_text(doc, "config.warn.llm_model_missing"));
             }
         }
         if let Some(provider) = llm.provider.as_deref()
             && !provider.trim().is_empty()
             && !provider.eq_ignore_ascii_case(DEFAULT_LLM_PROVIDER)
         {
-            warnings.push(format!(
-                "llm.provider='{}' is not built-in yet (only '{}')",
-                provider.trim(),
-                DEFAULT_LLM_PROVIDER
+            warnings.push(trf_for(
+                locale,
+                "config.warn.llm_provider_unsupported",
+                &[
+                    ("provider", provider.trim()),
+                    ("builtin", DEFAULT_LLM_PROVIDER),
+                ],
             ));
         }
         if llm
@@ -1517,14 +1699,22 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
             .as_deref()
             .is_some_and(|value| value.trim().is_empty())
         {
-            warnings.push("llm.command_prefix should not be empty".to_string());
+            warnings.push(trf_for(
+                locale,
+                "config.warn.should_not_be_empty",
+                &[("field", "llm.command_prefix")],
+            ));
         }
     }
 
     if let Some(onebot) = config_onebot_v11(doc) {
         for entry in &onebot.whitelist {
             if entry.as_token().is_empty() {
-                warnings.push("onebot-v11.whitelist should not contain empty values".to_string());
+                warnings.push(trf_for(
+                    locale,
+                    "config.warn.empty_values",
+                    &[("field", "onebot-v11.whitelist")],
+                ));
                 break;
             }
         }
@@ -1533,9 +1723,10 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
     if let Some(commands) = config_commands(doc) {
         for entry in &commands.disabled {
             if normalize_disabled_command_entry(entry).is_none() {
-                warnings.push(
-                    "commands.disabled entries should use '<scope> <name>' with scope tui|adapter:onebot11".to_string(),
-                );
+                warnings.push(localized_doc_text(
+                    doc,
+                    "config.warn.commands_disabled_format",
+                ));
                 break;
             }
         }
@@ -1544,8 +1735,10 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
     if let Some(plugins) = config_plugins(doc) {
         for entry in &plugins.disabled {
             if normalize_plugin_id_entry(entry).is_none() {
-                warnings
-                    .push("plugins.disabled entries should use non-empty plugin ids".to_string());
+                warnings.push(localized_doc_text(
+                    doc,
+                    "config.warn.plugins_disabled_format",
+                ));
                 break;
             }
         }
@@ -1582,18 +1775,14 @@ pub(crate) fn runtime_reload_warnings(
         .is_some_and(|prev| runtime_has_hot_reload_sensitive_fields(&prev.runtime))
         || runtime_has_hot_reload_sensitive_fields(&current.runtime);
     if runtime_changed && runtime_sensitive {
-        warnings.push(
-            "runtime.worker_count/ingress_queue/worker_queue are low-level parameters; /reload will not hot-apply them. Restart is recommended, hot switching may cause unpredictable behavior.".to_string(),
-        );
+        warnings.push(tr("config.warn.reload.runtime_sensitive"));
     }
 
     let log_changed = previous.is_none_or(|prev| prev.log != current.log);
     let log_sensitive = previous.is_some_and(|prev| log_has_startup_only_fields(&prev.log))
         || log_has_startup_only_fields(&current.log);
     if log_changed && log_sensitive {
-        warnings.push(
-            "log mode/level/timestamp parameters are loaded at startup and may not be fully applied by /reload. Restart is recommended for deterministic behavior.".to_string(),
-        );
+        warnings.push(tr("config.warn.reload.log_sensitive"));
     }
 
     warnings

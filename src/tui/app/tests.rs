@@ -564,6 +564,7 @@ fn apply_reload_result_updates_shared_llm_command_prefix() {
         adapters: Vec::new(),
         adapter_autostart: false,
         tui_config: test_tui_config(path.clone()),
+        locale: crate::i18n::AppLocale::ZhCn,
         help_whitelist: Vec::new(),
         llm_command_prefix: "/qa".to_string(),
         disabled_commands: Vec::new(),

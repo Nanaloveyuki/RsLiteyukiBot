@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::i18n::AppLocale;
 use chrono::Local;
 use crossterm::event::{self, Event as CEvent, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -191,6 +192,7 @@ pub struct ReloadResult {
     pub adapters: Vec<AdapterConfig>,
     pub adapter_autostart: bool,
     pub tui_config: TuiConfig,
+    pub locale: AppLocale,
     pub help_whitelist: Vec<String>,
     pub llm_command_prefix: String,
     pub disabled_commands: Vec<String>,
@@ -200,6 +202,8 @@ pub struct ReloadResult {
 
 pub type ReloadFuture<'a> = Pin<Box<dyn Future<Output = Result<ReloadResult, String>> + 'a>>;
 pub type ReloadHandler = for<'a> fn(&'a LiteyukiBot) -> ReloadFuture<'a>;
+pub type PluginPolicyFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + 'a>>;
+pub type PluginPolicyHandler = for<'a> fn(&'a LiteyukiBot, Vec<String>) -> PluginPolicyFuture<'a>;
 pub type PersistWhitelistHandler = fn(Vec<String>) -> Result<String, String>;
 pub type PersistDisabledCommandsHandler = fn(Vec<String>) -> Result<String, String>;
 pub type PersistDisabledPluginsHandler = fn(Vec<String>) -> Result<String, String>;
@@ -215,6 +219,7 @@ pub struct RunOptions {
     pub adapter_autostart: bool,
     pub tui_config: TuiConfig,
     pub reload_handler: ReloadHandler,
+    pub plugin_policy_handler: PluginPolicyHandler,
     pub whitelist_persist_handler: PersistWhitelistHandler,
     pub disabled_commands_persist_handler: PersistDisabledCommandsHandler,
     pub disabled_plugins_persist_handler: PersistDisabledPluginsHandler,

@@ -1,14 +1,58 @@
 use super::*;
+use crate::i18n::{tr, trf};
 use tokio::sync::Semaphore;
 
 #[derive(Clone, Copy)]
 struct LoopHandlers {
     reload_handler: ReloadHandler,
+    plugin_policy_handler: PluginPolicyHandler,
     whitelist_persist_handler: PersistWhitelistHandler,
     disabled_commands_persist_handler: PersistDisabledCommandsHandler,
     disabled_plugins_persist_handler: PersistDisabledPluginsHandler,
     llm_command_handler: LlmCommandHandler,
     ask_handler: AskHandler,
+}
+
+#[derive(Clone)]
+struct QueuedPluginPolicy {
+    entries: Vec<String>,
+}
+
+fn start_plugin_policy_apply<'a>(
+    plugin_policy_inflight: &mut Option<(PluginPolicyFuture<'a>, Vec<String>)>,
+    handlers: LoopHandlers,
+    bot: &'a LiteyukiBot,
+    app: &mut AppState,
+    entries: Vec<String>,
+) {
+    let rollback_entries = bot.disabled_plugin_ids();
+    app.push_log(UiLevel::Info, tr("plugin.reload.applying"));
+    *plugin_policy_inflight = Some((
+        (handlers.plugin_policy_handler)(bot, entries),
+        rollback_entries,
+    ));
+}
+
+fn queue_or_start_reload<'a>(
+    reload_inflight: &mut Option<ReloadFuture<'a>>,
+    queued_reload: &mut bool,
+    plugin_policy_inflight: bool,
+    handlers: LoopHandlers,
+    bot: &'a LiteyukiBot,
+    app: &mut AppState,
+) {
+    if reload_inflight.is_some() || plugin_policy_inflight {
+        *queued_reload = true;
+        let key = if plugin_policy_inflight {
+            "runtime.reload.queued.by_plugin"
+        } else {
+            "runtime.reload.queued"
+        };
+        app.push_log(UiLevel::Warn, tr(key));
+    } else {
+        app.push_log(UiLevel::Info, tr("runtime.reload.start"));
+        *reload_inflight = Some((handlers.reload_handler)(bot));
+    }
 }
 
 pub async fn run(
@@ -23,6 +67,7 @@ pub async fn run(
         adapter_autostart,
         tui_config,
         reload_handler,
+        plugin_policy_handler,
         whitelist_persist_handler,
         disabled_commands_persist_handler,
         disabled_plugins_persist_handler,
@@ -36,6 +81,7 @@ pub async fn run(
     } = options;
     let handlers = LoopHandlers {
         reload_handler,
+        plugin_policy_handler,
         whitelist_persist_handler,
         disabled_commands_persist_handler,
         disabled_plugins_persist_handler,
@@ -48,24 +94,29 @@ pub async fn run(
     app.bind_plugin_sdk(plugin_sdk);
     app.bind_plugin_manager(plugin_manager);
     app.sync_disabled_plugins(&disabled_plugins);
+    app.push_log(UiLevel::Info, tr("tui.runtime.ready"));
     app.push_log(
         UiLevel::Info,
-        "TUI ready: type /help in console, Ctrl+C or /quit to exit",
+        trf(
+            "tui.runtime.new_resume",
+            &[("resume", app.active_resume_uid())],
+        ),
     );
     app.push_log(
         UiLevel::Info,
-        format!("new resume created: {}", app.active_resume_uid()),
-    );
-    app.push_log(
-        UiLevel::Info,
-        format!(
-            "resume policy: max_sessions={}, max_size={} MiB",
-            app.resume_max_sessions,
-            bytes_to_mib(app.resume_max_size_bytes)
+        trf(
+            "tui.runtime.resume_policy",
+            &[
+                ("max_sessions", app.resume_max_sessions.to_string().as_str()),
+                (
+                    "max_size_mib",
+                    bytes_to_mib(app.resume_max_size_bytes).to_string().as_str(),
+                ),
+            ],
         ),
     );
     if adapter_autostart {
-        app.push_log(UiLevel::Info, "adapters autostart enabled");
+        app.push_log(UiLevel::Info, tr("tui.runtime.adapters_autostart"));
     }
 
     let previous_console_log_output = set_console_log_output_enabled(false);
@@ -104,9 +155,69 @@ async fn run_tui_loop(
     let async_command_limiter = Arc::new(Semaphore::new(ASYNC_COMMAND_CONCURRENCY_LIMIT));
     let mut reload_inflight: Option<ReloadFuture<'_>> = None;
     let mut queued_reload = false;
+    let mut plugin_policy_inflight: Option<(PluginPolicyFuture<'_>, Vec<String>)> = None;
+    let mut queued_plugin_policy: Option<QueuedPluginPolicy> = None;
 
     while !should_quit {
         tokio::select! {
+            plugin_policy_result = async {
+                match plugin_policy_inflight.as_mut() {
+                    Some((future, _)) => Some(future.await),
+                    None => None,
+                }
+            }, if plugin_policy_inflight.is_some() => {
+                let rollback_entries = plugin_policy_inflight
+                    .as_ref()
+                    .map(|(_, entries)| entries.clone())
+                    .unwrap_or_default();
+                if let Some(result) = plugin_policy_result {
+                    match result {
+                        Ok(message) => {
+                            app.push_log(UiLevel::Info, message);
+                        }
+                        Err(err) => {
+                            app.push_log(
+                                UiLevel::Warn,
+                                tr("plugin.reload.failed").replace("{err}", err.as_str()),
+                            );
+                            match (handlers.disabled_plugins_persist_handler)(rollback_entries.clone()) {
+                                Ok(message) => {
+                                    app.sync_disabled_plugins(&rollback_entries);
+                                    app.push_log(UiLevel::Warn, tr("plugin.reload.rollback_applied"));
+                                    app.push_log(UiLevel::Info, message);
+                                }
+                                Err(persist_err) => {
+                                    app.sync_disabled_plugins(&rollback_entries);
+                                    app.push_log(UiLevel::Error, tr("plugin.reload.rollback_persist_failed"));
+                                    app.push_log(
+                                        UiLevel::Error,
+                                        trf(
+                                            "plugin.reload.rollback_persist_failed.detail",
+                                            &[("err", persist_err.as_str())],
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                plugin_policy_inflight = None;
+                if queued_reload {
+                    queued_reload = false;
+                    app.push_log(UiLevel::Info, tr("runtime.reload.processing_queued"));
+                    app.push_log(UiLevel::Info, tr("runtime.reload.start"));
+                    reload_inflight = Some((handlers.reload_handler)(bot));
+                } else if let Some(queued) = queued_plugin_policy.take() {
+                    start_plugin_policy_apply(
+                        &mut plugin_policy_inflight,
+                        handlers,
+                        bot,
+                        app,
+                        queued.entries,
+                    );
+                }
+                needs_redraw = true;
+            }
             reload_result = async {
                 match reload_inflight.as_mut() {
                     Some(future) => Some(future.await),
@@ -120,16 +231,27 @@ async fn run_tui_loop(
                             app.refresh_adapter_state(bot);
                         }
                         Err(err) => {
-                            app.push_log(UiLevel::Warn, format!("reload failed: {err}"));
+                            app.push_log(
+                                UiLevel::Warn,
+                                tr("runtime.reload.failed").replace("{err}", err.as_str()),
+                            );
                         }
                     }
                 }
                 reload_inflight = None;
                 if queued_reload {
                     queued_reload = false;
-                    app.push_log(UiLevel::Info, "processing queued reload request...");
-                    app.push_log(UiLevel::Info, "reloading config...");
+                    app.push_log(UiLevel::Info, tr("runtime.reload.processing_queued"));
+                    app.push_log(UiLevel::Info, tr("runtime.reload.start"));
                     reload_inflight = Some((handlers.reload_handler)(bot));
+                } else if let Some(queued) = queued_plugin_policy.take() {
+                    start_plugin_policy_apply(
+                        &mut plugin_policy_inflight,
+                        handlers,
+                        bot,
+                        app,
+                        queued.entries,
+                    );
                 }
                 needs_redraw = true;
             }
@@ -154,13 +276,14 @@ async fn run_tui_loop(
                             ui_changed = true;
                         }
                         CommandOutcome::Reload => {
-                            if reload_inflight.is_some() {
-                                queued_reload = true;
-                                app.push_log(UiLevel::Warn, "reload already in progress, request queued");
-                            } else {
-                                app.push_log(UiLevel::Info, "reloading config...");
-                                reload_inflight = Some((handlers.reload_handler)(bot));
-                            }
+                            queue_or_start_reload(
+                                &mut reload_inflight,
+                                &mut queued_reload,
+                                plugin_policy_inflight.is_some(),
+                                handlers,
+                                bot,
+                                app,
+                            );
                             ui_changed = true;
                         }
                         CommandOutcome::PersistWhitelist(entries) => {
@@ -170,17 +293,20 @@ async fn run_tui_loop(
                                     ui_changed = true;
                                     if reload_inflight.is_some() {
                                         queued_reload = true;
-                                        app.push_log(UiLevel::Warn, "reload already in progress, request queued");
+                                        app.push_log(UiLevel::Warn, tr("runtime.reload.queued"));
                                     } else {
-                                        app.push_log(UiLevel::Info, "reloading config...");
+                                        app.push_log(UiLevel::Info, tr("runtime.reload.start"));
                                         reload_inflight = Some((handlers.reload_handler)(bot));
                                     }
                                 }
                                 Err(err) => {
-                                    app.push_log(UiLevel::Warn, format!("persist whitelist failed: {err}"));
                                     app.push_log(
                                         UiLevel::Warn,
-                                        "runtime whitelist changed but config was not persisted",
+                                        trf("whitelist.persist.failed", &[("err", err.as_str())]),
+                                    );
+                                    app.push_log(
+                                        UiLevel::Warn,
+                                        tr("whitelist.persist.runtime_not_persisted"),
                                     );
                                     ui_changed = true;
                                 }
@@ -194,27 +320,37 @@ async fn run_tui_loop(
                                 Ok(message) => {
                                     app.push_log(UiLevel::Info, message);
                                     ui_changed = true;
-                                    if reload_inflight.is_some() {
-                                        queued_reload = true;
-                                        app.push_log(UiLevel::Warn, "reload already in progress, request queued");
-                                    } else {
-                                        app.push_log(UiLevel::Info, "reloading config...");
-                                        reload_inflight = Some((handlers.reload_handler)(bot));
-                                    }
+                                    queue_or_start_reload(
+                                        &mut reload_inflight,
+                                        &mut queued_reload,
+                                        plugin_policy_inflight.is_some(),
+                                        handlers,
+                                        bot,
+                                        app,
+                                    );
                                 }
                                 Err(err) => {
                                     if let Some(plugin_sdk) = app.plugin_sdk.clone() {
                                         if let Err(sync_err) = plugin_sdk.sync_disabled_scope_commands(&rollback_entries) {
                                             app.push_log(
                                                 UiLevel::Error,
-                                                format!("failed to rollback command policy after persist failure: {sync_err}"),
+                                                trf(
+                                                    "command_policy.rollback.failed",
+                                                    &[("err", sync_err.to_string().as_str())],
+                                                ),
                                             );
                                         }
                                     }
-                                    app.push_log(UiLevel::Warn, format!("persist command policy failed: {err}"));
                                     app.push_log(
                                         UiLevel::Warn,
-                                        "runtime command policy changed but config was not persisted; rollback applied",
+                                        trf(
+                                            "command_policy.persist.failed",
+                                            &[("err", err.as_str())],
+                                        ),
+                                    );
+                                    app.push_log(
+                                        UiLevel::Warn,
+                                        tr("command_policy.persist.rollback_applied"),
                                     );
                                     ui_changed = true;
                                 }
@@ -228,20 +364,44 @@ async fn run_tui_loop(
                                 Ok(message) => {
                                     app.push_log(UiLevel::Info, message);
                                     ui_changed = true;
+                                    let next_entries = app
+                                        .disabled_plugins
+                                        .iter()
+                                        .cloned()
+                                        .collect::<Vec<_>>();
                                     if reload_inflight.is_some() {
                                         queued_reload = true;
-                                        app.push_log(UiLevel::Warn, "reload already in progress, request queued");
+                                        app.push_log(
+                                            UiLevel::Warn,
+                                            tr("plugin.reload.wait_for_config_reload"),
+                                        );
+                                    } else if plugin_policy_inflight.is_some() {
+                                        queued_plugin_policy = Some(QueuedPluginPolicy {
+                                            entries: next_entries,
+                                        });
+                                        app.push_log(UiLevel::Warn, tr("plugin.reload.queued"));
                                     } else {
-                                        app.push_log(UiLevel::Info, "reloading config...");
-                                        reload_inflight = Some((handlers.reload_handler)(bot));
+                                        start_plugin_policy_apply(
+                                            &mut plugin_policy_inflight,
+                                            handlers,
+                                            bot,
+                                            app,
+                                            next_entries,
+                                        );
                                     }
                                 }
                                 Err(err) => {
                                     app.sync_disabled_plugins(&rollback_entries);
-                                    app.push_log(UiLevel::Warn, format!("persist plugin policy failed: {err}"));
                                     app.push_log(
                                         UiLevel::Warn,
-                                        "runtime plugin policy changed in TUI state but config was not persisted; rollback applied",
+                                        trf(
+                                            "plugin_policy.persist.failed",
+                                            &[("err", err.as_str())],
+                                        ),
+                                    );
+                                    app.push_log(
+                                        UiLevel::Warn,
+                                        tr("plugin_policy.persist.rollback_applied"),
                                     );
                                     ui_changed = true;
                                 }
@@ -297,9 +457,9 @@ async fn run_tui_loop(
             }
             signal = tokio::signal::ctrl_c() => {
                 if signal.is_ok() {
-                    app.push_log(UiLevel::Warn, "Ctrl+C received");
+                    app.push_log(UiLevel::Warn, tr("tui.signal.ctrl_c.received"));
                 } else {
-                    app.push_log(UiLevel::Error, "failed to listen Ctrl+C signal");
+                    app.push_log(UiLevel::Error, tr("tui.signal.ctrl_c.listen_failed"));
                 }
                 should_quit = true;
                 needs_redraw = true;
@@ -335,8 +495,12 @@ fn spawn_llm_command(
     } else {
         app.push_log(
             UiLevel::Warn,
-            format!(
-                "too many async commands in flight (limit={ASYNC_COMMAND_CONCURRENCY_LIMIT}), please retry"
+            trf(
+                "tui.async.too_many_commands",
+                &[(
+                    "limit",
+                    ASYNC_COMMAND_CONCURRENCY_LIMIT.to_string().as_str(),
+                )],
             ),
         );
     }
@@ -360,8 +524,12 @@ fn spawn_ask_command(
     } else {
         app.push_log(
             UiLevel::Warn,
-            format!(
-                "too many async commands in flight (limit={ASYNC_COMMAND_CONCURRENCY_LIMIT}), please retry"
+            trf(
+                "tui.async.too_many_commands",
+                &[(
+                    "limit",
+                    ASYNC_COMMAND_CONCURRENCY_LIMIT.to_string().as_str(),
+                )],
             ),
         );
     }
@@ -375,10 +543,7 @@ fn spawn_plugin_command(
     app: &mut AppState,
 ) {
     let Some(plugin_sdk) = app.plugin_sdk.clone() else {
-        app.push_log(
-            UiLevel::Warn,
-            "plugin sdk unavailable in current runtime, command ignored",
-        );
+        app.push_log(UiLevel::Warn, tr("plugin.sdk.unavailable"));
         return;
     };
 
@@ -388,7 +553,10 @@ fn spawn_plugin_command(
             let _permit = permit;
             let result = match plugin_sdk.execute_tui_command(command.as_str(), &args) {
                 Ok(Some(output)) => Ok(output),
-                Ok(None) => Err(format!("plugin command '{}' is not registered", command)),
+                Ok(None) => Err(trf(
+                    "plugin.command.not_registered",
+                    &[("command", command.as_str())],
+                )),
                 Err(err) => Err(err.to_string()),
             };
             let _ = tx.send(AsyncCommandResult::PluginCommand(result)).await;
@@ -396,8 +564,12 @@ fn spawn_plugin_command(
     } else {
         app.push_log(
             UiLevel::Warn,
-            format!(
-                "too many async commands in flight (limit={ASYNC_COMMAND_CONCURRENCY_LIMIT}), please retry"
+            trf(
+                "tui.async.too_many_commands",
+                &[(
+                    "limit",
+                    ASYNC_COMMAND_CONCURRENCY_LIMIT.to_string().as_str(),
+                )],
             ),
         );
     }
@@ -407,15 +579,24 @@ fn apply_async_result(app: &mut AppState, async_result: AsyncCommandResult) {
     match async_result {
         AsyncCommandResult::Llm(result) => match result {
             Ok(message) => app.push_log(UiLevel::Info, message),
-            Err(err) => app.push_log(UiLevel::Warn, format!("llm command failed: {err}")),
+            Err(err) => app.push_log(
+                UiLevel::Warn,
+                trf("llm.command.failed", &[("err", err.as_str())]),
+            ),
         },
         AsyncCommandResult::Ask(result) => match result {
             Ok(message) => push_llm_response_logs(app, message),
-            Err(err) => app.push_log(UiLevel::Warn, format!("ask failed: {err}")),
+            Err(err) => app.push_log(
+                UiLevel::Warn,
+                trf("ask.command.failed", &[("err", err.as_str())]),
+            ),
         },
         AsyncCommandResult::PluginCommand(result) => match result {
             Ok(message) => app.push_log(UiLevel::Info, message),
-            Err(err) => app.push_log(UiLevel::Warn, format!("plugin command failed: {err}")),
+            Err(err) => app.push_log(
+                UiLevel::Warn,
+                trf("plugin.command.failed", &[("err", err.as_str())]),
+            ),
         },
     }
 }
@@ -458,7 +639,7 @@ fn push_llm_response_logs(app: &mut AppState, message: String) {
         }
     }
     if !has_non_empty {
-        app.push_log(UiLevel::Llm, "(empty llm output)");
+        app.push_log(UiLevel::Llm, tr("llm.output.empty"));
     }
 }
 
