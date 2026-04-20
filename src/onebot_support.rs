@@ -7,6 +7,7 @@ use crate::command_registry::{
     parse_command_argument as parse_registered_command_argument,
     render_builtin_help_lines_filtered,
 };
+use crate::i18n::{tr, trf};
 use liteyukibot_core::PluginSdk;
 use liteyukibot_core::core::BotEvent;
 use liteyukibot_core::session::SessionEvent;
@@ -166,14 +167,19 @@ pub(crate) fn render_external_help_text_with_plugins(
             })
             .collect::<Vec<_>>();
         if !plugin_commands.is_empty() {
-            lines.push(format!(
-                "plugin commands (adapter:onebot11, {}):",
-                plugin_commands.len()
+            lines.push(trf(
+                "help.plugin_commands.title",
+                &[("count", plugin_commands.len().to_string().as_str())],
             ));
             for command in plugin_commands {
-                lines.push(format!(
-                    "{} - {} [plugin:{}]",
-                    command.name, command.description, command.plugin_id
+                let description = tr(command.description.as_str());
+                lines.push(trf(
+                    "help.plugin_commands.entry",
+                    &[
+                        ("name", command.name.as_str()),
+                        ("description", description.as_str()),
+                        ("plugin", command.plugin_id.as_str()),
+                    ],
                 ));
             }
         }

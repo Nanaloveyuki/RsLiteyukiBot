@@ -243,36 +243,50 @@ impl AppState {
                 let enabled = command_primary_name(command, scope, overrides)
                     .map(|name| self.is_builtin_scope_command_enabled(scope, name.as_str()))
                     .unwrap_or(true);
-                lines.push(format!(
-                    "  {} - {} [builtin, {}]",
-                    label,
-                    command.summary,
-                    if enabled { "enabled" } else { "disabled" }
+                let state = if enabled {
+                    tr("tui.command.catalog.tag.enabled")
+                } else {
+                    tr("tui.command.catalog.tag.disabled")
+                };
+                lines.push(trf(
+                    "tui.command.catalog.entry_builtin",
+                    &[
+                        ("label", label.as_str()),
+                        ("summary", command.summary),
+                        ("state", state.as_str()),
+                    ],
                 ));
             }
 
             if let Some(plugin_sdk) = plugin_sdk {
                 for command in plugin_sdk.list_scope_commands(command_scope_label(scope)) {
+                    let description = tr(command.description.as_str());
                     let mut tags = vec![
-                        format!("plugin:{}", command.plugin_id),
+                        trf(
+                            "tui.command.catalog.tag.plugin",
+                            &[("plugin", command.plugin_id.as_str())],
+                        ),
                         if command.enabled {
-                            "enabled".to_string()
+                            tr("tui.command.catalog.tag.enabled")
                         } else {
-                            "disabled".to_string()
+                            tr("tui.command.catalog.tag.disabled")
                         },
                     ];
                     if matches!(scope, CommandScope::Tui) {
                         tags.push(if command.executable_in_tui {
-                            "executable".to_string()
+                            tr("tui.command.catalog.tag.executable")
                         } else {
-                            "declared-only".to_string()
+                            tr("tui.command.catalog.tag.declared_only")
                         });
                     }
-                    lines.push(format!(
-                        "  {} - {} [{}]",
-                        command.name,
-                        command.description,
-                        tags.join(", ")
+                    let tags_text = tags.join(", ");
+                    lines.push(trf(
+                        "tui.command.catalog.entry_plugin",
+                        &[
+                            ("name", command.name.as_str()),
+                            ("description", description.as_str()),
+                            ("tags", tags_text.as_str()),
+                        ],
                     ));
                 }
             }
@@ -400,12 +414,13 @@ impl AppState {
                 });
             }
             let runtime_label = Self::plugin_runtime_label(entry.descriptor.runtime.kind);
+            let plugin_name = tr(entry.descriptor.metadata.name.as_str());
             lines.push(trf(
                 "plugin.catalog.entry",
                 &[
                     ("plugin", plugin_id.as_str()),
                     ("runtime", runtime_label.as_str()),
-                    ("name", entry.descriptor.metadata.name.as_str()),
+                    ("name", plugin_name.as_str()),
                     ("tags", tags.join(", ").as_str()),
                 ],
             ));
@@ -896,9 +911,13 @@ impl AppState {
             .filter(|token| !token.is_empty())
             .count();
         if key_count == 0 {
-            "/llm apikey <redacted>".to_string()
+            tr("tui.llm.apikey.redacted")
         } else {
-            format!("/llm apikey <redacted:{key_count}>")
+            let key_count = key_count.to_string();
+            trf(
+                "tui.llm.apikey.redacted_count",
+                &[("count", key_count.as_str())],
+            )
         }
     }
 
@@ -921,7 +940,10 @@ impl AppState {
                     self.show_llm_usage();
                     return CommandOutcome::None;
                 }
-                self.push_log(UiLevel::Info, format!("updating llm.model -> {model}"));
+                self.push_log(
+                    UiLevel::Info,
+                    trf("tui.llm.model.updating", &[("model", model)]),
+                );
                 CommandOutcome::Llm(LlmCommandRequest::SetModel(model.to_string()))
             }
             "apikey" => {
@@ -932,7 +954,10 @@ impl AppState {
                 }
                 self.push_log(
                     UiLevel::Info,
-                    format!("adding {} api key(s) to llm.api_keys", keys.len()),
+                    trf(
+                        "tui.llm.apikey.adding",
+                        &[("count", keys.len().to_string().as_str())],
+                    ),
                 );
                 CommandOutcome::Llm(LlmCommandRequest::AddApiKeys(keys))
             }
@@ -1039,7 +1064,9 @@ impl AppState {
                                 "provider_suffix",
                                 provider
                                     .as_deref()
-                                    .map(|provider| format!(" (provider={provider})"))
+                                    .map(|provider| {
+                                        trf("tui.llm.provider_suffix", &[("provider", provider)])
+                                    })
                                     .unwrap_or_default()
                                     .as_str(),
                             ),
@@ -1742,7 +1769,7 @@ impl AppState {
 
     pub(super) fn show_resume_list(&mut self) {
         if self.resume_store.sessions.is_empty() {
-            self.push_log(UiLevel::Info, "no resume history found");
+            self.push_log(UiLevel::Info, tr("tui.resume.empty"));
             return;
         }
 
@@ -1758,24 +1785,26 @@ impl AppState {
                 } else {
                     " "
                 };
-                format!(
-                    "{} {} (updated {}, logs {}, cmd {})",
-                    marker,
-                    session.uid,
-                    session.updated_at,
-                    session.logs.len(),
-                    session.command_history.len()
+                let logs = session.logs.len().to_string();
+                let commands = session.command_history.len().to_string();
+                trf(
+                    "tui.resume.entry",
+                    &[
+                        ("marker", marker),
+                        ("uid", session.uid.as_str()),
+                        ("updated", session.updated_at.as_str()),
+                        ("logs", logs.as_str()),
+                        ("commands", commands.as_str()),
+                    ],
                 )
             })
             .collect();
         if self.resume_store.sessions.len() > lines.len() {
-            lines.push(format!(
-                "... and {} more",
-                self.resume_store.sessions.len() - lines.len()
-            ));
+            let count = (self.resume_store.sessions.len() - lines.len()).to_string();
+            lines.push(trf("tui.resume.more", &[("count", count.as_str())]));
         }
 
-        self.push_log(UiLevel::Info, "resume sessions (newest first, * active):");
+        self.push_log(UiLevel::Info, tr("tui.resume.title"));
         for line in lines {
             self.push_log(UiLevel::Info, line);
         }
@@ -1783,7 +1812,10 @@ impl AppState {
 
     pub(super) fn switch_resume(&mut self, uid: &str) -> Result<(), String> {
         if uid == self.active_resume_uid {
-            self.push_log(UiLevel::Info, format!("already in resume {uid}"));
+            self.push_log(
+                UiLevel::Info,
+                trf("tui.resume.already_active", &[("uid", uid)]),
+            );
             return Ok(());
         }
 
@@ -1793,7 +1825,7 @@ impl AppState {
             .resume_store
             .get(uid)
             .cloned()
-            .ok_or_else(|| format!("resume not found: {uid}"))?;
+            .ok_or_else(|| trf("tui.resume.not_found", &[("uid", uid)]))?;
 
         self.active_resume_uid = session.uid.clone();
         self.logs = session.logs.into_iter().collect();
@@ -1812,7 +1844,10 @@ impl AppState {
         self.scroll_logs_bottom();
         self.push_log(
             UiLevel::Info,
-            format!("resumed session {}", self.active_resume_uid),
+            trf(
+                "tui.resume.resumed",
+                &[("uid", self.active_resume_uid.as_str())],
+            ),
         );
         self.resume_dirty = true;
         Ok(())
@@ -1884,13 +1919,14 @@ impl AppState {
                             ),
                         );
                         for command in plugin_commands {
+                            let description = tr(command.description.as_str());
                             self.push_log(
                                 UiLevel::Info,
                                 trf(
                                     "tui.plugin_commands.entry",
                                     &[
                                         ("name", command.name.as_str()),
-                                        ("description", command.description.as_str()),
+                                        ("description", description.as_str()),
                                         ("plugin", command.plugin_id.as_str()),
                                     ],
                                 ),
@@ -1964,13 +2000,19 @@ impl AppState {
                             .copied()
                             .unwrap_or(false)
                         {
-                            "RUN"
+                            tr("tui.adapter.status.run")
                         } else {
-                            "IDLE"
+                            tr("tui.adapter.status.idle")
                         };
-                        format!(
-                            "{} [{}] {:?} -> {}",
-                            adapter.id, status, adapter.transport, adapter.endpoint.url
+                        let transport = format!("{:?}", adapter.transport);
+                        trf(
+                            "tui.adapters.entry",
+                            &[
+                                ("adapter", adapter.id.as_str()),
+                                ("status", status.as_str()),
+                                ("transport", transport.as_str()),
+                                ("url", adapter.endpoint.url.as_str()),
+                            ],
                         )
                     })
                     .collect();
@@ -2165,12 +2207,13 @@ impl AppState {
         let command = line.split_whitespace().next()?;
         let plugin_sdk = self.plugin_sdk.as_ref()?;
         let entry = plugin_sdk.get_tui_command(command)?;
+        let detail = tr(entry.description.as_str());
         if entry.enabled {
             Some(
                 tr("command.help.plugin.from.enabled")
                     .replace("{name}", entry.name.as_str())
                     .replace("{plugin}", entry.plugin_id.as_str())
-                    .replace("{detail}", entry.description.as_str()),
+                    .replace("{detail}", detail.as_str()),
             )
         } else {
             Some(

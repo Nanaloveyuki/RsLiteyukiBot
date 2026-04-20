@@ -729,7 +729,7 @@ mod tests {
             .collect();
         assert_eq!(
             tail.into_iter().rev().collect::<Vec<_>>(),
-            vec![" ".to_string(), "(empty llm output)".to_string(),]
+            vec![" ".to_string(), tr("llm.output.empty"),]
         );
     }
 }

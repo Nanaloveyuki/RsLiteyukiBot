@@ -226,7 +226,7 @@ fn render_plugins_panel(frame: &mut ratatui::Frame<'_>, app: &AppState, area: Re
                 ])];
                 let summary = format!(
                     "{} | {} | {}",
-                    entry.descriptor.metadata.name,
+                    tr(entry.descriptor.metadata.name.as_str()),
                     AppState::plugin_type_label(entry.descriptor.metadata.plugin_type),
                     state_label
                 );
@@ -346,17 +346,19 @@ fn render_plugin_detail_panel(frame: &mut ratatui::Frame<'_>, app: &AppState, ar
         ),
     ])];
 
+    let translated_name = tr(metadata.name.as_str());
     let title = if metadata.name.trim().is_empty() {
         tr("plugin.detail.name.unnamed")
     } else {
-        trf("plugin.detail.name", &[("name", metadata.name.as_str())])
+        trf("plugin.detail.name", &[("name", translated_name.as_str())])
     };
     lines.push(Line::from(title));
 
     if !metadata.description.trim().is_empty() {
+        let description = tr(metadata.description.as_str());
         lines.push(Line::from(trf(
             "plugin.detail.description",
-            &[("description", metadata.description.as_str())],
+            &[("description", description.as_str())],
         )));
     }
 

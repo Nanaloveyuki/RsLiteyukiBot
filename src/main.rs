@@ -1042,7 +1042,10 @@ async fn handle_external_su_command(
 
     let promoted = superuser_manager
         .promote_user(event.as_ref())
-        .map_err(|err| format!("failed to persist superuser: {err}"))?;
+        .map_err(|err| {
+            let err = err.to_string();
+            trf("main.su.persist_failed", &[("err", err.as_str())])
+        })?;
     let text = if promoted.added {
         tr("main.su.enabled.added")
     } else {

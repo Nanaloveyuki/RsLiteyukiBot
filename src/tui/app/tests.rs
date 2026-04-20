@@ -1,4 +1,5 @@
 use super::*;
+use crate::i18n::{tr, trf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn temp_resume_path(name: &str) -> PathBuf {
@@ -537,10 +538,11 @@ fn reload_command_is_recognized() {
 
     let outcome = app.handle_console_command("/reload now");
     assert!(matches!(outcome, CommandOutcome::None));
+    let usage = tr("tui.command.reload_usage");
     assert!(
         app.logs
             .iter()
-            .any(|log| log.message.contains("usage: /reload"))
+            .any(|log| log.message.contains(usage.as_str()))
     );
 
     remove_file_if_exists(&path);
@@ -623,10 +625,11 @@ fn whitelist_command_can_add_remove_and_list_entries() {
     assert!(lock.contains("private:3541766758"));
     drop(lock);
 
+    let entries_title = trf("tui.whitelist.entries", &[("count", "2")]);
     assert!(
         app.logs
             .iter()
-            .any(|log| log.message.contains("whitelist entries"))
+            .any(|log| log.message.contains(entries_title.as_str()))
     );
 
     remove_file_if_exists(&path);
@@ -736,10 +739,11 @@ fn ask_command_parses_prompt() {
 
     let outcome = app.handle_console_command("/ask");
     assert!(matches!(outcome, CommandOutcome::None));
+    let usage = tr("tui.command.ask_usage");
     assert!(
         app.logs
             .iter()
-            .any(|log| log.message.contains("usage: /ask"))
+            .any(|log| log.message.contains(usage.as_str()))
     );
 
     remove_file_if_exists(&path);
@@ -795,11 +799,15 @@ fn commands_command_lists_scope_filtered_catalog() {
         test_tui_config(path.clone()),
     );
     adapter_scope_app.handle_console_command("/commands adapter:onebot11");
+    let adapter_title = trf(
+        "tui.command.catalog.title",
+        &[("scope", "adapter:onebot11")],
+    );
     assert!(
         adapter_scope_app
             .logs
             .iter()
-            .any(|log| log.message.contains("command catalog (adapter:onebot11):"))
+            .any(|log| log.message.contains(adapter_title.as_str()))
     );
     assert!(
         adapter_scope_app
@@ -821,11 +829,12 @@ fn commands_command_lists_scope_filtered_catalog() {
         test_tui_config(path.clone()),
     );
     tui_scope_app.handle_console_command("/commands tui");
+    let tui_title = trf("tui.command.catalog.title", &[("scope", "tui")]);
     assert!(
         tui_scope_app
             .logs
             .iter()
-            .any(|log| log.message.contains("command catalog (tui):"))
+            .any(|log| log.message.contains(tui_title.as_str()))
     );
     assert!(
         tui_scope_app
@@ -857,10 +866,20 @@ fn commands_command_can_disable_and_enable_builtin_scope_command() {
     app.plugin_sdk = Some(PluginSdk::default());
 
     app.handle_console_command("/commands disable tui /help");
-    assert!(app.logs.iter().any(|log| {
-        log.message
-            .contains("command '/help' disabled in scope tui")
-    }));
+    let disabled_message = trf(
+        "tui.command.changed",
+        &[
+            ("command", "/help"),
+            ("state", tr("tui.command.state.disabled").as_str()),
+            ("scope", "tui"),
+            ("targets", tr("tui.command.target.builtin").as_str()),
+        ],
+    );
+    assert!(
+        app.logs
+            .iter()
+            .any(|log| { log.message.contains(disabled_message.as_str()) })
+    );
     assert!(
         !app.command_completion_candidates("/")
             .contains(&"/help".to_string())
@@ -871,16 +890,27 @@ fn commands_command_can_disable_and_enable_builtin_scope_command() {
     );
 
     app.handle_console_command("/help");
-    assert!(app.logs.iter().any(|log| {
-        log.message
-            .contains("command '/help' disabled by plugin policy")
-    }));
-
-    app.handle_console_command("/commands enable tui /help");
+    let policy_message = trf("tui.command.disabled_by_policy", &[("command", "/help")]);
     assert!(
         app.logs
             .iter()
-            .any(|log| log.message.contains("command '/help' enabled in scope tui"))
+            .any(|log| { log.message.contains(policy_message.as_str()) })
+    );
+
+    app.handle_console_command("/commands enable tui /help");
+    let enabled_message = trf(
+        "tui.command.changed",
+        &[
+            ("command", "/help"),
+            ("state", tr("tui.command.state.enabled").as_str()),
+            ("scope", "tui"),
+            ("targets", tr("tui.command.target.builtin").as_str()),
+        ],
+    );
+    assert!(
+        app.logs
+            .iter()
+            .any(|log| log.message.contains(enabled_message.as_str()))
     );
     assert!(
         app.command_completion_candidates("/")
@@ -906,15 +936,18 @@ fn plugins_command_lists_catalog_with_runtime_type() {
     app.bind_plugin_manager(manager);
 
     app.handle_console_command("/plugins");
+    let catalog_title = trf("plugin.catalog.title", &[("count", "1")]);
+    let service_tag = tr("plugin.type.service");
+    let enabled_tag = tr("plugin.catalog.tag.enabled");
     assert!(
         app.logs
             .iter()
-            .any(|log| log.message.contains("plugin catalog (1):"))
+            .any(|log| log.message.contains(catalog_title.as_str()))
     );
     assert!(app.logs.iter().any(|log| {
         log.message.contains("builtin-liteecho (python)")
-            && log.message.contains("service")
-            && log.message.contains("enabled")
+            && log.message.contains(service_tag.as_str())
+            && log.message.contains(enabled_tag.as_str())
     }));
 
     let _ = std::fs::remove_dir_all(plugin_dir);
@@ -942,10 +975,19 @@ fn plugins_command_can_disable_and_enable_plugin() {
         CommandOutcome::PersistDisabledPlugins { .. }
     ));
     assert!(app.disabled_plugins.contains("builtin-liteecho"));
-    assert!(app.logs.iter().any(|log| {
-        log.message
-            .contains("plugin 'builtin-liteecho' disabled (python)")
-    }));
+    let disabled_message = trf(
+        "plugin.command.changed",
+        &[
+            ("plugin", "builtin-liteecho"),
+            ("state", tr("plugin.catalog.tag.disabled").as_str()),
+            ("runtime", "python"),
+        ],
+    );
+    assert!(
+        app.logs
+            .iter()
+            .any(|log| { log.message.contains(disabled_message.as_str()) })
+    );
 
     let enable = app.handle_console_command("/plugins enable builtin-liteecho");
     assert!(matches!(
@@ -953,10 +995,19 @@ fn plugins_command_can_disable_and_enable_plugin() {
         CommandOutcome::PersistDisabledPlugins { .. }
     ));
     assert!(!app.disabled_plugins.contains("builtin-liteecho"));
-    assert!(app.logs.iter().any(|log| {
-        log.message
-            .contains("plugin 'builtin-liteecho' enabled (python)")
-    }));
+    let enabled_message = trf(
+        "plugin.command.changed",
+        &[
+            ("plugin", "builtin-liteecho"),
+            ("state", tr("plugin.catalog.tag.enabled").as_str()),
+            ("runtime", "python"),
+        ],
+    );
+    assert!(
+        app.logs
+            .iter()
+            .any(|log| { log.message.contains(enabled_message.as_str()) })
+    );
 
     let _ = std::fs::remove_dir_all(plugin_dir);
     remove_file_if_exists(&path);
@@ -1108,7 +1159,7 @@ fn llm_apikey_command_is_redacted_for_display() {
     );
 
     let redacted = app.redact_console_command_for_display("/llm apikey sk-1 sk-2");
-    assert_eq!(redacted, "/llm apikey <redacted:2>");
+    assert_eq!(redacted, "/llm apikey <已隐藏:2>");
 
     remove_file_if_exists(&path);
 }

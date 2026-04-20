@@ -1,7 +1,7 @@
 {
   "id": "builtin-liteecho",
-  "name": "Builtin LiteEcho",
-  "description": "Legacy liteecho plugin running on Python compatibility bridge",
+  "name": "plugin.liteecho.name",
+  "description": "plugin.liteecho.description",
   "type": "service",
   "runtime": {
     "kind": "python",
@@ -13,7 +13,7 @@
   "commands": [
     {
       "name": "/liteecho",
-      "description": "Echo back the provided text through the Python bridge",
+      "description": "plugin.liteecho.command.liteecho.description",
       "scopes": ["adapter:onebot11"]
     }
   ],

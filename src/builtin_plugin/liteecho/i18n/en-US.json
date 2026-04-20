@@ -1,0 +1,5 @@
+{
+  "plugin.liteecho.name": "Builtin LiteEcho",
+  "plugin.liteecho.description": "Legacy liteecho plugin running on the Python compatibility bridge",
+  "plugin.liteecho.command.liteecho.description": "Echo back the provided text through the Python bridge"
+}
