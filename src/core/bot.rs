@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
 use super::{
     BotEvent, BotHandle, BotRuntime, BotRuntimeConfig, HookFilter, LifecycleContext,
@@ -266,6 +266,7 @@ impl LiteyukiBotBuilder {
             adapter_manager,
             plugin_ids: self.plugin_ids,
             plugin_dirs: self.plugin_dirs,
+            disabled_plugin_ids: Arc::new(RwLock::new(HashSet::new())),
             adapter_autostart: self.adapter_autostart,
             logger,
             bootstrap_hooks: Vec::new(),
@@ -289,6 +290,7 @@ pub struct LiteyukiBot {
     adapter_manager: AdapterManager,
     plugin_ids: Vec<String>,
     plugin_dirs: Vec<PathBuf>,
+    disabled_plugin_ids: Arc<RwLock<HashSet<String>>>,
     adapter_autostart: bool,
     logger: Logger,
     bootstrap_hooks: Vec<BootstrapHook>,
@@ -329,6 +331,36 @@ impl LiteyukiBot {
 
     pub fn plugin_sdk(&self) -> &PluginSdk {
         &self.plugin_sdk
+    }
+
+    pub fn disabled_plugin_ids(&self) -> Vec<String> {
+        let mut entries = self
+            .disabled_plugin_ids
+            .read()
+            .expect("disabled plugin ids lock should not be poisoned")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
+    }
+
+    pub fn set_disabled_plugin_ids<I, S>(&self, ids: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let next = ids
+            .into_iter()
+            .map(Into::into)
+            .map(|id| id.trim().to_ascii_lowercase())
+            .filter(|id| !id.is_empty())
+            .collect::<HashSet<_>>();
+        let mut lock = self
+            .disabled_plugin_ids
+            .write()
+            .expect("disabled plugin ids lock should not be poisoned");
+        *lock = next;
     }
 
     pub fn adapter_manager(&self) -> &AdapterManager {
@@ -491,12 +523,26 @@ impl LiteyukiBot {
         self.runtime_handle = Some(handle);
         progress.runtime_started = true;
 
+        if let Err(err) = self
+            .plugin_manager
+            .start_loaded_plugins(self.plugin_context())
+            .await
+        {
+            self.rollback_failed_start(&progress).await;
+            return Err(err.into());
+        }
+
         if self.adapter_autostart {
             progress.adapters_may_be_running = true;
             if let Err(err) = self.start_adapters().await {
                 self.rollback_failed_start(&progress).await;
                 return Err(err);
             }
+        }
+
+        if let Err(err) = self.health_check_plugins().await {
+            self.rollback_failed_start(&progress).await;
+            return Err(err);
         }
 
         if let Err(err) = self.lifespan.after_start(self.lifecycle.clone()).await {
@@ -550,6 +596,78 @@ impl LiteyukiBot {
         Ok(())
     }
 
+    pub async fn health_check_plugins(&self) -> Result<(), LiteyukiBotError> {
+        if self.runtime_handle.is_none() {
+            return Err(LiteyukiBotError::NotStarted);
+        }
+        self.plugin_manager
+            .health_check_loaded_plugins(self.plugin_context())
+            .await
+            .map_err(LiteyukiBotError::Plugin)
+    }
+
+    pub async fn reload_plugins<I, S>(&self, disabled_ids: I) -> Result<(), LiteyukiBotError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        if self.runtime_handle.is_none() {
+            return Err(LiteyukiBotError::NotStarted);
+        }
+
+        let previous_disabled = self.disabled_plugin_ids();
+        let next_disabled = disabled_ids.into_iter().map(Into::into).collect::<Vec<_>>();
+        self.set_disabled_plugin_ids(next_disabled.clone());
+
+        if let Err(err) = self
+            .plugin_manager
+            .shutdown_loaded_plugins(self.plugin_context())
+            .await
+        {
+            self.logger.warn_in(
+                MODULE_BOT,
+                format!("plugin reload: shutdown existing plugins reported: {err}"),
+            );
+        }
+
+        match self.sync_plugins_for_current_policy().await {
+            Ok(()) => {
+                self.logger.info_in(
+                    MODULE_BOT,
+                    format!(
+                        "plugin reload applied (disabled={})",
+                        self.disabled_plugin_ids().len()
+                    ),
+                );
+                Ok(())
+            }
+            Err(err) => {
+                self.logger.warn_in(
+                    MODULE_BOT,
+                    format!("plugin reload failed, attempting rollback: {err}"),
+                );
+                if let Err(shutdown_err) = self
+                    .plugin_manager
+                    .shutdown_loaded_plugins(self.plugin_context())
+                    .await
+                {
+                    self.logger.warn_in(
+                        MODULE_BOT,
+                        format!("plugin reload rollback shutdown reported: {shutdown_err}"),
+                    );
+                }
+                self.set_disabled_plugin_ids(previous_disabled.clone());
+                if let Err(rollback_err) = self.sync_plugins_for_current_policy().await {
+                    self.logger.error_in(
+                        MODULE_BOT,
+                        format!("plugin reload rollback failed: {rollback_err}"),
+                    );
+                }
+                Err(err)
+            }
+        }
+    }
+
     pub async fn shutdown(&mut self) -> Result<(), LiteyukiBotError> {
         if self.runtime_handle.is_none() && !self.process_manager.is_running("runtime") {
             return Err(LiteyukiBotError::NotStarted);
@@ -560,6 +678,18 @@ impl LiteyukiBot {
 
         self.run_before_shutdown_hooks(&process_names, "shutdown", &mut first_error)
             .await;
+
+        if let Err(err) = self
+            .plugin_manager
+            .shutdown_loaded_plugins(self.plugin_context())
+            .await
+        {
+            self.record_first_error(
+                &mut first_error,
+                "shutdown plugins",
+                LiteyukiBotError::Plugin(err),
+            );
+        }
 
         if let Err(err) = self.adapter_manager.shutdown_all().await {
             self.record_first_error(
@@ -643,6 +773,17 @@ impl LiteyukiBot {
             );
         }
 
+        if let Err(err) = self
+            .plugin_manager
+            .shutdown_loaded_plugins(self.plugin_context())
+            .await
+        {
+            self.logger.warn_in(
+                MODULE_BOT,
+                format!("start rollback: plugin shutdown failed: {err}"),
+            );
+        }
+
         if progress.before_start_completed
             && let Err(err) = self.lifespan.after_shutdown(self.lifecycle.clone()).await
         {
@@ -654,19 +795,7 @@ impl LiteyukiBot {
     }
 
     async fn load_plugins(&self) -> Result<(), LiteyukiBotError> {
-        let discovered = self
-            .plugin_manager
-            .discover_manifest_plugins_in_dirs(self.plugin_dirs.iter())
-            .map_err(LiteyukiBotError::Plugin)?;
-
-        let mut pending: Vec<String> = Vec::new();
-        let mut visited = HashSet::new();
-        for id in discovered.into_iter().chain(self.plugin_ids.clone()) {
-            if visited.insert(id.clone()) {
-                pending.push(id);
-            }
-        }
-
+        let pending = self.collect_pending_plugin_ids().await?;
         if pending.is_empty() {
             return Ok(());
         }
@@ -676,6 +805,55 @@ impl LiteyukiBot {
             .await
             .map_err(LiteyukiBotError::Plugin)?;
         Ok(())
+    }
+
+    async fn sync_plugins_for_current_policy(&self) -> Result<(), LiteyukiBotError> {
+        let pending = self.collect_pending_plugin_ids().await?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        self.plugin_manager
+            .load_plugins(pending, self.plugin_context())
+            .await
+            .map_err(LiteyukiBotError::Plugin)?;
+        self.plugin_manager
+            .start_loaded_plugins(self.plugin_context())
+            .await
+            .map_err(LiteyukiBotError::Plugin)?;
+        self.plugin_manager
+            .health_check_loaded_plugins(self.plugin_context())
+            .await
+            .map_err(LiteyukiBotError::Plugin)?;
+        Ok(())
+    }
+
+    async fn collect_pending_plugin_ids(&self) -> Result<Vec<String>, LiteyukiBotError> {
+        let discovered = self
+            .plugin_manager
+            .discover_manifest_plugins_in_dirs(self.plugin_dirs.iter())
+            .map_err(LiteyukiBotError::Plugin)?;
+
+        let disabled = self
+            .disabled_plugin_ids
+            .read()
+            .expect("disabled plugin ids lock should not be poisoned")
+            .clone();
+        let mut pending: Vec<String> = Vec::new();
+        let mut visited = HashSet::new();
+        for id in discovered.into_iter().chain(self.plugin_ids.clone()) {
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+            if disabled.contains(id.as_str()) {
+                self.logger
+                    .info_in(MODULE_BOT, format!("skip disabled plugin '{}'", id));
+                continue;
+            }
+            pending.push(id);
+        }
+
+        Ok(pending)
     }
 
     pub async fn start_adapters(&self) -> Result<(), LiteyukiBotError> {

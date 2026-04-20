@@ -103,3 +103,51 @@ impl PluginDescriptor {
 fn default_sdk_version() -> String {
     "0.1".to_string()
 }
+
+pub(crate) const PLUGIN_PERMISSION_ALLOW_ALL: &str = "*";
+
+const SUPPORTED_PLUGIN_PERMISSIONS: [&str; 7] = [
+    PLUGIN_PERMISSION_ALLOW_ALL,
+    "kv.read",
+    "kv.write",
+    "channel.publish",
+    "adapter.reply",
+    "config.read",
+    "config.write",
+];
+
+const SUPPORTED_PLUGIN_COMMAND_PERMISSIONS: [&str; 2] = ["command.tui.read", "command.tui.manage"];
+
+pub(crate) fn supported_plugin_permissions() -> Vec<&'static str> {
+    let mut permissions = Vec::with_capacity(
+        SUPPORTED_PLUGIN_PERMISSIONS.len() + SUPPORTED_PLUGIN_COMMAND_PERMISSIONS.len(),
+    );
+    permissions.extend(SUPPORTED_PLUGIN_PERMISSIONS);
+    permissions.extend(SUPPORTED_PLUGIN_COMMAND_PERMISSIONS);
+    permissions
+}
+
+pub(crate) fn normalize_plugin_permission(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let compact = trimmed.to_ascii_lowercase().replace([' ', '_', '-'], "");
+    match compact.as_str() {
+        "*" | "all" => Some(PLUGIN_PERMISSION_ALLOW_ALL.to_string()),
+        "kv.read" | "kvread" => Some("kv.read".to_string()),
+        "kv.write" | "kvwrite" => Some("kv.write".to_string()),
+        "channel.publish" | "channelpublish" | "publish" => Some("channel.publish".to_string()),
+        "adapter.reply" | "adapterreply" | "reply" => Some("adapter.reply".to_string()),
+        "config.read" | "configread" => Some("config.read".to_string()),
+        "config.write" | "configwrite" | "config.delete" | "configdelete" => {
+            Some("config.write".to_string())
+        }
+        "command.tui.read" | "commandtuiread" => Some("command.tui.read".to_string()),
+        "command.tui.manage" | "commandtuimanage" | "command.tui.write" | "commandtuiwrite" => {
+            Some("command.tui.manage".to_string())
+        }
+        _ => None,
+    }
+}

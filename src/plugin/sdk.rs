@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -20,6 +21,7 @@ use crate::observability::Logger;
 use crate::session::SessionRouter;
 
 use super::abi::PluginAbiContract;
+use super::model::{PLUGIN_PERMISSION_ALLOW_ALL, normalize_plugin_permission};
 use super::{PluginCommandDescriptor, PluginDescriptor, PluginRuntimeKind};
 
 const PYTHON_META_ATTRS: [&str; 3] = [
@@ -28,6 +30,11 @@ const PYTHON_META_ATTRS: [&str; 3] = [
     "__liteyuki_plugin_meta__",
 ];
 const PYTHON_EVENT_HANDLER_ATTRS: [&str; 3] = ["on_event", "handle_event", "liteyuki_handle_event"];
+const PYTHON_START_HANDLER_ATTRS: [&str; 3] = ["on_start", "start", "liteyuki_start"];
+const PYTHON_HEALTH_HANDLER_ATTRS: [&str; 3] =
+    ["on_health_check", "health_check", "liteyuki_health_check"];
+const PYTHON_UNLOAD_HANDLER_ATTRS: [&str; 3] = ["on_unload", "unload", "liteyuki_unload"];
+const PYTHON_SHUTDOWN_HANDLER_ATTRS: [&str; 3] = ["on_shutdown", "shutdown", "liteyuki_shutdown"];
 const DEFAULT_PLUGIN_CONFIG_PATHS: [&str; 6] = [
     "config.yaml",
     "rust-config.yaml",
@@ -37,6 +44,15 @@ const DEFAULT_PLUGIN_CONFIG_PATHS: [&str; 6] = [
     "config/rust-core.toml",
 ];
 static PLUGIN_CONFIG_RW_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+const HOST_PLUGIN_API_VERSION: &str = "0.1";
+const PERMISSION_KV_READ: &str = "kv.read";
+const PERMISSION_KV_WRITE: &str = "kv.write";
+const PERMISSION_CHANNEL_PUBLISH: &str = "channel.publish";
+const PERMISSION_ADAPTER_REPLY: &str = "adapter.reply";
+const PERMISSION_CONFIG_READ: &str = "config.read";
+const PERMISSION_CONFIG_WRITE: &str = "config.write";
+const PERMISSION_COMMAND_TUI_READ: &str = "command.tui.read";
+const PERMISSION_COMMAND_TUI_MANAGE: &str = "command.tui.manage";
 
 pub type PluginSdkFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginSdkError>> + Send>>;
 
@@ -107,6 +123,8 @@ pub trait PluginHostApi: Send + Sync {
     fn publish(&self, channel_name: String, topic: String, payload: Value) -> PluginSdkFuture<()>;
     fn kv_get(&self, key: String) -> PluginSdkFuture<Option<Value>>;
     fn kv_set(&self, key: String, value: Value) -> PluginSdkFuture<()>;
+    fn host_app_version(&self) -> &str;
+    fn host_api_version(&self) -> &'static str;
 }
 
 #[derive(Clone)]
@@ -235,6 +253,14 @@ impl PluginHostApi for PluginHostBridge {
             Ok(())
         })
     }
+
+    fn host_app_version(&self) -> &str {
+        self.lifecycle.app_version()
+    }
+
+    fn host_api_version(&self) -> &'static str {
+        HOST_PLUGIN_API_VERSION
+    }
 }
 
 pub trait RuntimeAdapter: Send + Sync {
@@ -295,11 +321,15 @@ struct PythonRuntimeState {
     plugins: HashMap<String, PythonLoadedPlugin>,
     commands: HashMap<String, PythonTuiCommandEntry>,
     declared_commands: Vec<PythonDeclaredCommandEntry>,
-    disabled_builtin_commands: HashSet<ScopedCommandKey>,
+    disabled_scope_commands: HashSet<ScopedCommandKey>,
 }
 
 struct PythonLoadedPlugin {
     event_handler: Option<Py<PyAny>>,
+    start_handler: Option<Py<PyAny>>,
+    health_handler: Option<Py<PyAny>>,
+    shutdown_handler: Option<Py<PyAny>>,
+    unload_handler: Option<Py<PyAny>>,
     sdk: Py<PyPluginSdk>,
 }
 
@@ -323,7 +353,31 @@ struct PythonDeclaredCommandEntry {
     description: String,
     plugin_id: String,
     scopes: Vec<String>,
-    disabled_scopes: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PluginPermissionSet {
+    entries: HashSet<String>,
+}
+
+impl PluginPermissionSet {
+    fn from_declared(entries: &[String]) -> Result<Self, String> {
+        let mut normalized = HashSet::new();
+        for entry in entries {
+            let Some(permission) = normalize_plugin_permission(entry.as_str()) else {
+                return Err(format!("unsupported plugin permission '{}'", entry.trim()));
+            };
+            normalized.insert(permission);
+        }
+
+        Ok(Self {
+            entries: normalized,
+        })
+    }
+
+    fn allows(&self, permission: &str) -> bool {
+        self.entries.contains(PLUGIN_PERMISSION_ALLOW_ALL) || self.entries.contains(permission)
+    }
 }
 
 #[pyclass]
@@ -333,6 +387,7 @@ struct PyPluginSdk {
     host: PluginHostBridge,
     runtime_state: Arc<Mutex<PythonRuntimeState>>,
     config_path: Option<PathBuf>,
+    permissions: PluginPermissionSet,
 }
 
 #[pymethods]
@@ -379,6 +434,7 @@ impl PyPluginSdk {
     }
 
     fn kv_get(&self, py: Python<'_>, key: String) -> PyResult<PyObject> {
+        self.ensure_permission(PERMISSION_KV_READ, "read shared kv values")?;
         let value = self
             .host
             .shared_store()
@@ -388,6 +444,7 @@ impl PyPluginSdk {
     }
 
     fn kv_set(&self, py: Python<'_>, key: String, value: Py<PyAny>) -> PyResult<()> {
+        self.ensure_permission(PERMISSION_KV_WRITE, "write shared kv values")?;
         let key = key.trim();
         if key.is_empty() {
             return Err(PyValueError::new_err("kv key should not be empty"));
@@ -398,6 +455,12 @@ impl PyPluginSdk {
     }
 
     fn kv_delete(&self, key: String) -> bool {
+        if self
+            .ensure_permission(PERMISSION_KV_WRITE, "delete shared kv values")
+            .is_err()
+        {
+            return false;
+        }
         let key = key.trim();
         if key.is_empty() {
             return false;
@@ -412,6 +475,7 @@ impl PyPluginSdk {
         topic: String,
         payload: Py<PyAny>,
     ) -> PyResult<()> {
+        self.ensure_permission(PERMISSION_CHANNEL_PUBLISH, "publish channel messages")?;
         let channel_name = channel_name.trim();
         let topic = topic.trim();
         if channel_name.is_empty() {
@@ -429,6 +493,7 @@ impl PyPluginSdk {
     }
 
     fn reply_text(&self, py: Python<'_>, event: Py<PyAny>, message: String) -> PyResult<bool> {
+        self.ensure_permission(PERMISSION_ADAPTER_REPLY, "reply through adapters")?;
         let event = py_any_to_json(event.bind(py))?;
         self.host
             .reply_onebot_text(&event, message.as_str(), self.plugin_id.as_str())
@@ -436,6 +501,7 @@ impl PyPluginSdk {
     }
 
     fn config_get(&self, py: Python<'_>, key: String) -> PyResult<PyObject> {
+        self.ensure_permission(PERMISSION_CONFIG_READ, "read plugin config")?;
         let value = read_config_value(self.config_path.as_deref(), key.as_str())
             .map_err(PyRuntimeError::new_err)?
             .unwrap_or(Value::Null);
@@ -443,12 +509,14 @@ impl PyPluginSdk {
     }
 
     fn config_set(&self, py: Python<'_>, key: String, value: Py<PyAny>) -> PyResult<()> {
+        self.ensure_permission(PERMISSION_CONFIG_WRITE, "write plugin config")?;
         let value = py_any_to_json(value.bind(py))?;
         write_config_value(self.config_path.as_deref(), key.as_str(), value)
             .map_err(PyRuntimeError::new_err)
     }
 
     fn config_delete(&self, key: String) -> PyResult<bool> {
+        self.ensure_permission(PERMISSION_CONFIG_WRITE, "write plugin config")?;
         delete_config_value(self.config_path.as_deref(), key.as_str())
             .map_err(PyRuntimeError::new_err)
     }
@@ -462,6 +530,7 @@ impl PyPluginSdk {
         description: Option<String>,
         enabled: Option<bool>,
     ) -> PyResult<()> {
+        self.ensure_permission(PERMISSION_COMMAND_TUI_MANAGE, "manage TUI commands")?;
         register_tui_command(
             &self.runtime_state,
             self.plugin_id.as_str(),
@@ -475,6 +544,7 @@ impl PyPluginSdk {
     }
 
     fn disable_tui_command(&self, command: String) -> PyResult<bool> {
+        self.ensure_permission(PERMISSION_COMMAND_TUI_MANAGE, "manage TUI commands")?;
         set_tui_command_enabled(
             &self.runtime_state,
             self.plugin_id.as_str(),
@@ -485,6 +555,7 @@ impl PyPluginSdk {
     }
 
     fn enable_tui_command(&self, command: String) -> PyResult<bool> {
+        self.ensure_permission(PERMISSION_COMMAND_TUI_MANAGE, "manage TUI commands")?;
         set_tui_command_enabled(
             &self.runtime_state,
             self.plugin_id.as_str(),
@@ -495,6 +566,7 @@ impl PyPluginSdk {
     }
 
     fn remove_tui_command(&self, command: String) -> PyResult<bool> {
+        self.ensure_permission(PERMISSION_COMMAND_TUI_MANAGE, "manage TUI commands")?;
         remove_tui_command(
             &self.runtime_state,
             self.plugin_id.as_str(),
@@ -504,6 +576,7 @@ impl PyPluginSdk {
     }
 
     fn list_tui_commands(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.ensure_permission(PERMISSION_COMMAND_TUI_READ, "read TUI command catalog")?;
         let commands = list_tui_commands(&self.runtime_state);
         let value = serde_json::to_value(commands)
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
@@ -517,13 +590,25 @@ impl PyPluginSdk {
         host: PluginHostBridge,
         runtime_state: Arc<Mutex<PythonRuntimeState>>,
         config_path: Option<PathBuf>,
+        permissions: PluginPermissionSet,
     ) -> Self {
         Self {
             plugin_id,
             host,
             runtime_state,
             config_path,
+            permissions,
         }
+    }
+
+    fn ensure_permission(&self, permission: &'static str, action: &str) -> PyResult<()> {
+        if self.permissions.allows(permission) {
+            return Ok(());
+        }
+        Err(PyRuntimeError::new_err(format!(
+            "plugin '{}' is not allowed to {} (missing permission '{}')",
+            self.plugin_id, action, permission
+        )))
     }
 }
 
@@ -572,6 +657,56 @@ impl PluginSdk {
         match descriptor.runtime.kind {
             PluginRuntimeKind::Python => self.load_python_manifest_plugin(descriptor, host),
             _ => Ok(false),
+        }
+    }
+
+    pub fn start_manifest_plugin(
+        &self,
+        descriptor: &PluginDescriptor,
+    ) -> Result<(), PluginSdkError> {
+        match descriptor.runtime.kind {
+            PluginRuntimeKind::Python => {
+                start_python_manifest_plugin(&self.python_runtime, descriptor.metadata.id.as_str())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub fn health_check_manifest_plugin(
+        &self,
+        descriptor: &PluginDescriptor,
+    ) -> Result<(), PluginSdkError> {
+        match descriptor.runtime.kind {
+            PluginRuntimeKind::Python => health_check_python_manifest_plugin(
+                &self.python_runtime,
+                descriptor.metadata.id.as_str(),
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn shutdown_manifest_plugin(
+        &self,
+        descriptor: &PluginDescriptor,
+    ) -> Result<(), PluginSdkError> {
+        match descriptor.runtime.kind {
+            PluginRuntimeKind::Python => shutdown_python_manifest_plugin(
+                &self.python_runtime,
+                descriptor.metadata.id.as_str(),
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn unload_manifest_plugin(
+        &self,
+        descriptor: &PluginDescriptor,
+    ) -> Result<(), PluginSdkError> {
+        match descriptor.runtime.kind {
+            PluginRuntimeKind::Python => {
+                unload_python_manifest_plugin(&self.python_runtime, descriptor.metadata.id.as_str())
+            }
+            _ => Ok(()),
         }
     }
 
@@ -680,12 +815,34 @@ impl PluginSdk {
             .map_err(PluginSdkError::Runtime)
     }
 
+    pub fn is_scope_command_disabled(&self, scope: &str, command: &str) -> bool {
+        self.python_runtime
+            .lock()
+            .map(|lock| is_scope_command_disabled(&lock, scope, command))
+            .unwrap_or(false)
+    }
+
     pub fn list_tui_commands(&self) -> Vec<PluginTuiCommand> {
         list_tui_commands(&self.python_runtime)
     }
 
     pub fn list_scope_commands(&self, scope: &str) -> Vec<PluginScopedCommand> {
         list_scope_commands(&self.python_runtime, scope)
+    }
+
+    pub fn list_disabled_scope_commands(&self) -> Vec<String> {
+        self.python_runtime
+            .lock()
+            .map(|lock| list_disabled_scope_commands(&lock))
+            .unwrap_or_default()
+    }
+
+    pub fn sync_disabled_scope_commands(&self, entries: &[String]) -> Result<(), PluginSdkError> {
+        let mut lock = self
+            .python_runtime
+            .lock()
+            .map_err(|_| PluginSdkError::Runtime("python runtime lock poisoned".to_string()))?;
+        sync_disabled_scope_commands_in_lock(&mut lock, entries).map_err(PluginSdkError::Runtime)
     }
 
     pub fn set_scope_command_enabled(
@@ -706,7 +863,8 @@ impl PluginSdk {
                 .map(|entry| PluginTuiCommand {
                     name: entry.command.clone(),
                     description: entry.description.clone(),
-                    enabled: entry.enabled,
+                    enabled: entry.enabled
+                        && !is_scope_command_disabled(&lock, "tui", entry.command.as_str()),
                     plugin_id: entry.plugin_id.clone(),
                 })
         })
@@ -728,7 +886,9 @@ impl PluginSdk {
                 let Some(command_entry) = lock.commands.get(command.as_str()) else {
                     return Ok(None);
                 };
-                if !command_entry.enabled {
+                if !command_entry.enabled
+                    || is_scope_command_disabled(&lock, "tui", command_entry.command.as_str())
+                {
                     return Err(PluginSdkError::Runtime(format!(
                         "plugin command '{}' is disabled",
                         command
@@ -791,8 +951,34 @@ impl PluginSdk {
         let runtime_state = self.python_runtime.clone();
         let host = host.clone();
         let runtime_options = descriptor.runtime.options.clone();
+        let permissions = PluginPermissionSet::from_declared(descriptor.permissions.as_slice())
+            .map_err(PluginSdkError::Runtime)?;
         let event_handler_override = runtime_options
             .get("event_handler")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .map(ToString::to_string);
+        let start_handler_override = runtime_options
+            .get("start_handler")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .map(ToString::to_string);
+        let health_handler_override = runtime_options
+            .get("health_handler")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .map(ToString::to_string);
+        let shutdown_handler_override = runtime_options
+            .get("shutdown_handler")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .map(ToString::to_string);
+        let unload_handler_override = runtime_options
+            .get("unload_handler")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|raw| !raw.is_empty())
@@ -814,6 +1000,7 @@ impl PluginSdk {
                     host.clone(),
                     runtime_state.clone(),
                     config_path.clone(),
+                    permissions.clone(),
                 ),
             )?;
             install_python_sdk_bridge(py, Some(&sdk))?;
@@ -829,6 +1016,26 @@ impl PluginSdk {
 
             invoke_python_bootstrap(py, &module, &probe.entrypoint, &sdk)?;
             let event_handler = resolve_python_event_handler(&module, event_handler_override)?;
+            let start_handler = resolve_python_lifecycle_handler(
+                &module,
+                start_handler_override,
+                &PYTHON_START_HANDLER_ATTRS,
+            )?;
+            let health_handler = resolve_python_lifecycle_handler(
+                &module,
+                health_handler_override,
+                &PYTHON_HEALTH_HANDLER_ATTRS,
+            )?;
+            let shutdown_handler = resolve_python_lifecycle_handler(
+                &module,
+                shutdown_handler_override,
+                &PYTHON_SHUTDOWN_HANDLER_ATTRS,
+            )?;
+            let unload_handler = resolve_python_lifecycle_handler(
+                &module,
+                unload_handler_override,
+                &PYTHON_UNLOAD_HANDLER_ATTRS,
+            )?;
 
             let mut lock = runtime_state
                 .lock()
@@ -838,8 +1045,17 @@ impl PluginSdk {
                 plugin_id.as_str(),
                 descriptor.commands.as_slice(),
             );
-            lock.plugins
-                .insert(plugin_id.clone(), PythonLoadedPlugin { event_handler, sdk });
+            lock.plugins.insert(
+                plugin_id.clone(),
+                PythonLoadedPlugin {
+                    event_handler,
+                    start_handler,
+                    health_handler,
+                    shutdown_handler,
+                    unload_handler,
+                    sdk,
+                },
+            );
             Ok(())
         })
         .map_err(|err| {
@@ -865,22 +1081,19 @@ impl RuntimeAdapter for NativeRuntimeAdapter {
     fn plan_load(
         &self,
         descriptor: &PluginDescriptor,
-        _host: &dyn PluginHostApi,
+        host: &dyn PluginHostApi,
     ) -> PluginSdkFuture<PluginLoadPlan> {
-        let abi_version = normalize_abi_version(&descriptor.runtime.abi);
-        let host_api_version = normalize_host_api_version(&descriptor.sdk.api_version);
-        let mut contract = PluginAbiContract::new(
+        let contract = build_plugin_contract(
+            descriptor,
             PluginRuntimeKind::Native,
             "liteyuki-native",
-            abi_version,
-            host_api_version,
+            host,
+            true,
         );
-        contract
-            .required_methods
-            .push(super::abi::PluginAbiMethod::HandleEvent);
         let has_entry = !descriptor.runtime.entrypoint.trim().is_empty()
             || !descriptor.runtime.module.trim().is_empty();
         Box::pin(async move {
+            let contract = contract?;
             if has_entry {
                 Ok(PluginLoadPlan::ready(PluginRuntimeKind::Native, contract))
             } else {
@@ -902,19 +1115,18 @@ impl RuntimeAdapter for PythonRuntimeAdapter {
     fn plan_load(
         &self,
         descriptor: &PluginDescriptor,
-        _host: &dyn PluginHostApi,
+        host: &dyn PluginHostApi,
     ) -> PluginSdkFuture<PluginLoadPlan> {
-        let mut contract = PluginAbiContract::new(
+        let contract = build_plugin_contract(
+            descriptor,
             PluginRuntimeKind::Python,
             "liteyuki-python-bridge",
-            normalize_abi_version(&descriptor.runtime.abi),
-            normalize_host_api_version(&descriptor.sdk.api_version),
+            host,
+            true,
         );
-        contract
-            .required_methods
-            .push(super::abi::PluginAbiMethod::HandleEvent);
         let probe = probe_python_plugin_compatibility(descriptor);
         Box::pin(async move {
+            let contract = contract?;
             match probe {
                 Ok(_) => Ok(PluginLoadPlan::ready(PluginRuntimeKind::Python, contract)),
                 Err(reason) => Ok(PluginLoadPlan::deferred(
@@ -935,15 +1147,17 @@ impl RuntimeAdapter for LuaRuntimeAdapter {
     fn plan_load(
         &self,
         descriptor: &PluginDescriptor,
-        _host: &dyn PluginHostApi,
+        host: &dyn PluginHostApi,
     ) -> PluginSdkFuture<PluginLoadPlan> {
-        let contract = PluginAbiContract::new(
+        let contract = build_plugin_contract(
+            descriptor,
             PluginRuntimeKind::Lua,
             "liteyuki-lua-bridge",
-            normalize_abi_version(&descriptor.runtime.abi),
-            normalize_host_api_version(&descriptor.sdk.api_version),
+            host,
+            false,
         );
         Box::pin(async move {
+            let contract = contract?;
             Ok(PluginLoadPlan::deferred(
                 PluginRuntimeKind::Lua,
                 contract,
@@ -1192,6 +1406,31 @@ fn resolve_python_event_handler(
         return Ok(Some(handler.unbind().into()));
     }
     for candidate in PYTHON_EVENT_HANDLER_ATTRS {
+        if let Ok(handler) = module.getattr(candidate) {
+            if handler.is_callable() {
+                return Ok(Some(handler.unbind().into()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn resolve_python_lifecycle_handler(
+    module: &pyo3::Bound<'_, PyModule>,
+    override_name: Option<String>,
+    defaults: &[&str],
+) -> PyResult<Option<Py<PyAny>>> {
+    if let Some(name) = override_name {
+        let handler = module.getattr(name.as_str())?;
+        if !handler.is_callable() {
+            return Err(PyTypeError::new_err(format!(
+                "python lifecycle handler '{}' is not callable",
+                name
+            )));
+        }
+        return Ok(Some(handler.unbind().into()));
+    }
+    for candidate in defaults {
         if let Ok(handler) = module.getattr(candidate) {
             if handler.is_callable() {
                 return Ok(Some(handler.unbind().into()));
@@ -1469,6 +1708,140 @@ fn render_python_command_result(
     Ok(repr)
 }
 
+fn start_python_manifest_plugin(
+    state: &Arc<Mutex<PythonRuntimeState>>,
+    plugin_id: &str,
+) -> Result<(), PluginSdkError> {
+    let Some((handler, sdk)) = Python::with_gil(|py| -> Result<_, PluginSdkError> {
+        let lock = state
+            .lock()
+            .map_err(|_| PluginSdkError::Runtime("python runtime lock poisoned".to_string()))?;
+        let Some(plugin) = lock.plugins.get(plugin_id) else {
+            return Ok(None);
+        };
+        Ok(plugin
+            .start_handler
+            .as_ref()
+            .map(|handler| (handler.clone_ref(py), plugin.sdk.clone_ref(py))))
+    })?
+    else {
+        return Ok(());
+    };
+
+    Python::with_gil(|py| -> Result<(), PluginSdkError> {
+        invoke_python_lifecycle_handler(py, &handler, &sdk).map_err(|err| {
+            PluginSdkError::Runtime(format!(
+                "python plugin '{}' start hook failed: {}",
+                plugin_id, err
+            ))
+        })
+    })
+}
+
+fn health_check_python_manifest_plugin(
+    state: &Arc<Mutex<PythonRuntimeState>>,
+    plugin_id: &str,
+) -> Result<(), PluginSdkError> {
+    let Some((handler, sdk)) = Python::with_gil(|py| -> Result<_, PluginSdkError> {
+        let lock = state
+            .lock()
+            .map_err(|_| PluginSdkError::Runtime("python runtime lock poisoned".to_string()))?;
+        let Some(plugin) = lock.plugins.get(plugin_id) else {
+            return Ok(None);
+        };
+        Ok(plugin
+            .health_handler
+            .as_ref()
+            .map(|handler| (handler.clone_ref(py), plugin.sdk.clone_ref(py))))
+    })?
+    else {
+        return Ok(());
+    };
+
+    Python::with_gil(|py| -> Result<(), PluginSdkError> {
+        invoke_python_lifecycle_handler(py, &handler, &sdk).map_err(|err| {
+            PluginSdkError::Runtime(format!(
+                "python plugin '{}' health check failed: {}",
+                plugin_id, err
+            ))
+        })
+    })
+}
+
+fn shutdown_python_manifest_plugin(
+    state: &Arc<Mutex<PythonRuntimeState>>,
+    plugin_id: &str,
+) -> Result<(), PluginSdkError> {
+    Python::with_gil(|py| -> Result<(), PluginSdkError> {
+        let lock = state
+            .lock()
+            .map_err(|_| PluginSdkError::Runtime("python runtime lock poisoned".to_string()))?;
+        let Some(plugin) = lock.plugins.get(plugin_id) else {
+            return Ok(());
+        };
+        let Some(handler) = plugin.shutdown_handler.as_ref() else {
+            return Ok(());
+        };
+        invoke_python_lifecycle_handler(py, &handler.clone_ref(py), &plugin.sdk.clone_ref(py))
+            .map_err(|err| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' shutdown hook failed: {}",
+                    plugin_id, err
+                ))
+            })
+    })
+}
+
+fn unload_python_manifest_plugin(
+    state: &Arc<Mutex<PythonRuntimeState>>,
+    plugin_id: &str,
+) -> Result<(), PluginSdkError> {
+    let hook_result = Python::with_gil(|py| -> Result<(), PluginSdkError> {
+        let lock = state
+            .lock()
+            .map_err(|_| PluginSdkError::Runtime("python runtime lock poisoned".to_string()))?;
+        let Some(plugin) = lock.plugins.get(plugin_id) else {
+            return Ok(());
+        };
+        let Some(handler) = plugin.unload_handler.as_ref() else {
+            return Ok(());
+        };
+        invoke_python_lifecycle_handler(py, &handler.clone_ref(py), &plugin.sdk.clone_ref(py))
+            .map_err(|err| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' unload hook failed: {}",
+                    plugin_id, err
+                ))
+            })
+    });
+
+    let cleanup_result = {
+        let mut lock = state
+            .lock()
+            .map_err(|_| PluginSdkError::Runtime("python runtime lock poisoned".to_string()))?;
+        remove_plugin_runtime_state(&mut lock, plugin_id);
+        Ok(())
+    };
+
+    match (hook_result, cleanup_result) {
+        (_, Err(err)) => Err(err),
+        (Err(err), Ok(())) => Err(err),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+fn invoke_python_lifecycle_handler(
+    py: Python<'_>,
+    handler: &Py<PyAny>,
+    sdk: &Py<PyPluginSdk>,
+) -> PyResult<()> {
+    let sdk_obj: Py<PyAny> = sdk.clone_ref(py).into_any();
+    let result =
+        call_python_callable_with_fallback(py, handler.bind(py), vec![vec![sdk_obj], Vec::new()])?;
+    let _ = await_python_result(py, result)?;
+    Ok(())
+}
+
 fn remove_plugin_runtime_state(state: &mut PythonRuntimeState, plugin_id: &str) {
     state.plugins.remove(plugin_id);
     state
@@ -1491,7 +1864,7 @@ fn disabled_declared_command_for_plugin(
         .iter()
         .find(|entry| {
             entry.plugin_id == plugin_id
-                && entry.disabled_scopes.contains(scope)
+                && is_scope_command_disabled(state, scope, entry.command.as_str())
                 && plugin_scope_matches(&entry.scopes, scope)
                 && declared_command_matches_message(entry.command.as_str(), message.as_str())
         })
@@ -1675,7 +2048,12 @@ fn is_builtin_command_disabled_in_lock(
     command: &str,
 ) -> bool {
     normalize_scoped_command_key(scope, command)
-        .is_some_and(|key| lock.disabled_builtin_commands.contains(&key))
+        .is_some_and(|key| lock.disabled_scope_commands.contains(&key))
+}
+
+fn is_scope_command_disabled(state: &PythonRuntimeState, scope: &str, command: &str) -> bool {
+    normalize_scoped_command_key(scope, command)
+        .is_some_and(|key| state.disabled_scope_commands.contains(&key))
 }
 
 fn set_builtin_command_enabled_in_lock(
@@ -1688,10 +2066,50 @@ fn set_builtin_command_enabled_in_lock(
         return Err("command scope or name is invalid".to_string());
     };
     if enabled {
-        Ok(lock.disabled_builtin_commands.remove(&key))
+        Ok(lock.disabled_scope_commands.remove(&key))
     } else {
-        Ok(lock.disabled_builtin_commands.insert(key))
+        Ok(lock.disabled_scope_commands.insert(key))
     }
+}
+
+fn sync_disabled_scope_commands_in_lock(
+    lock: &mut PythonRuntimeState,
+    entries: &[String],
+) -> Result<(), String> {
+    let mut disabled = HashSet::new();
+    for entry in entries {
+        let Some((scope, command)) = parse_disabled_scope_command_entry(entry.as_str()) else {
+            return Err(format!(
+                "invalid disabled scope command entry '{}': expected '<scope> <name>'",
+                entry.trim()
+            ));
+        };
+        let Some(key) = normalize_scoped_command_key(scope.as_str(), command.as_str()) else {
+            return Err(format!(
+                "invalid disabled scope command entry '{}': expected '<scope> <name>'",
+                entry.trim()
+            ));
+        };
+        disabled.insert(key);
+    }
+    lock.disabled_scope_commands = disabled;
+    Ok(())
+}
+
+fn list_disabled_scope_commands(lock: &PythonRuntimeState) -> Vec<String> {
+    let mut entries = lock
+        .disabled_scope_commands
+        .iter()
+        .map(|entry| format!("{} {}", entry.scope, entry.command))
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+}
+
+fn parse_disabled_scope_command_entry(raw: &str) -> Option<(String, String)> {
+    let raw = raw.trim();
+    let (scope, command) = raw.split_once(char::is_whitespace)?;
+    Some((scope.trim().to_string(), command.trim().to_string()))
 }
 
 fn register_declared_commands(
@@ -1712,7 +2130,6 @@ fn register_declared_commands(
             },
             plugin_id: plugin_id.to_string(),
             scopes: normalize_plugin_scopes(&descriptor.scopes),
-            disabled_scopes: HashSet::new(),
         })
     }));
 }
@@ -1758,9 +2175,6 @@ fn register_tui_command(
             handler,
         },
     );
-    if let Some(key) = normalize_scoped_command_key("tui", command.as_str()) {
-        lock.disabled_builtin_commands.remove(&key);
-    }
     Ok(())
 }
 
@@ -1806,35 +2220,21 @@ fn set_scope_command_enabled(
     let mut lock = state
         .lock()
         .map_err(|_| "python runtime lock poisoned".to_string())?;
-    let mut affected = 0usize;
-
-    for entry in &mut lock.declared_commands {
-        if entry.command != command || !plugin_scope_matches(&entry.scopes, scope.as_str()) {
-            continue;
-        }
-        let changed = if enabled {
-            entry.disabled_scopes.remove(scope.as_str())
-        } else {
-            entry.disabled_scopes.insert(scope.clone())
-        };
-        if changed {
-            affected += 1;
-        }
-    }
+    let mut matched = lock.declared_commands.iter().any(|entry| {
+        entry.command == command && plugin_scope_matches(&entry.scopes, scope.as_str())
+    });
 
     if scope == "tui" {
-        for entry in lock.commands.values_mut() {
-            if entry.command != command {
-                continue;
-            }
-            if entry.enabled != enabled {
-                entry.enabled = enabled;
-                affected += 1;
-            }
-        }
+        matched |= lock.commands.values().any(|entry| entry.command == command);
     }
 
-    Ok(affected)
+    let changed =
+        set_builtin_command_enabled_in_lock(&mut lock, scope.as_str(), command.as_str(), enabled)?;
+    if matched || changed {
+        Ok(usize::from(changed || matched))
+    } else {
+        Ok(0)
+    }
 }
 
 fn remove_tui_command(
@@ -1869,7 +2269,8 @@ fn list_tui_commands(state: &Arc<Mutex<PythonRuntimeState>>) -> Vec<PluginTuiCom
         .map(|entry| PluginTuiCommand {
             name: entry.command.clone(),
             description: entry.description.clone(),
-            enabled: entry.enabled,
+            enabled: entry.enabled
+                && !is_scope_command_disabled(&lock, "tui", entry.command.as_str()),
             plugin_id: entry.plugin_id.clone(),
         })
         .collect();
@@ -1901,7 +2302,7 @@ fn list_scope_commands(
             PluginScopedCommand {
                 name: entry.command.clone(),
                 description: entry.description.clone(),
-                enabled: !entry.disabled_scopes.contains(scope.as_str()),
+                enabled: !is_scope_command_disabled(&lock, scope.as_str(), entry.command.as_str()),
                 plugin_id: entry.plugin_id.clone(),
                 scopes: entry.scopes.clone(),
                 executable_in_tui: false,
@@ -1919,7 +2320,8 @@ fn list_scope_commands(
             .entry(key)
             .and_modify(|existing| {
                 existing.description = entry.description.clone();
-                existing.enabled = entry.enabled;
+                existing.enabled = entry.enabled
+                    && !is_scope_command_disabled(&lock, "tui", entry.command.as_str());
                 existing.executable_in_tui = true;
                 if !existing.scopes.iter().any(|scope| scope == "tui") {
                     existing.scopes.push("tui".to_string());
@@ -1928,7 +2330,8 @@ fn list_scope_commands(
             .or_insert_with(|| PluginScopedCommand {
                 name: entry.command.clone(),
                 description: entry.description.clone(),
-                enabled: entry.enabled,
+                enabled: entry.enabled
+                    && !is_scope_command_disabled(&lock, "tui", entry.command.as_str()),
                 plugin_id: entry.plugin_id.clone(),
                 scopes,
                 executable_in_tui: true,
@@ -2291,10 +2694,170 @@ fn normalize_abi_version(raw: &str) -> String {
     }
 }
 
+fn build_plugin_contract(
+    descriptor: &PluginDescriptor,
+    runtime_kind: PluginRuntimeKind,
+    abi_name: &str,
+    host: &dyn PluginHostApi,
+    requires_handle_event: bool,
+) -> Result<PluginAbiContract, PluginSdkError> {
+    validate_declared_permissions(descriptor.permissions.as_slice(), runtime_kind)?;
+
+    let host_api_version = normalize_host_api_version(host.host_api_version());
+    let requested_api_version = parse_version_components(
+        descriptor.sdk.api_version.as_str(),
+        Some(HOST_PLUGIN_API_VERSION),
+        runtime_kind,
+        "sdk.api_version",
+    )?;
+    let host_api_components = parse_version_components(
+        host_api_version.as_str(),
+        Some(HOST_PLUGIN_API_VERSION),
+        runtime_kind,
+        "host api version",
+    )?;
+    let requested_display = format_version_components(requested_api_version.as_slice());
+    let host_api_display = format_version_components(host_api_components.as_slice());
+    if requested_api_version.first().copied().unwrap_or_default()
+        != host_api_components.first().copied().unwrap_or_default()
+        || compare_version_components(
+            host_api_components.as_slice(),
+            requested_api_version.as_slice(),
+        ) == Ordering::Less
+    {
+        return Err(PluginSdkError::UnsupportedRuntime {
+            kind: runtime_kind,
+            reason: format!(
+                "plugin SDK api_version '{}' is not supported by host api {}",
+                requested_display, host_api_display
+            ),
+        });
+    }
+
+    if !descriptor.sdk.min_host_version.trim().is_empty() {
+        let minimum_host = parse_version_components(
+            descriptor.sdk.min_host_version.as_str(),
+            None,
+            runtime_kind,
+            "sdk.min_host_version",
+        )?;
+        let actual_host = parse_version_components(
+            host.host_app_version(),
+            None,
+            runtime_kind,
+            "host app version",
+        )?;
+        if compare_version_components(actual_host.as_slice(), minimum_host.as_slice())
+            == Ordering::Less
+        {
+            return Err(PluginSdkError::UnsupportedRuntime {
+                kind: runtime_kind,
+                reason: format!(
+                    "plugin requires host version >= {} but current host is {}",
+                    format_version_components(minimum_host.as_slice()),
+                    format_version_components(actual_host.as_slice())
+                ),
+            });
+        }
+    }
+
+    let mut contract = PluginAbiContract::new(
+        runtime_kind,
+        abi_name,
+        normalize_abi_version(&descriptor.runtime.abi),
+        host_api_version,
+    );
+    if requires_handle_event {
+        contract
+            .required_methods
+            .push(super::abi::PluginAbiMethod::HandleEvent);
+    }
+    Ok(contract)
+}
+
+fn validate_declared_permissions(
+    permissions: &[String],
+    runtime_kind: PluginRuntimeKind,
+) -> Result<(), PluginSdkError> {
+    PluginPermissionSet::from_declared(permissions)
+        .map(|_| ())
+        .map_err(|err| PluginSdkError::UnsupportedRuntime {
+            kind: runtime_kind,
+            reason: err,
+        })
+}
+
 fn normalize_host_api_version(raw: &str) -> String {
     if raw.trim().is_empty() {
-        "0.1".to_string()
+        HOST_PLUGIN_API_VERSION.to_string()
     } else {
         raw.trim().to_string()
     }
+}
+
+fn parse_version_components(
+    raw: &str,
+    default_value: Option<&str>,
+    runtime_kind: PluginRuntimeKind,
+    field_name: &str,
+) -> Result<Vec<u64>, PluginSdkError> {
+    let candidate = if raw.trim().is_empty() {
+        default_value.unwrap_or("")
+    } else {
+        raw.trim()
+    };
+    let candidate = candidate
+        .split(['-', '+'])
+        .next()
+        .unwrap_or(candidate)
+        .trim();
+    if candidate.is_empty() {
+        return Err(PluginSdkError::UnsupportedRuntime {
+            kind: runtime_kind,
+            reason: format!("{field_name} should not be empty"),
+        });
+    }
+
+    let mut components = Vec::new();
+    for segment in candidate.split('.') {
+        if segment.is_empty() || !segment.chars().all(|ch| ch.is_ascii_digit()) {
+            return Err(PluginSdkError::UnsupportedRuntime {
+                kind: runtime_kind,
+                reason: format!("{field_name} should use dot-separated numeric versions"),
+            });
+        }
+        let value = segment
+            .parse::<u64>()
+            .map_err(|_| PluginSdkError::UnsupportedRuntime {
+                kind: runtime_kind,
+                reason: format!("{field_name} contains an out-of-range version segment"),
+            })?;
+        components.push(value);
+    }
+
+    while components.len() > 1 && components.last() == Some(&0) {
+        components.pop();
+    }
+    Ok(components)
+}
+
+fn compare_version_components(left: &[u64], right: &[u64]) -> Ordering {
+    let max_len = left.len().max(right.len());
+    for index in 0..max_len {
+        let lhs = left.get(index).copied().unwrap_or(0);
+        let rhs = right.get(index).copied().unwrap_or(0);
+        match lhs.cmp(&rhs) {
+            Ordering::Equal => continue,
+            ordering => return ordering,
+        }
+    }
+    Ordering::Equal
+}
+
+fn format_version_components(components: &[u64]) -> String {
+    components
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(".")
 }

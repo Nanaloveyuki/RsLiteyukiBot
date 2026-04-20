@@ -23,6 +23,77 @@ fn test_tui_config(path: PathBuf) -> TuiConfig {
     }
 }
 
+fn temp_plugin_dir(name: &str) -> PathBuf {
+    let mut path = std::env::temp_dir();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    path.push(format!("rsliteyuki-plugin-{name}-{nanos}"));
+    path
+}
+
+fn register_test_manifest_plugin(
+    id: &str,
+    name: &str,
+    runtime_kind: &str,
+) -> (PluginManager, PathBuf) {
+    let manager = PluginManager::new();
+    let plugin_dir = temp_plugin_dir(id);
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        format!(
+            r#"{{
+  "id": "{id}",
+  "name": "{name}",
+  "type": "service",
+  "runtime": {{
+    "kind": "{runtime_kind}",
+    "entrypoint": "demo:bootstrap"
+  }}
+}}"#
+        ),
+    )
+    .expect("plugin manifest should be written");
+
+    manager
+        .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+        .expect("manifest discovery should succeed");
+
+    (manager, plugin_dir)
+}
+
+fn register_test_manifest_plugins(specs: &[(&str, &str, &str)]) -> (PluginManager, Vec<PathBuf>) {
+    let manager = PluginManager::new();
+    let mut plugin_dirs = Vec::new();
+    for (id, name, runtime_kind) in specs {
+        let plugin_dir = temp_plugin_dir(id);
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            format!(
+                r#"{{
+  "id": "{id}",
+  "name": "{name}",
+  "type": "service",
+  "runtime": {{
+    "kind": "{runtime_kind}",
+    "entrypoint": "demo:bootstrap"
+  }}
+}}"#
+            ),
+        )
+        .expect("plugin manifest should be written");
+        manager
+            .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+            .expect("manifest discovery should succeed");
+        plugin_dirs.push(plugin_dir);
+    }
+
+    (manager, plugin_dirs)
+}
+
 #[test]
 fn command_history_navigation_restores_draft() {
     let path = temp_resume_path("history-navigation");
@@ -495,6 +566,8 @@ fn apply_reload_result_updates_shared_llm_command_prefix() {
         tui_config: test_tui_config(path.clone()),
         help_whitelist: Vec::new(),
         llm_command_prefix: "/qa".to_string(),
+        disabled_commands: Vec::new(),
+        disabled_plugins: vec!["builtin-liteecho".to_string()],
         warnings: Vec::new(),
     });
 
@@ -503,6 +576,7 @@ fn apply_reload_result_updates_shared_llm_command_prefix() {
         .expect("llm command prefix lock should be readable in test")
         .clone();
     assert_eq!(prefix, "/qa");
+    assert!(app.disabled_plugins.contains("builtin-liteecho"));
     assert!(
         app.logs
             .iter()
@@ -812,6 +886,211 @@ fn commands_command_can_disable_and_enable_builtin_scope_command() {
             .contains(&"/help".to_string())
     );
 
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn plugins_command_lists_catalog_with_runtime_type() {
+    let path = temp_resume_path("plugin-catalog");
+    remove_file_if_exists(&path);
+    let (manager, plugin_dir) =
+        register_test_manifest_plugin("builtin-liteecho", "Builtin LiteEcho", "python");
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.bind_plugin_manager(manager);
+
+    app.handle_console_command("/plugins");
+    assert!(
+        app.logs
+            .iter()
+            .any(|log| log.message.contains("plugin catalog (1):"))
+    );
+    assert!(app.logs.iter().any(|log| {
+        log.message.contains("builtin-liteecho (python)")
+            && log.message.contains("service")
+            && log.message.contains("enabled")
+    }));
+
+    let _ = std::fs::remove_dir_all(plugin_dir);
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn plugins_command_can_disable_and_enable_plugin() {
+    let path = temp_resume_path("plugin-manage");
+    remove_file_if_exists(&path);
+    let (manager, plugin_dir) =
+        register_test_manifest_plugin("builtin-liteecho", "Builtin LiteEcho", "python");
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.bind_plugin_manager(manager);
+
+    let disable = app.handle_console_command("/plugins disable builtin-liteecho");
+    assert!(matches!(
+        disable,
+        CommandOutcome::PersistDisabledPlugins { .. }
+    ));
+    assert!(app.disabled_plugins.contains("builtin-liteecho"));
+    assert!(app.logs.iter().any(|log| {
+        log.message
+            .contains("plugin 'builtin-liteecho' disabled (python)")
+    }));
+
+    let enable = app.handle_console_command("/plugins enable builtin-liteecho");
+    assert!(matches!(
+        enable,
+        CommandOutcome::PersistDisabledPlugins { .. }
+    ));
+    assert!(!app.disabled_plugins.contains("builtin-liteecho"));
+    assert!(app.logs.iter().any(|log| {
+        log.message
+            .contains("plugin 'builtin-liteecho' enabled (python)")
+    }));
+
+    let _ = std::fs::remove_dir_all(plugin_dir);
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn dashboard_plugin_selection_moves_and_wraps() {
+    let path = temp_resume_path("dashboard-plugin-selection");
+    remove_file_if_exists(&path);
+    let (manager, plugin_dirs) = register_test_manifest_plugins(&[
+        ("zeta-plugin", "Zeta Plugin", "python"),
+        ("alpha-plugin", "Alpha Plugin", "python"),
+        ("beta-plugin", "Beta Plugin", "python"),
+    ]);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.bind_plugin_manager(manager);
+
+    assert!(app.is_dashboard_view());
+    assert_eq!(app.normalized_dashboard_plugin_index(3), Some(0));
+
+    assert!(app.move_dashboard_plugin_selection(1));
+    assert!(app.is_dashboard_plugins_focus());
+    assert_eq!(app.normalized_dashboard_plugin_index(3), Some(1));
+
+    assert!(app.move_dashboard_plugin_selection(1));
+    assert_eq!(app.normalized_dashboard_plugin_index(3), Some(2));
+
+    assert!(app.move_dashboard_plugin_selection(1));
+    assert_eq!(app.normalized_dashboard_plugin_index(3), Some(0));
+
+    assert!(app.move_dashboard_plugin_selection(-1));
+    assert_eq!(app.normalized_dashboard_plugin_index(3), Some(2));
+
+    for plugin_dir in plugin_dirs {
+        let _ = std::fs::remove_dir_all(plugin_dir);
+    }
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn dashboard_plugin_toggle_matches_plugins_command_semantics() {
+    let path = temp_resume_path("dashboard-plugin-toggle");
+    remove_file_if_exists(&path);
+    let (manager, plugin_dirs) =
+        register_test_manifest_plugins(&[("alpha-plugin", "Alpha Plugin", "python")]);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.bind_plugin_manager(manager);
+
+    app.move_dashboard_plugin_selection(1);
+    assert_eq!(
+        app.command_help_text(),
+        "插件面板: 当前 alpha-plugin；Up/Down 选择；Enter 禁用；Tab 回到命令"
+    );
+    let disable_command = app
+        .dashboard_toggle_selected_plugin_command()
+        .expect("dashboard toggle should produce a disable command");
+    assert_eq!(disable_command, "/plugins disable alpha-plugin");
+
+    let disable = app.handle_console_command(disable_command.as_str());
+    assert!(matches!(
+        disable,
+        CommandOutcome::PersistDisabledPlugins {
+            ref entries,
+            ref rollback_entries,
+        } if entries == &vec!["alpha-plugin".to_string()] && rollback_entries.is_empty()
+    ));
+    assert!(app.disabled_plugins.contains("alpha-plugin"));
+    assert_eq!(
+        app.command_help_text(),
+        "插件面板: 当前 alpha-plugin；Up/Down 选择；Enter 启用；Tab 回到命令"
+    );
+
+    let enable_command = app
+        .dashboard_toggle_selected_plugin_command()
+        .expect("dashboard toggle should produce an enable command");
+    assert_eq!(enable_command, "/plugins enable alpha-plugin");
+
+    let enable = app.handle_console_command(enable_command.as_str());
+    assert!(matches!(
+        enable,
+        CommandOutcome::PersistDisabledPlugins {
+            ref entries,
+            ref rollback_entries,
+        } if entries.is_empty() && rollback_entries == &vec!["alpha-plugin".to_string()]
+    ));
+    assert!(!app.disabled_plugins.contains("alpha-plugin"));
+
+    for plugin_dir in plugin_dirs {
+        let _ = std::fs::remove_dir_all(plugin_dir);
+    }
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn empty_input_help_text_switches_to_dashboard_plugin_panel_hint() {
+    let path = temp_resume_path("dashboard-plugin-help-hint");
+    remove_file_if_exists(&path);
+    let (manager, plugin_dirs) =
+        register_test_manifest_plugins(&[("alpha-plugin", "Alpha Plugin", "python")]);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.bind_plugin_manager(manager);
+
+    assert_eq!(
+        app.command_help_text(),
+        "命令面板: 输入 /help 查看命令；Tab 切到插件；Enter 执行；PgUp/PgDn/Home/End 滚动日志"
+    );
+
+    app.cycle_dashboard_focus();
+    assert!(app.is_dashboard_plugin_panel_active());
+    assert_eq!(
+        app.command_help_text(),
+        "插件面板: 当前 alpha-plugin；Up/Down 选择；Enter 禁用；Tab 回到命令"
+    );
+
+    for plugin_dir in plugin_dirs {
+        let _ = std::fs::remove_dir_all(plugin_dir);
+    }
     remove_file_if_exists(&path);
 }
 

@@ -282,6 +282,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let help_whitelist = Arc::new(RwLock::new(resolve_help_whitelist(&app_config)));
     let tui_config = resolve_tui_config(&app_config);
     let llm_config = resolve_llm_config(&app_config);
+    let disabled_commands = resolve_disabled_scope_commands(&app_config);
+    let disabled_plugins = resolve_disabled_plugins(&app_config);
     let llm_runtime = LlmCommandRuntime::new(llm_config.command_prefix.clone());
     let external_gateway = ExternalGateway::new();
     let superuser_manager =
@@ -358,6 +360,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .build();
+    if let Err(err) = bot
+        .plugin_sdk()
+        .sync_disabled_scope_commands(&disabled_commands)
+    {
+        eprintln!("failed to apply persisted command policy at startup: {err}");
+    }
+    bot.set_disabled_plugin_ids(disabled_plugins.clone());
 
     emit_external_stats(&ui_tx, &external_gateway.snapshot());
     let external_gateway_for_tick = external_gateway.clone();
@@ -424,11 +433,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tui_config,
             reload_handler: reload_from_config,
             whitelist_persist_handler: persist_help_whitelist,
+            disabled_commands_persist_handler: persist_disabled_commands_config,
+            disabled_plugins_persist_handler: persist_disabled_plugins_config,
             llm_command_handler: handle_llm_tui_command,
             ask_handler: handle_tui_ask_command,
             help_whitelist: help_whitelist.clone(),
             llm_command_prefix: llm_runtime.shared_command_prefix(),
             plugin_sdk: bot.plugin_sdk().clone(),
+            plugin_manager: bot.plugin_manager().clone(),
+            disabled_plugins,
         },
         &mut ui_rx,
     )
@@ -1112,15 +1125,22 @@ fn reload_from_config(bot: &LiteyukiBot) -> tui::ReloadFuture<'_> {
             .map_err(|err| format!("failed to apply adapter reload: {err}"))?;
         let tui_config = resolve_tui_config(&app_config);
         let llm_command_prefix = resolve_llm_config(&app_config).command_prefix;
+        let disabled_commands = resolve_disabled_scope_commands(&app_config);
+        let disabled_plugins = resolve_disabled_plugins(&app_config);
         let mut help_whitelist: Vec<String> =
             resolve_help_whitelist(&app_config).into_iter().collect();
         help_whitelist.sort();
+        bot.reload_plugins(disabled_plugins.clone())
+            .await
+            .map_err(|err| format!("failed to apply plugin reload: {err}"))?;
         Ok(tui::ReloadResult {
             adapters,
             adapter_autostart: autostart,
             tui_config,
             help_whitelist,
             llm_command_prefix,
+            disabled_commands,
+            disabled_plugins,
             warnings,
         })
     })
@@ -1133,6 +1153,30 @@ fn persist_help_whitelist(entries: Vec<String>) -> Result<String, String> {
     config_edit::persist_onebot_v11_whitelist(path.as_path(), &entries)?;
     Ok(format!(
         "whitelist persisted to {} (entries={})",
+        path.display(),
+        entries.len()
+    ))
+}
+
+fn persist_disabled_commands_config(entries: Vec<String>) -> Result<String, String> {
+    let path = resolve_app_config_path().unwrap_or_else(|| PathBuf::from("config.yaml"));
+    write_default_config_if_missing(path.as_path())
+        .map_err(|err| format!("failed to ensure config exists: {err}"))?;
+    config_edit::persist_disabled_commands(path.as_path(), &entries)?;
+    Ok(format!(
+        "command policy persisted to {} (disabled={})",
+        path.display(),
+        entries.len()
+    ))
+}
+
+fn persist_disabled_plugins_config(entries: Vec<String>) -> Result<String, String> {
+    let path = resolve_app_config_path().unwrap_or_else(|| PathBuf::from("config.yaml"));
+    write_default_config_if_missing(path.as_path())
+        .map_err(|err| format!("failed to ensure config exists: {err}"))?;
+    config_edit::persist_disabled_plugins(path.as_path(), &entries)?;
+    Ok(format!(
+        "plugin policy persisted to {} (disabled={})",
         path.display(),
         entries.len()
     ))

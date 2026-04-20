@@ -17,6 +17,7 @@
       "scopes": ["adapter:onebot11"]
     }
   ],
+  "permissions": ["adapter.reply"],
   "sdk": {
     "api_version": "0.1"
   }

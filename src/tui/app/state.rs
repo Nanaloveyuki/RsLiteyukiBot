@@ -49,10 +49,14 @@ impl AppState {
             last_resume_flush: Instant::now(),
             last_resume_save_error: None,
             view_mode: UiViewMode::Dashboard,
+            dashboard_focus: DashboardFocus::Command,
+            dashboard_plugin_index: 0,
             completion_state: None,
             help_whitelist: None,
             llm_command_prefix: None,
             plugin_sdk: None,
+            plugin_manager: None,
+            disabled_plugins: HashSet::new(),
         };
         state.enforce_resume_limits();
         state
@@ -60,6 +64,18 @@ impl AppState {
 
     pub(super) fn bind_plugin_sdk(&mut self, plugin_sdk: PluginSdk) {
         self.plugin_sdk = Some(plugin_sdk);
+    }
+
+    pub(super) fn bind_plugin_manager(&mut self, plugin_manager: PluginManager) {
+        self.plugin_manager = Some(plugin_manager);
+    }
+
+    pub(super) fn sync_disabled_plugins(&mut self, entries: &[String]) {
+        self.disabled_plugins = entries
+            .iter()
+            .map(|entry| entry.trim().to_ascii_lowercase())
+            .filter(|entry| !entry.is_empty())
+            .collect();
     }
 
     pub(super) fn drop_oldest_non_active_resume(&mut self) -> bool {
@@ -157,6 +173,20 @@ impl AppState {
             );
         }
 
+        let mut disabled_commands_sync_failed = None;
+        if let Some(plugin_sdk) = self.plugin_sdk.clone()
+            && let Err(err) = plugin_sdk.sync_disabled_scope_commands(&result.disabled_commands)
+        {
+            disabled_commands_sync_failed = Some(err.to_string());
+        }
+        if let Some(err) = disabled_commands_sync_failed {
+            self.push_log(
+                UiLevel::Error,
+                format!("failed to sync command policy from reloaded config: {err}"),
+            );
+        }
+        self.sync_disabled_plugins(&result.disabled_plugins);
+
         self.push_log(
             UiLevel::Info,
             format!(
@@ -172,6 +202,20 @@ impl AppState {
             format!(
                 "reload applied external LLM command prefix: {}",
                 result.llm_command_prefix
+            ),
+        );
+        self.push_log(
+            UiLevel::Info,
+            format!(
+                "reload applied disabled command entries: {}",
+                result.disabled_commands.len()
+            ),
+        );
+        self.push_log(
+            UiLevel::Info,
+            format!(
+                "reload applied disabled plugin entries: {}",
+                result.disabled_plugins.len()
             ),
         );
         for warning in result.warnings {
@@ -438,7 +482,43 @@ impl AppState {
         self.view_mode == UiViewMode::LogConsole
     }
 
+    pub(super) fn is_dashboard_view(&self) -> bool {
+        self.view_mode == UiViewMode::Dashboard
+    }
+
+    pub(super) fn is_dashboard_plugins_focus(&self) -> bool {
+        self.is_dashboard_view() && self.dashboard_focus == DashboardFocus::Plugins
+    }
+
+    pub(super) fn is_dashboard_plugin_panel_active(&self) -> bool {
+        self.is_dashboard_plugins_focus() && self.console_input.is_empty()
+    }
+
+    pub(super) fn cycle_dashboard_focus(&mut self) {
+        if !self.is_dashboard_view() || !self.console_input.is_empty() {
+            return;
+        }
+        self.clear_completion_state();
+        self.dashboard_focus = match self.dashboard_focus {
+            DashboardFocus::Command => DashboardFocus::Plugins,
+            DashboardFocus::Plugins => DashboardFocus::Command,
+        };
+    }
+
+    pub(super) fn focus_dashboard_command(&mut self) {
+        self.dashboard_focus = DashboardFocus::Command;
+    }
+
+    pub(super) fn normalized_dashboard_plugin_index(&self, catalog_len: usize) -> Option<usize> {
+        if catalog_len == 0 {
+            None
+        } else {
+            Some(self.dashboard_plugin_index.min(catalog_len - 1))
+        }
+    }
+
     pub(super) fn set_view_mode(&mut self, view_mode: UiViewMode) {
         self.view_mode = view_mode;
+        self.focus_dashboard_command();
     }
 }

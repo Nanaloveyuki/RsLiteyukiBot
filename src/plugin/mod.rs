@@ -10,7 +10,8 @@ pub use abi::{
 };
 pub use loader::{PluginManifest, PluginManifestError, PluginManifestLoader};
 pub use manager::{
-    LoadedPlugin, Plugin, PluginContext, PluginFuture, PluginLoadError, PluginManager,
+    LoadedPlugin, Plugin, PluginCatalogEntry, PluginContext, PluginFuture, PluginLoadError,
+    PluginManager,
 };
 pub use model::{
     PluginCommandDescriptor, PluginDescriptor, PluginMetadata, PluginRuntimeKind,

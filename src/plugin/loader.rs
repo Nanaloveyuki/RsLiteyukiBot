@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::model::{normalize_plugin_permission, supported_plugin_permissions};
 use super::{
     PluginCommandDescriptor, PluginDescriptor, PluginMetadata, PluginRuntimeSpec, PluginSdkSpec,
     PluginType,
@@ -116,6 +117,8 @@ impl PluginManifestLoader {
             manifest_path: Some(path.to_path_buf()),
         };
         validate_manifest_commands(descriptor.commands.as_mut_slice(), path)?;
+        descriptor.permissions =
+            normalize_manifest_permissions(descriptor.permissions.as_slice(), path)?;
         Ok(PluginManifest {
             descriptor,
             path: path.to_path_buf(),
@@ -243,4 +246,25 @@ fn normalize_manifest_command_scope(raw: &str) -> Result<String, String> {
             trimmed
         )),
     }
+}
+
+fn normalize_manifest_permissions(
+    raw_permissions: &[String],
+    path: &Path,
+) -> Result<Vec<String>, PluginManifestError> {
+    let mut permissions = Vec::new();
+    for (permission_idx, raw_permission) in raw_permissions.iter().enumerate() {
+        let Some(permission) = normalize_plugin_permission(raw_permission) else {
+            return Err(PluginManifestError::Parse(format!(
+                "invalid manifest permission in {}: permissions[{permission_idx}] uses unsupported permission '{}' (supported: {})",
+                path.display(),
+                raw_permission.trim(),
+                supported_plugin_permissions().join(", ")
+            )));
+        };
+        if !permissions.iter().any(|existing| existing == &permission) {
+            permissions.push(permission);
+        }
+    }
+    Ok(permissions)
 }

@@ -42,8 +42,24 @@ pub(crate) struct AppConfigDoc {
     pub(crate) tui: Option<TuiConfigSection>,
     #[serde(default)]
     pub(crate) llm: Option<LlmConfigSection>,
+    #[serde(default)]
+    pub(crate) commands: Option<CommandConfigSection>,
+    #[serde(default)]
+    pub(crate) plugins: Option<PluginConfigSection>,
     #[serde(default, rename = "onebot-v11", alias = "onebot_v11")]
     pub(crate) onebot_v11: Option<OnebotV11ConfigSection>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct CommandConfigSection {
+    #[serde(default)]
+    pub(crate) disabled: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct PluginConfigSection {
+    #[serde(default)]
+    pub(crate) disabled: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -80,6 +96,10 @@ pub(crate) struct AppRustSection {
     pub(crate) adapters: Option<Vec<AdapterConfig>>,
     #[serde(default)]
     pub(crate) tui: Option<TuiConfigSection>,
+    #[serde(default)]
+    pub(crate) commands: Option<CommandConfigSection>,
+    #[serde(default)]
+    pub(crate) plugins: Option<PluginConfigSection>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -492,6 +512,17 @@ llm:
   # api_key: sk-xxx
   # system_prompt: "You are a helpful assistant."
 
+commands:
+  # 格式: "<scope> <name>"
+  # - "tui /help"
+  # - "adapter:onebot11 /su"
+  disabled: []
+
+plugins:
+  # 按 plugin id 禁用插件
+  # - "builtin-liteecho"
+  disabled: []
+
 onebot-v11:
   # 仅白名单会话可触发外部 /help。
   # 可写纯ID（private常用 user_id；group常用 group_id）或带前缀:
@@ -567,6 +598,14 @@ command_prefix = "/ask"
 # api_key = "sk-xxx"
 # system_prompt = "You are a helpful assistant."
 
+[commands]
+# disabled = ["tui /help", "adapter:onebot11 /su"]
+disabled = []
+
+[plugins]
+# disabled = ["builtin-liteecho"]
+disabled = []
+
 [onebot-v11]
 # whitelist = ["3541766758", "private:3541766758", "group:699493240"]
 whitelist = []
@@ -629,6 +668,20 @@ fn config_onebot_v11(doc: &AppConfigDoc) -> Option<&OnebotV11ConfigSection> {
     doc.onebot_v11.as_ref()
 }
 
+fn config_commands(doc: &AppConfigDoc) -> Option<&CommandConfigSection> {
+    doc.rust
+        .as_ref()
+        .and_then(|section| section.commands.as_ref())
+        .or(doc.commands.as_ref())
+}
+
+fn config_plugins(doc: &AppConfigDoc) -> Option<&PluginConfigSection> {
+    doc.rust
+        .as_ref()
+        .and_then(|section| section.plugins.as_ref())
+        .or(doc.plugins.as_ref())
+}
+
 pub(crate) fn resolve_help_whitelist(doc: &AppConfigDoc) -> HashSet<String> {
     config_onebot_v11(doc)
         .map(|section| {
@@ -640,6 +693,87 @@ pub(crate) fn resolve_help_whitelist(doc: &AppConfigDoc) -> HashSet<String> {
                 .collect::<HashSet<_>>()
         })
         .unwrap_or_default()
+}
+
+fn normalize_disabled_command_entry(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (scope, command) = raw.split_once(char::is_whitespace)?;
+    let scope = normalize_command_scope(scope)?;
+    let command = normalize_command_name(command)?;
+    Some(format!("{scope} {command}"))
+}
+
+fn normalize_command_scope(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let compact = trimmed.to_ascii_lowercase().replace([' ', '_', '-'], "");
+    match compact.as_str() {
+        "tui" => Some("tui".to_string()),
+        "adapter:onebot11" | "adapter:onebotv11" | "adapteronebot11" | "onebot11" | "onebotv11" => {
+            Some("adapter:onebot11".to_string())
+        }
+        _ => None,
+    }
+}
+
+fn normalize_command_name(raw: &str) -> Option<String> {
+    let first = raw.split_whitespace().next()?.trim();
+    if first.is_empty() || first == "/" {
+        return None;
+    }
+    if first.starts_with('/') {
+        Some(first.to_ascii_lowercase())
+    } else {
+        Some(format!("/{}", first.to_ascii_lowercase()))
+    }
+}
+
+pub(crate) fn resolve_disabled_scope_commands(doc: &AppConfigDoc) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    if let Some(commands) = config_commands(doc) {
+        for entry in &commands.disabled {
+            let Some(normalized) = normalize_disabled_command_entry(entry) else {
+                continue;
+            };
+            if seen.insert(normalized.clone()) {
+                entries.push(normalized);
+            }
+        }
+    }
+    entries.sort();
+    entries
+}
+
+fn normalize_plugin_id_entry(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+pub(crate) fn resolve_disabled_plugins(doc: &AppConfigDoc) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    if let Some(plugins) = config_plugins(doc) {
+        for entry in &plugins.disabled {
+            let Some(normalized) = normalize_plugin_id_entry(entry) else {
+                continue;
+            };
+            if seen.insert(normalized.clone()) {
+                entries.push(normalized);
+            }
+        }
+    }
+    entries.sort();
+    entries
 }
 
 pub(crate) fn load_adapter_configs(
@@ -1391,6 +1525,27 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
         for entry in &onebot.whitelist {
             if entry.as_token().is_empty() {
                 warnings.push("onebot-v11.whitelist should not contain empty values".to_string());
+                break;
+            }
+        }
+    }
+
+    if let Some(commands) = config_commands(doc) {
+        for entry in &commands.disabled {
+            if normalize_disabled_command_entry(entry).is_none() {
+                warnings.push(
+                    "commands.disabled entries should use '<scope> <name>' with scope tui|adapter:onebot11".to_string(),
+                );
+                break;
+            }
+        }
+    }
+
+    if let Some(plugins) = config_plugins(doc) {
+        for entry in &plugins.disabled {
+            if normalize_plugin_id_entry(entry).is_none() {
+                warnings
+                    .push("plugins.disabled entries should use non-empty plugin ids".to_string());
                 break;
             }
         }

@@ -2,6 +2,9 @@
 #[path = "../src/app_config.rs"]
 mod app_config;
 #[allow(dead_code, unused_imports)]
+#[path = "../src/command_registry.rs"]
+mod command_registry;
+#[allow(dead_code, unused_imports)]
 #[path = "../src/llm/mod.rs"]
 mod llm;
 #[allow(dead_code, unused_imports)]
@@ -58,6 +61,8 @@ fn validate_app_config_reports_invalid_values() {
                     max_size_mib: Some(0),
                 }),
             }),
+            commands: None,
+            plugins: None,
         }),
         runtime: None,
         log: None,
@@ -65,6 +70,8 @@ fn validate_app_config_reports_invalid_values() {
         connect: None,
         tui: None,
         llm: None,
+        commands: None,
+        plugins: None,
         onebot_v11: None,
     };
 
@@ -88,6 +95,8 @@ fn runtime_reload_warnings_detect_low_level_runtime_fields() {
             log: None,
             adapters: None,
             tui: None,
+            commands: None,
+            plugins: None,
         }),
         runtime: None,
         log: None,
@@ -95,6 +104,8 @@ fn runtime_reload_warnings_detect_low_level_runtime_fields() {
         connect: None,
         tui: None,
         llm: None,
+        commands: None,
+        plugins: None,
         onebot_v11: None,
     };
 
@@ -125,6 +136,8 @@ fn runtime_reload_warnings_skip_when_sensitive_fields_unchanged() {
             }),
             adapters: None,
             tui: None,
+            commands: None,
+            plugins: None,
         }),
         runtime: None,
         log: None,
@@ -132,6 +145,8 @@ fn runtime_reload_warnings_skip_when_sensitive_fields_unchanged() {
         connect: None,
         tui: None,
         llm: None,
+        commands: None,
+        plugins: None,
         onebot_v11: None,
     };
 
@@ -172,6 +187,8 @@ fn connect_websocket_both_mode_generates_forward_and_reverse_adapters() {
         }),
         tui: None,
         llm: None,
+        commands: None,
+        plugins: None,
         onebot_v11: None,
     };
 
@@ -220,6 +237,8 @@ fn connect_websocket_port_without_mode_defaults_to_reverse() {
         }),
         tui: None,
         llm: None,
+        commands: None,
+        plugins: None,
         onebot_v11: None,
     };
 
@@ -265,6 +284,8 @@ fn connect_websocket_urls_expand_to_multiple_adapters() {
         }),
         tui: None,
         llm: None,
+        commands: None,
+        plugins: None,
         onebot_v11: None,
     };
 
@@ -308,6 +329,8 @@ fn connect_http_urls_expand_to_multiple_adapters() {
         }),
         tui: None,
         llm: None,
+        commands: None,
+        plugins: None,
         onebot_v11: None,
     };
 
@@ -346,6 +369,8 @@ fn resolve_help_whitelist_accepts_numeric_and_prefixed_entries() {
         connect: None,
         tui: None,
         llm: None,
+        commands: None,
+        plugins: None,
         onebot_v11: Some(OnebotV11ConfigSection {
             whitelist: vec![
                 OnebotWhitelistEntry::UInt(3541766758),
@@ -371,6 +396,8 @@ fn validate_app_config_warns_empty_onebot_whitelist_entry() {
         connect: None,
         tui: None,
         llm: None,
+        commands: None,
+        plugins: None,
         onebot_v11: Some(OnebotV11ConfigSection {
             whitelist: vec![OnebotWhitelistEntry::Text("  ".to_string())],
         }),
@@ -380,6 +407,124 @@ fn validate_app_config_warns_empty_onebot_whitelist_entry() {
         warnings
             .iter()
             .any(|warning| warning.contains("onebot-v11.whitelist"))
+    );
+}
+
+#[test]
+fn resolve_disabled_scope_commands_normalizes_and_deduplicates_entries() {
+    let doc = AppConfigDoc {
+        rust: Some(AppRustSection {
+            runtime: None,
+            log: None,
+            adapters: None,
+            tui: None,
+            commands: Some(CommandConfigSection {
+                disabled: vec![
+                    " onebot11 liteecho ".to_string(),
+                    "adapter:onebot_v11 /LiteEcho".to_string(),
+                    "tui help".to_string(),
+                    " ".to_string(),
+                ],
+            }),
+            plugins: None,
+        }),
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: None,
+        tui: None,
+        llm: None,
+        commands: None,
+        plugins: None,
+        onebot_v11: None,
+    };
+
+    let disabled = resolve_disabled_scope_commands(&doc);
+    assert_eq!(
+        disabled,
+        vec![
+            "adapter:onebot11 /liteecho".to_string(),
+            "tui /help".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn validate_app_config_warns_invalid_disabled_command_entry() {
+    let doc = AppConfigDoc {
+        rust: None,
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: None,
+        tui: None,
+        llm: None,
+        commands: Some(CommandConfigSection {
+            disabled: vec!["adapter:discord ping".to_string()],
+        }),
+        plugins: None,
+        onebot_v11: None,
+    };
+
+    let warnings = validate_app_config(&doc);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("commands.disabled entries should use"))
+    );
+}
+
+#[test]
+fn resolve_disabled_plugins_normalizes_and_deduplicates_entries() {
+    let doc = AppConfigDoc {
+        rust: None,
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: None,
+        tui: None,
+        llm: None,
+        commands: None,
+        plugins: Some(PluginConfigSection {
+            disabled: vec![
+                " builtin-liteecho ".to_string(),
+                "BUILTIN-LITEECHO".to_string(),
+                "demo-plugin".to_string(),
+                " ".to_string(),
+            ],
+        }),
+        onebot_v11: None,
+    };
+
+    let disabled = resolve_disabled_plugins(&doc);
+    assert_eq!(
+        disabled,
+        vec!["builtin-liteecho".to_string(), "demo-plugin".to_string(),]
+    );
+}
+
+#[test]
+fn validate_app_config_warns_invalid_disabled_plugin_entry() {
+    let doc = AppConfigDoc {
+        rust: None,
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: None,
+        tui: None,
+        llm: None,
+        commands: None,
+        plugins: Some(PluginConfigSection {
+            disabled: vec!["   ".to_string()],
+        }),
+        onebot_v11: None,
+    };
+
+    let warnings = validate_app_config(&doc);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("plugins.disabled entries should use"))
     );
 }
 
@@ -407,6 +552,8 @@ fn resolve_llm_config_reads_values_from_config() {
             system_prompt: Some("system".to_string()),
             command_prefix: Some("/ask".to_string()),
         }),
+        commands: None,
+        plugins: None,
         onebot_v11: None,
     };
 
@@ -443,6 +590,8 @@ fn resolve_llm_config_falls_back_to_provider_urls_when_base_url_missing() {
             system_prompt: None,
             command_prefix: Some("/ask".to_string()),
         }),
+        commands: None,
+        plugins: None,
         onebot_v11: None,
     };
 
@@ -471,6 +620,8 @@ fn validate_app_config_warns_when_llm_is_enabled_without_api_key() {
             system_prompt: None,
             command_prefix: Some(" ".to_string()),
         }),
+        commands: None,
+        plugins: None,
         onebot_v11: None,
     };
 
@@ -514,6 +665,8 @@ fn validate_app_config_warns_llm_base_url_in_main_config() {
             system_prompt: None,
             command_prefix: Some("/ask".to_string()),
         }),
+        commands: None,
+        plugins: None,
         onebot_v11: None,
     };
 

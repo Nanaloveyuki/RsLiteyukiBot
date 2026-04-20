@@ -18,6 +18,7 @@ pub(crate) enum BuiltinCommandId {
     Clear,
     Adapters,
     Commands,
+    Plugins,
     Ask,
     Resumes,
     History,
@@ -58,7 +59,7 @@ const SCOPE_TUI_ONEBOT: [CommandScope; 2] = [
     CommandScope::Adapter(AdapterProtocol::OneBot11),
 ];
 
-const BUILTIN_COMMANDS: [BuiltinCommandSpec; 15] = [
+const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
     BuiltinCommandSpec {
         id: BuiltinCommandId::Help,
         summary: "显示当前作用域可用命令",
@@ -128,6 +129,18 @@ const BUILTIN_COMMANDS: [BuiltinCommandSpec; 15] = [
         completion_trailing_space: true,
         scopes: &SCOPE_TUI,
         tui_name: Some("/commands"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Plugins,
+        summary: "查看或管理插件启用状态",
+        detail: "列出插件目录中的插件，并通过 enable/disable 开关插件后自动 reload",
+        usage_hint: Some("[list] | enable <plugin-id> | disable <plugin-id>"),
+        accepts_arguments: false,
+        completion_trailing_space: true,
+        scopes: &SCOPE_TUI,
+        tui_name: Some("/plugins"),
         onebot_name: None,
         onebot_aliases: &NO_ALIASES,
     },

@@ -6,6 +6,7 @@ use crate::command_registry::{
     normalize_builtin_command_name_for_scope, parse_command_scope_token,
     render_builtin_help_lines_filtered,
 };
+use liteyukibot_core::{PluginCatalogEntry, PluginLoadState, PluginRuntimeKind, PluginType};
 
 enum CommandsAction<'a> {
     List(Option<CommandScope>),
@@ -14,6 +15,11 @@ enum CommandsAction<'a> {
         scope: CommandScope,
         name: &'a str,
     },
+}
+
+enum PluginsAction<'a> {
+    List,
+    SetEnabled { enabled: bool, plugin_id: &'a str },
 }
 
 impl AppState {
@@ -49,6 +55,42 @@ impl AppState {
                 .map(|candidate| format!("/commands {candidate} ")),
         );
         candidates
+    }
+
+    pub(super) fn show_plugins_usage(&mut self) {
+        self.push_log(
+            UiLevel::Warn,
+            "usage: /plugins [list] | /plugins enable <plugin-id> | /plugins disable <plugin-id>",
+        );
+    }
+
+    fn plugins_subcommand_candidates(prefix: &str) -> Vec<String> {
+        PLUGIN_MANAGEMENT_VERBS
+            .iter()
+            .filter(|candidate| candidate.starts_with(prefix))
+            .map(|candidate| {
+                if *candidate == "list" {
+                    "/plugins list".to_string()
+                } else {
+                    format!("/plugins {candidate} ")
+                }
+            })
+            .collect()
+    }
+
+    fn parse_plugins_action<'a>(args: &'a [&'a str]) -> Result<PluginsAction<'a>, String> {
+        match args {
+            [] | ["list"] => Ok(PluginsAction::List),
+            ["enable", plugin_id] => Ok(PluginsAction::SetEnabled {
+                enabled: true,
+                plugin_id,
+            }),
+            ["disable", plugin_id] => Ok(PluginsAction::SetEnabled {
+                enabled: false,
+                plugin_id,
+            }),
+            _ => Err("usage".to_string()),
+        }
     }
 
     fn command_scope_candidates_for_action(action: &str, prefix: &str) -> Vec<String> {
@@ -241,13 +283,233 @@ impl AppState {
         lines
     }
 
-    fn set_scoped_command_enabled(&mut self, scope: CommandScope, name: &str, enabled: bool) {
+    pub(super) fn plugin_catalog_entries(&self) -> Vec<PluginCatalogEntry> {
+        self.plugin_manager
+            .as_ref()
+            .map(|manager| manager.plugin_catalog())
+            .unwrap_or_default()
+    }
+
+    pub(super) fn plugin_runtime_label(kind: PluginRuntimeKind) -> &'static str {
+        match kind {
+            PluginRuntimeKind::Native => "native",
+            PluginRuntimeKind::Python => "python",
+            PluginRuntimeKind::Lua => "lua",
+            PluginRuntimeKind::External => "external",
+        }
+    }
+
+    pub(super) fn plugin_type_label(kind: PluginType) -> &'static str {
+        match kind {
+            PluginType::Application => "application",
+            PluginType::Service => "service",
+            PluginType::Module => "module",
+            PluginType::Unclassified => "unclassified",
+            PluginType::Test => "test",
+        }
+    }
+
+    pub(super) fn is_plugin_enabled(&self, plugin_id: &str) -> bool {
+        !self.disabled_plugins.contains(plugin_id)
+    }
+
+    pub(super) fn selected_dashboard_plugin_entry(&self) -> Option<PluginCatalogEntry> {
+        let catalog = self.plugin_catalog_entries();
+        let selected_index = self.normalized_dashboard_plugin_index(catalog.len())?;
+        catalog.into_iter().nth(selected_index)
+    }
+
+    pub(super) fn dashboard_plugin_summary_counts(&self) -> (usize, usize, usize) {
+        let catalog = self.plugin_catalog_entries();
+        let total = catalog.len();
+        let enabled = catalog
+            .iter()
+            .filter(|entry| self.is_plugin_enabled(entry.descriptor.metadata.id.as_str()))
+            .count();
+        let loaded = catalog.iter().filter(|entry| entry.loaded).count();
+        (total, enabled, loaded)
+    }
+
+    pub(super) fn move_dashboard_plugin_selection(&mut self, delta: isize) -> bool {
+        let catalog_len = self.plugin_catalog_entries().len();
+        let Some(current) = self.normalized_dashboard_plugin_index(catalog_len) else {
+            self.dashboard_plugin_index = 0;
+            return false;
+        };
+        let next = if delta < 0 {
+            if current == 0 {
+                catalog_len - 1
+            } else {
+                current - 1
+            }
+        } else if delta > 0 {
+            (current + 1) % catalog_len
+        } else {
+            current
+        };
+        self.dashboard_plugin_index = next;
+        self.dashboard_focus = DashboardFocus::Plugins;
+        self.reset_history_navigation();
+        next != current
+    }
+
+    pub(super) fn dashboard_toggle_selected_plugin_command(&self) -> Option<String> {
+        let entry = self.selected_dashboard_plugin_entry()?;
+        let plugin_id = entry.descriptor.metadata.id;
+        let action = if self.is_plugin_enabled(plugin_id.as_str()) {
+            "disable"
+        } else {
+            "enable"
+        };
+        Some(format!("/plugins {action} {plugin_id}"))
+    }
+
+    fn plugin_catalog_lines(&self) -> Vec<String> {
+        let catalog = self.plugin_catalog_entries();
+        if catalog.is_empty() {
+            return vec!["plugin catalog empty".to_string()];
+        }
+
+        let mut lines = vec![format!("plugin catalog ({}):", catalog.len())];
+        for entry in catalog {
+            let plugin_id = entry.descriptor.metadata.id.clone();
+            let enabled = self.is_plugin_enabled(plugin_id.as_str());
+            let mut tags = vec![
+                Self::plugin_type_label(entry.descriptor.metadata.plugin_type).to_string(),
+                if enabled {
+                    "enabled".to_string()
+                } else {
+                    "disabled".to_string()
+                },
+                if entry.loaded {
+                    "loaded".to_string()
+                } else {
+                    "unloaded".to_string()
+                },
+                if entry.descriptor.manifest_path.is_some() {
+                    "manifest".to_string()
+                } else {
+                    "native".to_string()
+                },
+            ];
+            if let Some(state) = entry.load_state {
+                tags.push(match state {
+                    PluginLoadState::Ready => "ready".to_string(),
+                    PluginLoadState::Deferred => "deferred".to_string(),
+                });
+            }
+            lines.push(format!(
+                "  {} ({}) - {} [{}]",
+                plugin_id,
+                Self::plugin_runtime_label(entry.descriptor.runtime.kind),
+                entry.descriptor.metadata.name,
+                tags.join(", ")
+            ));
+            if let Some(reason) = entry
+                .load_reason
+                .as_deref()
+                .filter(|reason| !reason.trim().is_empty())
+            {
+                lines.push(format!("    reason: {reason}"));
+            }
+        }
+
+        lines
+    }
+
+    fn plugin_id_candidates(&self, prefix: &str, enabled: Option<bool>) -> Vec<String> {
+        let mut candidates = self
+            .plugin_catalog_entries()
+            .into_iter()
+            .map(|entry| entry.descriptor.metadata.id)
+            .filter(|plugin_id| plugin_id.starts_with(prefix))
+            .filter(|plugin_id| {
+                enabled.map_or(true, |expected| {
+                    self.is_plugin_enabled(plugin_id.as_str()) == expected
+                })
+            })
+            .collect::<Vec<_>>();
+        candidates.sort();
+        candidates.dedup();
+        candidates
+    }
+
+    fn set_plugin_enabled(&mut self, raw_plugin_id: &str, enabled: bool) -> CommandOutcome {
+        let normalized = raw_plugin_id.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            self.show_plugins_usage();
+            return CommandOutcome::None;
+        }
+
+        let Some(entry) = self.plugin_catalog_entries().into_iter().find(|entry| {
+            entry
+                .descriptor
+                .metadata
+                .id
+                .eq_ignore_ascii_case(normalized.as_str())
+        }) else {
+            self.push_log(UiLevel::Warn, format!("plugin '{}' not found", normalized));
+            return CommandOutcome::None;
+        };
+
+        let plugin_id = entry.descriptor.metadata.id;
+        let runtime_label = Self::plugin_runtime_label(entry.descriptor.runtime.kind);
+        let current_enabled = self.is_plugin_enabled(plugin_id.as_str());
+        if current_enabled == enabled {
+            self.push_log(
+                UiLevel::Info,
+                format!(
+                    "plugin '{}' already {} ({})",
+                    plugin_id,
+                    if enabled { "enabled" } else { "disabled" },
+                    runtime_label
+                ),
+            );
+            return CommandOutcome::None;
+        }
+
+        let mut rollback_entries = self.disabled_plugins.iter().cloned().collect::<Vec<_>>();
+        rollback_entries.sort();
+        if enabled {
+            self.disabled_plugins.remove(plugin_id.as_str());
+        } else {
+            self.disabled_plugins.insert(plugin_id.clone());
+        }
+        let mut entries = self.disabled_plugins.iter().cloned().collect::<Vec<_>>();
+        entries.sort();
+
+        self.push_log(
+            UiLevel::Info,
+            format!(
+                "plugin '{}' {} ({})",
+                plugin_id,
+                if enabled { "enabled" } else { "disabled" },
+                runtime_label
+            ),
+        );
+        self.push_log(
+            UiLevel::Info,
+            "persisting plugin policy and auto reloading...",
+        );
+
+        CommandOutcome::PersistDisabledPlugins {
+            entries,
+            rollback_entries,
+        }
+    }
+
+    fn set_scoped_command_enabled(
+        &mut self,
+        scope: CommandScope,
+        name: &str,
+        enabled: bool,
+    ) -> CommandOutcome {
         let Some(plugin_sdk) = self.plugin_sdk.clone() else {
             self.push_log(
                 UiLevel::Warn,
                 "command manager unavailable in current runtime",
             );
-            return;
+            return CommandOutcome::None;
         };
 
         let scope_label = command_scope_label(scope);
@@ -277,7 +539,7 @@ impl AppState {
                     normalized_name, scope_label
                 ),
             );
-            return;
+            return CommandOutcome::None;
         }
 
         let builtin_changed = if let Some(command_name) = builtin_name.as_deref() {
@@ -293,7 +555,7 @@ impl AppState {
                             command_name, scope_label, err
                         ),
                     );
-                    return;
+                    return CommandOutcome::None;
                 }
                 true
             } else {
@@ -319,7 +581,7 @@ impl AppState {
                         normalized_name, scope_label, err
                     ),
                 );
-                return;
+                return CommandOutcome::None;
             }
             changed
         };
@@ -331,7 +593,9 @@ impl AppState {
         if !plugin_matches.is_empty() {
             targets.push(format!("plugin x{}", plugin_matches.len()));
         }
-        let command_label = builtin_name.unwrap_or(normalized_name);
+        let command_label = builtin_name
+            .clone()
+            .unwrap_or_else(|| normalized_name.clone());
         let state_label = if enabled { "enabled" } else { "disabled" };
         if builtin_changed || plugin_changed {
             self.push_log(
@@ -355,6 +619,30 @@ impl AppState {
                     targets.join(", ")
                 ),
             );
+        }
+
+        let entries = plugin_sdk.list_disabled_scope_commands();
+        CommandOutcome::PersistDisabledCommands {
+            rollback_entries: if builtin_changed || plugin_changed {
+                let _ = if let Some(command_name) = builtin_name.as_deref() {
+                    plugin_sdk.set_builtin_command_enabled(scope_label, command_name, !enabled)
+                } else {
+                    Ok(false)
+                };
+                if !plugin_matches.is_empty() {
+                    let _ = plugin_sdk.set_scope_command_enabled(
+                        scope_label,
+                        normalized_name.as_str(),
+                        !enabled,
+                    );
+                }
+                let rollback = plugin_sdk.list_disabled_scope_commands();
+                let _ = plugin_sdk.sync_disabled_scope_commands(&entries);
+                rollback
+            } else {
+                entries.clone()
+            },
+            entries,
         }
     }
 
@@ -1182,9 +1470,75 @@ impl AppState {
         ))
     }
 
+    pub(super) fn plugins_completion_context(
+        &self,
+        input: &str,
+    ) -> Option<(String, CompletionMode, Vec<String>)> {
+        let raw = input.strip_prefix("/plugins ")?;
+        let raw = raw.trim_start();
+        if raw.is_empty() {
+            let candidates = Self::plugins_subcommand_candidates("");
+            return Some((
+                "plugins:root:".to_string(),
+                CompletionMode::Rendered,
+                candidates,
+            ));
+        }
+
+        let tokens: Vec<&str> = raw.split_whitespace().collect();
+        let trailing_space = input.ends_with(' ');
+        let verb = tokens.first().copied().unwrap_or_default();
+
+        if matches!(verb, "enable" | "disable") {
+            if tokens.len() == 1 && !trailing_space {
+                let candidates = Self::plugins_subcommand_candidates(verb);
+                return Some((
+                    format!("plugins:root:{verb}"),
+                    CompletionMode::Rendered,
+                    candidates,
+                ));
+            }
+
+            if tokens.len() == 1 || tokens.len() == 2 {
+                let desired_enabled = verb == "enable";
+                let prefix = if trailing_space || tokens.len() == 1 {
+                    ""
+                } else {
+                    tokens[1]
+                };
+                let candidates = self
+                    .plugin_id_candidates(prefix, Some(!desired_enabled))
+                    .into_iter()
+                    .map(|plugin_id| format!("/plugins {verb} {plugin_id}"))
+                    .collect::<Vec<_>>();
+                return Some((
+                    format!("plugins:{verb}:id:{prefix}"),
+                    CompletionMode::Rendered,
+                    candidates,
+                ));
+            }
+
+            return None;
+        }
+
+        if raw.chars().any(char::is_whitespace) {
+            return None;
+        }
+        let prefix = if trailing_space { "" } else { raw };
+        let candidates = Self::plugins_subcommand_candidates(prefix);
+        Some((
+            format!("plugins:root:{prefix}"),
+            CompletionMode::Rendered,
+            candidates,
+        ))
+    }
+
     pub(super) fn completion_context(&self) -> Option<(String, CompletionMode, Vec<String>)> {
         let input = self.console_input.trim_start();
         if let Some(ctx) = self.commands_completion_context(input) {
+            return Some(ctx);
+        }
+        if let Some(ctx) = self.plugins_completion_context(input) {
             return Some(ctx);
         }
         if let Some(ctx) = self.whitelist_completion_context(input) {
@@ -1562,7 +1916,28 @@ impl AppState {
                         enabled,
                         scope,
                         name,
-                    } => self.set_scoped_command_enabled(scope, name, enabled),
+                    } => return self.set_scoped_command_enabled(scope, name, enabled),
+                }
+                CommandOutcome::None
+            }
+            "/plugins" => {
+                let args: Vec<&str> = parts.collect();
+                let action = match Self::parse_plugins_action(&args) {
+                    Ok(action) => action,
+                    Err(_) => {
+                        self.show_plugins_usage();
+                        return CommandOutcome::None;
+                    }
+                };
+                match action {
+                    PluginsAction::List => {
+                        for line in self.plugin_catalog_lines() {
+                            self.push_log(UiLevel::Info, line);
+                        }
+                    }
+                    PluginsAction::SetEnabled { enabled, plugin_id } => {
+                        return self.set_plugin_enabled(plugin_id, enabled);
+                    }
                 }
                 CommandOutcome::None
             }
@@ -1636,6 +2011,24 @@ impl AppState {
     pub(super) fn command_help_text(&self) -> String {
         let input = self.console_input.trim();
         if input.is_empty() {
+            if self.is_dashboard_plugin_panel_active() {
+                if let Some(entry) = self.selected_dashboard_plugin_entry() {
+                    let plugin_id = entry.descriptor.metadata.id;
+                    let action = if self.is_plugin_enabled(plugin_id.as_str()) {
+                        "禁用"
+                    } else {
+                        "启用"
+                    };
+                    return format!(
+                        "插件面板: 当前 {}；Up/Down 选择；Enter {}；Tab 回到命令",
+                        plugin_id, action
+                    );
+                }
+                return "插件面板: 当前没有可管理插件；Tab 回到命令".to_string();
+            }
+            if self.is_dashboard_view() {
+                return "命令面板: 输入 /help 查看命令；Tab 切到插件；Enter 执行；PgUp/PgDn/Home/End 滚动日志".to_string();
+            }
             return "命令说明: 输入 /help 查看命令；Tab 自动补全；Enter 执行".to_string();
         }
 

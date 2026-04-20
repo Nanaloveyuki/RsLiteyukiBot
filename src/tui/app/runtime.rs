@@ -5,6 +5,8 @@ use tokio::sync::Semaphore;
 struct LoopHandlers {
     reload_handler: ReloadHandler,
     whitelist_persist_handler: PersistWhitelistHandler,
+    disabled_commands_persist_handler: PersistDisabledCommandsHandler,
+    disabled_plugins_persist_handler: PersistDisabledPluginsHandler,
     llm_command_handler: LlmCommandHandler,
     ask_handler: AskHandler,
 }
@@ -22,15 +24,21 @@ pub async fn run(
         tui_config,
         reload_handler,
         whitelist_persist_handler,
+        disabled_commands_persist_handler,
+        disabled_plugins_persist_handler,
         llm_command_handler,
         ask_handler,
         help_whitelist,
         llm_command_prefix,
         plugin_sdk,
+        plugin_manager,
+        disabled_plugins,
     } = options;
     let handlers = LoopHandlers {
         reload_handler,
         whitelist_persist_handler,
+        disabled_commands_persist_handler,
+        disabled_plugins_persist_handler,
         llm_command_handler,
         ask_handler,
     };
@@ -38,6 +46,8 @@ pub async fn run(
     app.bind_help_whitelist(help_whitelist);
     app.bind_llm_command_prefix(llm_command_prefix);
     app.bind_plugin_sdk(plugin_sdk);
+    app.bind_plugin_manager(plugin_manager);
+    app.sync_disabled_plugins(&disabled_plugins);
     app.push_log(
         UiLevel::Info,
         "TUI ready: type /help in console, Ctrl+C or /quit to exit",
@@ -171,6 +181,67 @@ async fn run_tui_loop(
                                     app.push_log(
                                         UiLevel::Warn,
                                         "runtime whitelist changed but config was not persisted",
+                                    );
+                                    ui_changed = true;
+                                }
+                            }
+                        }
+                        CommandOutcome::PersistDisabledCommands {
+                            entries,
+                            rollback_entries,
+                        } => {
+                            match (handlers.disabled_commands_persist_handler)(entries) {
+                                Ok(message) => {
+                                    app.push_log(UiLevel::Info, message);
+                                    ui_changed = true;
+                                    if reload_inflight.is_some() {
+                                        queued_reload = true;
+                                        app.push_log(UiLevel::Warn, "reload already in progress, request queued");
+                                    } else {
+                                        app.push_log(UiLevel::Info, "reloading config...");
+                                        reload_inflight = Some((handlers.reload_handler)(bot));
+                                    }
+                                }
+                                Err(err) => {
+                                    if let Some(plugin_sdk) = app.plugin_sdk.clone() {
+                                        if let Err(sync_err) = plugin_sdk.sync_disabled_scope_commands(&rollback_entries) {
+                                            app.push_log(
+                                                UiLevel::Error,
+                                                format!("failed to rollback command policy after persist failure: {sync_err}"),
+                                            );
+                                        }
+                                    }
+                                    app.push_log(UiLevel::Warn, format!("persist command policy failed: {err}"));
+                                    app.push_log(
+                                        UiLevel::Warn,
+                                        "runtime command policy changed but config was not persisted; rollback applied",
+                                    );
+                                    ui_changed = true;
+                                }
+                            }
+                        }
+                        CommandOutcome::PersistDisabledPlugins {
+                            entries,
+                            rollback_entries,
+                        } => {
+                            match (handlers.disabled_plugins_persist_handler)(entries) {
+                                Ok(message) => {
+                                    app.push_log(UiLevel::Info, message);
+                                    ui_changed = true;
+                                    if reload_inflight.is_some() {
+                                        queued_reload = true;
+                                        app.push_log(UiLevel::Warn, "reload already in progress, request queued");
+                                    } else {
+                                        app.push_log(UiLevel::Info, "reloading config...");
+                                        reload_inflight = Some((handlers.reload_handler)(bot));
+                                    }
+                                }
+                                Err(err) => {
+                                    app.sync_disabled_plugins(&rollback_entries);
+                                    app.push_log(UiLevel::Warn, format!("persist plugin policy failed: {err}"));
+                                    app.push_log(
+                                        UiLevel::Warn,
+                                        "runtime plugin policy changed in TUI state but config was not persisted; rollback applied",
                                     );
                                     ui_changed = true;
                                 }
