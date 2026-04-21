@@ -443,9 +443,8 @@ impl AppState {
             .map(|entry| entry.descriptor.metadata.id)
             .filter(|plugin_id| plugin_id.starts_with(prefix))
             .filter(|plugin_id| {
-                enabled.is_none_or(|expected| {
-                    self.is_plugin_enabled(plugin_id.as_str()) == expected
-                })
+                enabled
+                    .is_none_or(|expected| self.is_plugin_enabled(plugin_id.as_str()) == expected)
             })
             .collect::<Vec<_>>();
         candidates.sort();

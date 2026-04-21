@@ -713,8 +713,8 @@ impl PluginSdk {
     }
 
     pub fn dispatch_event(&self, event: &BotEvent, logger: &Logger) {
-        let handlers: Vec<PythonEventDispatchHandler> = match Python::with_gil(
-            |py| -> Result<Vec<PythonEventDispatchHandler>, String> {
+        let handlers: Vec<PythonEventDispatchHandler> =
+            match Python::with_gil(|py| -> Result<Vec<PythonEventDispatchHandler>, String> {
                 let lock = self
                     .python_runtime
                     .lock()
@@ -741,17 +741,16 @@ impl PluginSdk {
                         })
                     })
                     .collect())
-            },
-        ) {
-            Ok(handlers) => handlers,
-            Err(_) => {
-                logger.warn_in(
-                    "plugin.python",
-                    "python runtime lock poisoned, skip event dispatch",
-                );
-                return;
-            }
-        };
+            }) {
+                Ok(handlers) => handlers,
+                Err(_) => {
+                    logger.warn_in(
+                        "plugin.python",
+                        "python runtime lock poisoned, skip event dispatch",
+                    );
+                    return;
+                }
+            };
         if handlers.is_empty() {
             return;
         }

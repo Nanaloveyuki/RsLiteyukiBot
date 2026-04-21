@@ -69,9 +69,72 @@ cargo run
 - `connect.sse`：SSE 通道
 - `urls` 支持多端点，会自动展开为多个适配器实例
 
+## 开发测试
+
+- 前端 Dev Server：`http://127.0.0.1:1420/`
+- Tauri 内嵌 runtime / 健康接口：`http://127.0.0.1:14500/api/health`
+- Vite 开发服务器默认绑定 `0.0.0.0:1420`，便于外部浏览器访问
+- Tauri 后端仍会保留 `0.0.0.0:14500` 的 HTTP 入口用于健康检查和后续扩展
+
+开发启动：
+
+Tauri App
+```bash
+pnpm install
+pnpm run cargo dev
+```
+
+如果本地 shell 对 `pnpm run cargo dev` 的参数转发有差异，可退回：
+
+```bash
+pnpm run cargo:dev
+```
+
+前端单独构建：
+
+```bash
+pnpm build
+```
+
+Rust/Tauri 后端级别检查：
+
+```bash
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+TUI(Terminal User Interface)
+```bash
+cargo run
+```
+
 ## 鸣谢
 
 [@Snowykami](https://sfkm.me): Liteyuki 文档站支持和授权
+
+[@NapcatQQ](https://github.com/NapNeko/NapCatQQ): 前端页面样式
+<details><summary>Napcat LICENSE</summary>
+<code>
+Limited Redistribution License for NapCat
+
+Copyright © 2024 Mlikiowa
+
+1. Usage and Reproduction:
+   - Unauthorized use, reproduction, modification, or distribution of this code is prohibited without explicit permission from the main author of the NapCat repository.
+   
+2. Redistribution:
+   - Redistribution of this code is permitted, provided that the full text of this license is included, and the source and copyright information is clearly stated.
+   - Minor modifications and extensions are allowed for redistribution purposes, but the modified code must not be publicly released.
+
+3. Non-Commercial Use:
+   - This code is not to be used for any commercial purposes.
+
+4. Additional Permissions:
+   - Any rights not explicitly addressed in this license must be requested from and granted by the main author of the NapCat repository.
+
+5. Disclaimer:
+   - This code is provided "as is," without any express or implied warranties, including but not limited to the implied warranties of merchantability and fitness for a particular purpose. In no event shall the author be liable for any damages or other liability arising from, out of, or in connection with the use or distribution of this code.
+</code>
+</details>
 
 
 [Liteyuki6.0]: https://img.shields.io/badge/Liteyuki-6.0-blue?style=for-the-badge

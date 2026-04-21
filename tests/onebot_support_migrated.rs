@@ -1,3 +1,9 @@
+pub use liteyukibot_core::{BotEvent, PluginManifestLoader, PluginSdk, SessionEvent, SessionScope};
+
+#[allow(dead_code)]
+#[path = "../src/i18n.rs"]
+mod i18n;
+
 #[allow(dead_code)]
 #[path = "../src/command_registry.rs"]
 mod command_registry;
@@ -9,9 +15,6 @@ mod onebot_support;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use liteyukibot_core::PluginSdk;
-use liteyukibot_core::core::BotEvent;
-use liteyukibot_core::session::SessionEvent;
 use serde_json::Value;
 
 use onebot_support::*;

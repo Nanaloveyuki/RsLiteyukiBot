@@ -1,3 +1,5 @@
+pub use liteyukibot_core::PluginManifestLoader;
+
 #[allow(dead_code)]
 #[path = "../src/app_config.rs"]
 mod app_config;

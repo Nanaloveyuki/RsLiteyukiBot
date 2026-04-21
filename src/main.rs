@@ -6,12 +6,12 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use liteyukibot_core::adapter::AdapterManager;
-pub(crate) use liteyukibot_core::{
-    BotEvent, PluginManifestLoader, PluginSdk, SessionEvent, SessionScope,
-};
 use liteyukibot_core::{
     AdapterPacket, LiteyukiBot, LogLevel, LogMode, Rule, RuntimeSettings, RuntimeTarget, TimeZone,
     TimestampFormat,
+};
+pub(crate) use liteyukibot_core::{
+    BotEvent, PluginManifestLoader, PluginSdk, SessionEvent, SessionScope,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -1289,13 +1289,11 @@ fn persist_help_whitelist(entries: Vec<String>) -> Result<String, String> {
     config_edit::persist_onebot_v11_whitelist(path.as_path(), &entries)?;
     let path_display = path.display().to_string();
     let count = entries.len().to_string();
-    Ok(
-        trf(
-            "whitelist.persist.success",
-            &[("path", path_display.as_str()), ("count", count.as_str())],
-        )
-        .to_string(),
+    Ok(trf(
+        "whitelist.persist.success",
+        &[("path", path_display.as_str()), ("count", count.as_str())],
     )
+    .to_string())
 }
 
 fn persist_disabled_commands_config(entries: Vec<String>) -> Result<String, String> {
@@ -1305,13 +1303,11 @@ fn persist_disabled_commands_config(entries: Vec<String>) -> Result<String, Stri
     config_edit::persist_disabled_commands(path.as_path(), &entries)?;
     let path_display = path.display().to_string();
     let count = entries.len().to_string();
-    Ok(
-        trf(
-            "command_policy.persist.success",
-            &[("path", path_display.as_str()), ("count", count.as_str())],
-        )
-        .to_string(),
+    Ok(trf(
+        "command_policy.persist.success",
+        &[("path", path_display.as_str()), ("count", count.as_str())],
     )
+    .to_string())
 }
 
 fn persist_disabled_plugins_config(entries: Vec<String>) -> Result<String, String> {
@@ -1321,13 +1317,11 @@ fn persist_disabled_plugins_config(entries: Vec<String>) -> Result<String, Strin
     config_edit::persist_disabled_plugins(path.as_path(), &entries)?;
     let path_display = path.display().to_string();
     let count = entries.len().to_string();
-    Ok(
-        trf(
-            "plugin_policy.persist.success",
-            &[("path", path_display.as_str()), ("count", count.as_str())],
-        )
-        .to_string(),
+    Ok(trf(
+        "plugin_policy.persist.success",
+        &[("path", path_display.as_str()), ("count", count.as_str())],
     )
+    .to_string())
 }
 
 fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFuture<'static> {

@@ -1,4 +1,7 @@
+extern crate self as liteyukibot_core;
+
 pub mod adapter;
+pub mod app_host;
 pub mod bootstrap;
 pub mod comm;
 pub mod core;
@@ -6,13 +9,20 @@ pub mod llm;
 pub mod observability;
 pub mod plugin;
 pub mod session;
+pub mod web_host;
 
+#[allow(dead_code)]
+mod app_config;
 #[allow(dead_code)]
 mod command_registry;
 #[allow(dead_code)]
 mod i18n;
 #[allow(dead_code)]
 mod onebot_support;
+#[allow(dead_code)]
+mod superuser;
+#[allow(dead_code, unused_imports)]
+mod tui;
 
 pub use adapter::{
     AdapterConfig, AdapterEndpoint, AdapterError, AdapterManager, AdapterPacket, AdapterRoute,
@@ -37,7 +47,10 @@ pub use llm::{
     LlmClientError, LlmPromptPreview, LlmPromptProfile, LlmPromptStore, OpenAiResponsesClient,
     OpenAiRuntimeConfig, build_prompt_preview, compose_user_prompt,
 };
-pub use observability::{LogLevel, LogMode, Logger, LoggerConfig, TimeZone, TimestampFormat};
+pub use observability::{
+    BufferedLogEntry, LogLevel, LogMode, Logger, LoggerConfig, TimeZone, TimestampFormat,
+    emit_console_log, recent_buffered_logs,
+};
 pub use plugin::{
     LoadedPlugin, LuaRuntimeAdapter, NativeRuntimeAdapter, Plugin, PluginAbiContract,
     PluginAbiMethod, PluginCallEnvelope, PluginCallResult, PluginCatalogEntry, PluginContext,
