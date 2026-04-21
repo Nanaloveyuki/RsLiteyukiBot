@@ -84,6 +84,8 @@ pdm.lock
 
 # rust
 .liteyuki-tui-resumes.json
+src-tauri/target/
+src-tauri/gen/
 
 # config
 config.yaml
