@@ -25,6 +25,7 @@ __pycache__/
 *.pyd
 *.pyw
 /plugins/
+.npm-cache/
 
 #config
 /config/
