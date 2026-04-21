@@ -15,6 +15,7 @@ venv/
 target/
 target-codex/
 node_modules/
+frontend/dist/
 data/
 db/
 /resources/
