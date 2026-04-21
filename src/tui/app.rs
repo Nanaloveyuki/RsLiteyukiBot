@@ -261,7 +261,7 @@ struct ResumeSession {
     command_history: Vec<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ResumeStore {
     sessions: Vec<ResumeSession>,
 }
@@ -280,9 +280,13 @@ impl ResumeStore {
         {
             std::fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string_pretty(self)?;
+        let content = self.serialized_pretty()?;
         std::fs::write(path, content)?;
         Ok(())
+    }
+
+    fn serialized_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
     }
 
     fn create_session(&mut self, uid: String) {
@@ -322,9 +326,9 @@ impl ResumeStore {
         self.sessions.iter().find(|session| session.uid == uid)
     }
 
-    fn estimated_size_bytes(&self) -> usize {
-        serde_json::to_vec(self)
-            .map(|bytes| bytes.len())
+    fn persisted_size_bytes(&self) -> usize {
+        self.serialized_pretty()
+            .map(|content| content.len())
             .unwrap_or(usize::MAX)
     }
 }

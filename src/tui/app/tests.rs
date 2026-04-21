@@ -24,6 +24,20 @@ fn test_tui_config(path: PathBuf) -> TuiConfig {
     }
 }
 
+fn resume_session_with_log(uid: &str, message: String) -> ResumeSession {
+    ResumeSession {
+        uid: uid.to_string(),
+        created_at: "2026-04-21T00:00:00+08:00".to_string(),
+        updated_at: "2026-04-21T00:00:00+08:00".to_string(),
+        logs: vec![UiLog {
+            level: UiLevel::Info,
+            timestamp: "00:00:00".to_string(),
+            message,
+        }],
+        command_history: vec![],
+    }
+}
+
 fn temp_plugin_dir(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
     let nanos = SystemTime::now()
@@ -1280,38 +1294,75 @@ fn resume_size_limit_keeps_active_session() {
     let active_uid = app.active_resume_uid().to_string();
 
     let large = "x".repeat(600 * 1024);
-    app.resume_store.sessions.push(ResumeSession {
-        uid: "old-large-a".to_string(),
-        created_at: Local::now().to_rfc3339(),
-        updated_at: Local::now().to_rfc3339(),
-        logs: vec![UiLog {
-            level: UiLevel::Info,
-            timestamp: "00:00:00".to_string(),
-            message: large.clone(),
-        }],
-        command_history: vec![],
-    });
-    app.resume_store.sessions.push(ResumeSession {
-        uid: "old-large-b".to_string(),
-        created_at: Local::now().to_rfc3339(),
-        updated_at: Local::now().to_rfc3339(),
-        logs: vec![UiLog {
-            level: UiLevel::Info,
-            timestamp: "00:00:00".to_string(),
-            message: large,
-        }],
-        command_history: vec![],
-    });
+    app.resume_store
+        .sessions
+        .push(resume_session_with_log("old-large-a", large.clone()));
+    app.resume_store
+        .sessions
+        .push(resume_session_with_log("old-large-b", large));
 
     app.enforce_resume_limits();
+    app.flush_resume_if_needed(true);
 
-    assert!(app.resume_store.estimated_size_bytes() <= app.resume_max_size_bytes);
+    let written_size = std::fs::metadata(&path)
+        .expect("resume store should be written")
+        .len() as usize;
+    assert!(app.resume_store.persisted_size_bytes() <= app.resume_max_size_bytes);
+    assert!(written_size <= app.resume_max_size_bytes);
     assert!(
         app.resume_store
             .sessions
             .iter()
             .any(|session| session.uid == active_uid)
     );
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn resume_size_limit_drops_frontmost_old_resume() {
+    let path = temp_resume_path("resume-size-order");
+    remove_file_if_exists(&path);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    let active_uid = app.active_resume_uid().to_string();
+
+    app.resume_store
+        .sessions
+        .push(resume_session_with_log("old-1", "a".repeat(512)));
+    app.resume_store
+        .sessions
+        .push(resume_session_with_log("old-2", "b".repeat(512)));
+
+    let mut store_after_one_trim = app.resume_store.clone();
+    store_after_one_trim.sessions.remove(1);
+    let max_size_bytes = store_after_one_trim.persisted_size_bytes();
+    assert!(app.resume_store.persisted_size_bytes() > max_size_bytes);
+
+    app.resume_max_size_bytes = max_size_bytes;
+    app.enforce_resume_limits();
+    app.flush_resume_if_needed(true);
+
+    let remaining_uids = app
+        .resume_store
+        .sessions
+        .iter()
+        .map(|session| session.uid.as_str())
+        .collect::<Vec<_>>();
+    let written_size = std::fs::metadata(&path)
+        .expect("resume store should be written")
+        .len() as usize;
+
+    assert!(remaining_uids.contains(&active_uid.as_str()));
+    assert!(!remaining_uids.contains(&"old-1"));
+    assert!(remaining_uids.contains(&"old-2"));
+    assert!(app.resume_store.persisted_size_bytes() <= app.resume_max_size_bytes);
+    assert!(written_size <= app.resume_max_size_bytes);
 
     remove_file_if_exists(&path);
 }

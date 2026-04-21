@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 
-use liteyukibot_core::PluginManifestLoader;
+use crate::PluginManifestLoader;
 use serde_json::Value;
 
 const BUNDLED_ZH_CN: &str =

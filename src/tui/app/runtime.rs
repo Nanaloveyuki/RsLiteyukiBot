@@ -330,16 +330,17 @@ async fn run_tui_loop(
                                     );
                                 }
                                 Err(err) => {
-                                    if let Some(plugin_sdk) = app.plugin_sdk.clone() {
-                                        if let Err(sync_err) = plugin_sdk.sync_disabled_scope_commands(&rollback_entries) {
-                                            app.push_log(
-                                                UiLevel::Error,
-                                                trf(
-                                                    "command_policy.rollback.failed",
-                                                    &[("err", sync_err.to_string().as_str())],
-                                                ),
-                                            );
-                                        }
+                                    if let Some(plugin_sdk) = app.plugin_sdk.clone()
+                                        && let Err(sync_err) = plugin_sdk
+                                            .sync_disabled_scope_commands(&rollback_entries)
+                                    {
+                                        app.push_log(
+                                            UiLevel::Error,
+                                            trf(
+                                                "command_policy.rollback.failed",
+                                                &[("err", sync_err.to_string().as_str())],
+                                            ),
+                                        );
                                     }
                                     app.push_log(
                                         UiLevel::Warn,
@@ -623,9 +624,7 @@ fn push_llm_response_logs(app: &mut AppState, message: String) {
             })
             .collect::<String>()
             .replace('\t', "    ");
-        if content.is_empty() {
-            content = " ".to_string();
-        } else if content.trim().is_empty() {
+        if content.is_empty() || content.trim().is_empty() {
             content = " ".to_string();
         } else {
             has_non_empty = true;

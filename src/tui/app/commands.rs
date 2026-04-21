@@ -197,7 +197,7 @@ impl AppState {
             .filter_map(|command| command_primary_name(command, scope, overrides))
             .filter(|command| command.starts_with(prefix))
             .filter(|command| {
-                enabled.map_or(true, |enabled| {
+                enabled.is_none_or(|enabled| {
                     self.is_builtin_scope_command_enabled(scope, command.as_str()) == enabled
                 })
             })
@@ -443,7 +443,7 @@ impl AppState {
             .map(|entry| entry.descriptor.metadata.id)
             .filter(|plugin_id| plugin_id.starts_with(prefix))
             .filter(|plugin_id| {
-                enabled.map_or(true, |expected| {
+                enabled.is_none_or(|expected| {
                     self.is_plugin_enabled(plugin_id.as_str()) == expected
                 })
             })
@@ -2107,24 +2107,24 @@ impl AppState {
                 self.handle_llm_command(&args)
             }
             _ => {
-                if let Some(plugin_sdk) = self.plugin_sdk.as_ref() {
-                    if let Some(plugin_command) = plugin_sdk.get_tui_command(command_name) {
-                        if !plugin_command.enabled {
-                            self.push_log(
-                                UiLevel::Warn,
-                                trf(
-                                    "tui.command.plugin_disabled",
-                                    &[("command", plugin_command.name.as_str())],
-                                ),
-                            );
-                            return CommandOutcome::None;
-                        }
-                        let args = parts.map(ToString::to_string).collect::<Vec<_>>();
-                        return CommandOutcome::PluginCommand {
-                            command: plugin_command.name,
-                            args,
-                        };
+                if let Some(plugin_sdk) = self.plugin_sdk.as_ref()
+                    && let Some(plugin_command) = plugin_sdk.get_tui_command(command_name)
+                {
+                    if !plugin_command.enabled {
+                        self.push_log(
+                            UiLevel::Warn,
+                            trf(
+                                "tui.command.plugin_disabled",
+                                &[("command", plugin_command.name.as_str())],
+                            ),
+                        );
+                        return CommandOutcome::None;
                     }
+                    let args = parts.map(ToString::to_string).collect::<Vec<_>>();
+                    return CommandOutcome::PluginCommand {
+                        command: plugin_command.name,
+                        args,
+                    };
                 }
                 self.push_log(
                     UiLevel::Warn,

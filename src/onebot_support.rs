@@ -8,9 +8,7 @@ use crate::command_registry::{
     render_builtin_help_lines_filtered,
 };
 use crate::i18n::{tr, trf};
-use liteyukibot_core::PluginSdk;
-use liteyukibot_core::core::BotEvent;
-use liteyukibot_core::session::SessionEvent;
+use crate::{BotEvent, PluginSdk, SessionEvent, SessionScope};
 use serde_json::Value;
 
 static OB11_LOG_IMAGE_SUMMARY: LazyLock<bool> =
@@ -101,7 +99,7 @@ fn event_group_id(event: &SessionEvent) -> Option<String> {
 }
 
 fn is_group_semantic(event: &SessionEvent) -> bool {
-    matches!(event.scope, liteyukibot_core::SessionScope::Group)
+    matches!(event.scope, SessionScope::Group)
         || payload_message_type(event).is_some_and(|ty| ty.eq_ignore_ascii_case("group"))
         || event_group_id(event).is_some()
 }
@@ -110,7 +108,7 @@ fn is_private_semantic(event: &SessionEvent) -> bool {
     if is_group_semantic(event) {
         return false;
     }
-    matches!(event.scope, liteyukibot_core::SessionScope::Private)
+    matches!(event.scope, SessionScope::Private)
         || payload_message_type(event).is_some_and(|ty| ty.eq_ignore_ascii_case("private"))
         || event.session_id == event.user_id
 }
@@ -451,7 +449,7 @@ pub(crate) fn truncate_preview(raw: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use liteyukibot_core::{SessionEvent, SessionScope};
+    use crate::{SessionEvent, SessionScope};
     use serde_json::Value;
     use std::sync::Arc;
 

@@ -7,6 +7,13 @@ pub mod observability;
 pub mod plugin;
 pub mod session;
 
+#[allow(dead_code)]
+mod command_registry;
+#[allow(dead_code)]
+mod i18n;
+#[allow(dead_code)]
+mod onebot_support;
+
 pub use adapter::{
     AdapterConfig, AdapterEndpoint, AdapterError, AdapterManager, AdapterPacket, AdapterRoute,
     AdapterSink, AdapterSinkFuture, AdapterTransport, HttpMethod, HttpTransportClient,

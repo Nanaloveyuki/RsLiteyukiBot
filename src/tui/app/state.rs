@@ -105,7 +105,7 @@ impl AppState {
         }
 
         let max_size_bytes = self.resume_max_size_bytes.max(1);
-        while self.resume_store.estimated_size_bytes() > max_size_bytes {
+        while self.resume_store.persisted_size_bytes() > max_size_bytes {
             if !self.drop_oldest_non_active_resume() {
                 break;
             }
@@ -342,19 +342,13 @@ impl AppState {
 
         self.sync_active_resume_snapshot();
         if let Err(err) = self.resume_store.save(&self.resume_store_path) {
-            let message = format!(
-                "{}",
-                trf(
-                    "resume.persist.failed",
-                    &[
-                        (
-                            "path",
-                            self.resume_store_path.display().to_string().as_str()
-                        ),
-                        ("err", err.to_string().as_str()),
-                    ],
-                )
-            );
+            let path_display = self.resume_store_path.display().to_string();
+            let err_text = err.to_string();
+            let message = trf(
+                "resume.persist.failed",
+                &[("path", path_display.as_str()), ("err", err_text.as_str())],
+            )
+            .to_string();
             if self.last_resume_save_error.as_deref() != Some(message.as_str()) {
                 self.push_log(UiLevel::Error, message.clone());
                 self.last_resume_save_error = Some(message);

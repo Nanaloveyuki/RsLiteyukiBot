@@ -396,16 +396,15 @@ impl PluginManager {
                 first_error = Some(PluginLoadError::NotFound(id.clone()));
             }
 
-            if let Some(plugin) = &plugin {
-                if let Err(reason) = plugin.on_unload(context.clone()).await
-                    && first_error.is_none()
-                {
-                    first_error = Some(PluginLoadError::Lifecycle {
-                        id: id.clone(),
-                        phase: "unload",
-                        reason,
-                    });
-                }
+            if let Some(plugin) = &plugin
+                && let Err(reason) = plugin.on_unload(context.clone()).await
+                && first_error.is_none()
+            {
+                first_error = Some(PluginLoadError::Lifecycle {
+                    id: id.clone(),
+                    phase: "unload",
+                    reason,
+                });
             }
 
             self.loaded

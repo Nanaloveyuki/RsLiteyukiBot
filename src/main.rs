@@ -5,9 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use liteyukibot_core::PluginSdk;
 use liteyukibot_core::adapter::AdapterManager;
-use liteyukibot_core::session::SessionEvent;
+pub(crate) use liteyukibot_core::{
+    BotEvent, PluginManifestLoader, PluginSdk, SessionEvent, SessionScope,
+};
 use liteyukibot_core::{
     AdapterPacket, LiteyukiBot, LogLevel, LogMode, Rule, RuntimeSettings, RuntimeTarget, TimeZone,
     TimestampFormat,
@@ -608,16 +609,15 @@ fn load_app_config_with_llm_overlay() -> (AppConfigDoc, Vec<String>) {
                 }
             }
             Err(err) => {
-                warnings.push(format!(
-                    "{}",
+                let path_display = path.display().to_string();
+                let err_text = err.to_string();
+                warnings.push(
                     trf(
                         "startup.llm_overlay_load_failed",
-                        &[
-                            ("path", path.display().to_string().as_str()),
-                            ("err", err.to_string().as_str()),
-                        ],
+                        &[("path", path_display.as_str()), ("err", err_text.as_str())],
                     )
-                ));
+                    .to_string(),
+                );
             }
         }
     }
@@ -1287,16 +1287,15 @@ fn persist_help_whitelist(entries: Vec<String>) -> Result<String, String> {
     write_default_config_if_missing(path.as_path())
         .map_err(|err| format!("failed to ensure config exists: {err}"))?;
     config_edit::persist_onebot_v11_whitelist(path.as_path(), &entries)?;
-    Ok(format!(
-        "{}",
+    let path_display = path.display().to_string();
+    let count = entries.len().to_string();
+    Ok(
         trf(
             "whitelist.persist.success",
-            &[
-                ("path", path.display().to_string().as_str()),
-                ("count", entries.len().to_string().as_str()),
-            ],
+            &[("path", path_display.as_str()), ("count", count.as_str())],
         )
-    ))
+        .to_string(),
+    )
 }
 
 fn persist_disabled_commands_config(entries: Vec<String>) -> Result<String, String> {
@@ -1304,16 +1303,15 @@ fn persist_disabled_commands_config(entries: Vec<String>) -> Result<String, Stri
     write_default_config_if_missing(path.as_path())
         .map_err(|err| format!("failed to ensure config exists: {err}"))?;
     config_edit::persist_disabled_commands(path.as_path(), &entries)?;
-    Ok(format!(
-        "{}",
+    let path_display = path.display().to_string();
+    let count = entries.len().to_string();
+    Ok(
         trf(
             "command_policy.persist.success",
-            &[
-                ("path", path.display().to_string().as_str()),
-                ("count", entries.len().to_string().as_str()),
-            ],
+            &[("path", path_display.as_str()), ("count", count.as_str())],
         )
-    ))
+        .to_string(),
+    )
 }
 
 fn persist_disabled_plugins_config(entries: Vec<String>) -> Result<String, String> {
@@ -1321,16 +1319,15 @@ fn persist_disabled_plugins_config(entries: Vec<String>) -> Result<String, Strin
     write_default_config_if_missing(path.as_path())
         .map_err(|err| format!("failed to ensure config exists: {err}"))?;
     config_edit::persist_disabled_plugins(path.as_path(), &entries)?;
-    Ok(format!(
-        "{}",
+    let path_display = path.display().to_string();
+    let count = entries.len().to_string();
+    Ok(
         trf(
             "plugin_policy.persist.success",
-            &[
-                ("path", path.display().to_string().as_str()),
-                ("count", entries.len().to_string().as_str()),
-            ],
+            &[("path", path_display.as_str()), ("count", count.as_str())],
         )
-    ))
+        .to_string(),
+    )
 }
 
 fn handle_llm_tui_command(action: tui::LlmCommandRequest) -> tui::LlmCommandFuture<'static> {

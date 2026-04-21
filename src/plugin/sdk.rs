@@ -55,6 +55,8 @@ const PERMISSION_COMMAND_TUI_READ: &str = "command.tui.read";
 const PERMISSION_COMMAND_TUI_MANAGE: &str = "command.tui.manage";
 
 pub type PluginSdkFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginSdkError>> + Send>>;
+type PythonEventDispatchHandler = (String, Py<PyAny>, Py<PyPluginSdk>);
+type PythonCommandHandler = (Py<PyAny>, Py<PyPluginSdk>);
 
 #[derive(Debug, Clone)]
 pub enum PluginSdkError {
@@ -711,8 +713,8 @@ impl PluginSdk {
     }
 
     pub fn dispatch_event(&self, event: &BotEvent, logger: &Logger) {
-        let handlers: Vec<(String, Py<PyAny>, Py<PyPluginSdk>)> = match Python::with_gil(
-            |py| -> Result<Vec<(String, Py<PyAny>, Py<PyPluginSdk>)>, String> {
+        let handlers: Vec<PythonEventDispatchHandler> = match Python::with_gil(
+            |py| -> Result<Vec<PythonEventDispatchHandler>, String> {
                 let lock = self
                     .python_runtime
                     .lock()
@@ -767,7 +769,7 @@ impl PluginSdk {
                 let sdk_obj: Py<PyAny> = sdk.clone_ref(py).into_any();
                 let result = call_python_callable_with_fallback(
                     py,
-                    &callable,
+                    callable,
                     vec![
                         vec![event_obj.clone_ref(py), sdk_obj.clone_ref(py)],
                         vec![event_obj],
@@ -879,7 +881,7 @@ impl PluginSdk {
             return Ok(None);
         };
         let Some((handler, sdk)) = Python::with_gil(
-            |py| -> Result<Option<(Py<PyAny>, Py<PyPluginSdk>)>, PluginSdkError> {
+            |py| -> Result<Option<PythonCommandHandler>, PluginSdkError> {
                 let lock = self.python_runtime.lock().map_err(|_| {
                     PluginSdkError::Runtime("python runtime lock poisoned".to_string())
                 })?;
@@ -917,7 +919,7 @@ impl PluginSdk {
             let sdk_obj: Py<PyAny> = sdk.clone_ref(py).into_any();
             let result = call_python_callable_with_fallback(
                 py,
-                &callable,
+                callable,
                 vec![
                     vec![args_list.clone_ref(py), sdk_obj.clone_ref(py)],
                     vec![args_list],
@@ -1403,13 +1405,13 @@ fn resolve_python_event_handler(
                 name
             )));
         }
-        return Ok(Some(handler.unbind().into()));
+        return Ok(Some(handler.unbind()));
     }
     for candidate in PYTHON_EVENT_HANDLER_ATTRS {
-        if let Ok(handler) = module.getattr(candidate) {
-            if handler.is_callable() {
-                return Ok(Some(handler.unbind().into()));
-            }
+        if let Ok(handler) = module.getattr(candidate)
+            && handler.is_callable()
+        {
+            return Ok(Some(handler.unbind()));
         }
     }
     Ok(None)
@@ -1428,13 +1430,13 @@ fn resolve_python_lifecycle_handler(
                 name
             )));
         }
-        return Ok(Some(handler.unbind().into()));
+        return Ok(Some(handler.unbind()));
     }
     for candidate in defaults {
-        if let Ok(handler) = module.getattr(candidate) {
-            if handler.is_callable() {
-                return Ok(Some(handler.unbind().into()));
-            }
+        if let Ok(handler) = module.getattr(candidate)
+            && handler.is_callable()
+        {
+            return Ok(Some(handler.unbind()));
         }
     }
     Ok(None)
@@ -2157,13 +2159,13 @@ fn register_tui_command(
     let mut lock = state
         .lock()
         .map_err(|_| "python runtime lock poisoned".to_string())?;
-    if let Some(existing) = lock.commands.get(command.as_str()) {
-        if existing.plugin_id != plugin_id {
-            return Err(format!(
-                "plugin command '{}' already registered by '{}'",
-                command, existing.plugin_id
-            ));
-        }
+    if let Some(existing) = lock.commands.get(command.as_str())
+        && existing.plugin_id != plugin_id
+    {
+        return Err(format!(
+            "plugin command '{}' already registered by '{}'",
+            command, existing.plugin_id
+        ));
     }
     lock.commands.insert(
         command.clone(),
@@ -2248,13 +2250,13 @@ fn remove_tui_command(
     let mut lock = state
         .lock()
         .map_err(|_| "python runtime lock poisoned".to_string())?;
-    if let Some(entry) = lock.commands.get(command.as_str()) {
-        if entry.plugin_id != plugin_id {
-            return Err(format!(
-                "plugin command '{}' belongs to '{}' and cannot be removed by '{}'",
-                command, entry.plugin_id, plugin_id
-            ));
-        }
+    if let Some(entry) = lock.commands.get(command.as_str())
+        && entry.plugin_id != plugin_id
+    {
+        return Err(format!(
+            "plugin command '{}' belongs to '{}' and cannot be removed by '{}'",
+            command, entry.plugin_id, plugin_id
+        ));
     }
     Ok(lock.commands.remove(command.as_str()).is_some())
 }
