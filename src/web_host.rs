@@ -13,7 +13,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::app_host::AppHostSnapshot;
+use crate::i18n::current_snapshot as current_i18n_snapshot;
 use crate::observability::{BufferedLogEntry, recent_buffered_logs};
+use crate::web_ui::{NapCatConfig, NapCatWebUIConfig, OneBotConfig};
 use crate::{LogLevel, emit_console_log};
 
 const DEFAULT_HTTP_PORT: u16 = 14500;
@@ -21,8 +23,88 @@ const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const REQUEST_READ_CHUNK_BYTES: usize = 2048;
 const HEALTH_ROUTE: &str = "/api/health";
 const LOGS_ROUTE: &str = "/api/logs";
+const I18N_ROUTE: &str = "/api/i18n";
 const LOGS_ROUTE_LIMIT: usize = 200;
 const DEV_FRONTEND_PROBE_TIMEOUT: Duration = Duration::from_millis(150);
+/// The fixed credential returned by `/api/auth/login` and `/api/auth/local-token`.
+/// Using a constant keeps the stub simple; a real implementation would use a
+/// cryptographically random value generated at startup.
+const LOCAL_AUTO_TOKEN: &str = "rsliteyukibot-local-token";
+
+// ─── NapCat-compatible API helpers ───────────────────────────────────────────
+
+/// Standard NapCat envelope: `{"code":0,"message":"ok","data":...}`
+fn napcat_ok<T: Serialize>(data: &T) -> Vec<u8> {
+    #[derive(Serialize)]
+    struct Envelope<'a, T: Serialize> {
+        code: i32,
+        message: &'a str,
+        data: &'a T,
+    }
+    serde_json::to_vec(&Envelope { code: 0, message: "ok", data })
+        .unwrap_or_else(|_| br#"{"code":0,"message":"ok","data":null}"#.to_vec())
+}
+
+/// NapCat error envelope
+fn napcat_err(code: i32, message: &str) -> Vec<u8> {
+    #[derive(Serialize)]
+    struct Envelope<'a> {
+        code: i32,
+        message: &'a str,
+        data: Option<()>,
+    }
+    serde_json::to_vec(&Envelope { code, message, data: None })
+        .unwrap_or_else(|_| br#"{"code":-1,"message":"error","data":null}"#.to_vec())
+}
+
+/// Parse a header value from a raw HTTP request byte slice.
+fn extract_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request.lines().find_map(|line| parse_named_header(line, name))
+}
+
+/// Parse the request body (bytes after the blank line).
+#[allow(dead_code)]
+fn extract_body(request: &[u8]) -> &[u8] {
+    if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+        &request[pos + 4..]
+    } else {
+        b""
+    }
+}
+
+/// Parse a JSON body into a serde_json::Value (returns null on failure).
+#[allow(dead_code)]
+fn parse_json_body(request: &[u8]) -> serde_json::Value {
+    let body = extract_body(request);
+    serde_json::from_slice(body).unwrap_or(serde_json::Value::Null)
+}
+
+/// Build a NapCat JSON response (200 OK, application/json).
+fn napcat_response(body: Vec<u8>, head_only: bool) -> Vec<u8> {
+    build_response("200 OK", "application/json; charset=utf-8", &body, head_only)
+}
+
+/// Build an OPTIONS (CORS preflight) response.
+fn options_response() -> Vec<u8> {
+    let headers = "HTTP/1.1 204 No Content\r\n\
+        Access-Control-Allow-Origin: *\r\n\
+        Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n\
+        Access-Control-Allow-Headers: Authorization, Content-Type, Accept\r\n\
+        Content-Length: 0\r\n\
+        Connection: close\r\n\r\n";
+    headers.as_bytes().to_vec()
+}
+
+/// Build an SSE response with a single event and then close.
+fn sse_response(event_data: &str, head_only: bool) -> Vec<u8> {
+    let body = format!("data: {event_data}\n\n");
+    build_response(
+        "200 OK",
+        "text/event-stream; charset=utf-8",
+        body.as_bytes(),
+        head_only,
+    )
+}
 
 pub type WebHostSnapshotProvider = Arc<dyn Fn() -> AppHostSnapshot + Send + Sync>;
 
@@ -219,6 +301,12 @@ impl WebHostService {
         format!("http://<host-ip>:{}/", self.bind_addr.port())
     }
 
+    /// Returns the local auto-login token that the Tauri shell can inject into
+    /// the webview so the user never sees the login page in desktop mode.
+    pub fn local_token(&self) -> &str {
+        LOCAL_AUTO_TOKEN
+    }
+
     pub fn health(&self) -> WebHostHealthPayload {
         WebHostHealthPayload {
             bind: self.bind_addr.to_string(),
@@ -230,10 +318,10 @@ impl WebHostService {
 
     pub async fn serve(self, listener: TcpListener) -> io::Result<()> {
         loop {
-            let (socket, _) = listener.accept().await?;
+            let (socket, peer_addr) = listener.accept().await?;
             let server = self.clone();
             tokio::spawn(async move {
-                if let Err(err) = server.handle_connection(socket).await {
+                if let Err(err) = server.handle_connection(socket, peer_addr).await {
                     emit_console_log(
                         LogLevel::Warn,
                         "web.host",
@@ -244,18 +332,18 @@ impl WebHostService {
         }
     }
 
-    async fn handle_connection(&self, mut socket: TcpStream) -> io::Result<()> {
+    async fn handle_connection(&self, mut socket: TcpStream, peer_addr: SocketAddr) -> io::Result<()> {
         let request = read_http_request(&mut socket).await?;
         if request.is_empty() {
             return Ok(());
         }
 
-        let response = self.route_http_request(&request);
+        let response = self.route_http_request(&request, peer_addr.ip());
         socket.write_all(&response).await?;
         socket.shutdown().await
     }
 
-    fn route_http_request(&self, request: &[u8]) -> Vec<u8> {
+    fn route_http_request(&self, request: &[u8], peer_ip: IpAddr) -> Vec<u8> {
         let request_line = String::from_utf8_lossy(request);
         let Some((method, raw_path)) = parse_request_line(&request_line) else {
             return build_response(
@@ -268,6 +356,12 @@ impl WebHostService {
         let path = raw_path.split('?').next().unwrap_or(raw_path);
         let is_head = method.eq_ignore_ascii_case("HEAD");
 
+        // ── CORS preflight ────────────────────────────────────────────────────
+        if method.eq_ignore_ascii_case("OPTIONS") {
+            return options_response();
+        }
+
+        // ── Legacy LiteyukiBot routes ─────────────────────────────────────────
         if path == HEALTH_ROUTE {
             let body = serde_json::to_vec_pretty(&self.health())
                 .unwrap_or_else(|_| b"{\"status\":\"serialization-error\"}".to_vec());
@@ -282,10 +376,23 @@ impl WebHostService {
             return build_response("200 OK", "application/json; charset=utf-8", &body, is_head);
         }
 
+        if path == I18N_ROUTE {
+            let body = serde_json::to_vec_pretty(&current_i18n_snapshot())
+                .unwrap_or_else(|_| b"{\"messages\":{}}".to_vec());
+            return build_response("200 OK", "application/json; charset=utf-8", &body, is_head);
+        }
+
+        // ── Static assets (injected at startup) ───────────────────────────────
         if let Some(asset) = self.assets.static_asset_for_path(path) {
             return build_response("200 OK", asset.content_type(), asset.body(), is_head);
         }
 
+        // ── NapCat-compatible API routes ──────────────────────────────────────
+        if path.starts_with("/api/") || path == "/files/theme.css" {
+            return self.route_napcat_api(request, method, path, raw_path, is_head, peer_ip);
+        }
+
+        // ── Dev frontend redirect ─────────────────────────────────────────────
         if let Some(location) = self.dev_frontend_redirect(raw_path, path, &request_line) {
             return build_redirect_response("307 Temporary Redirect", location.as_str(), is_head);
         }
@@ -301,12 +408,667 @@ impl WebHostService {
         }
     }
 
-    fn dev_frontend_redirect(
+    /// Route all NapCat-compatible `/api/*` paths.
+    #[allow(clippy::too_many_lines)]
+    fn route_napcat_api(
         &self,
-        raw_path: &str,
+        request: &[u8],
+        method: &str,
         path: &str,
-        request: &str,
-    ) -> Option<String> {
+        _raw_path: &str,
+        is_head: bool,
+        peer_ip: IpAddr,
+    ) -> Vec<u8> {
+        // ── /files/theme.css ─────────────────────────────────────────────────
+        if path == "/files/theme.css" {
+            return build_response("200 OK", "text/css; charset=utf-8", b"", is_head);
+        }
+
+        // Strip the /api prefix for matching
+        let api_path = path.strip_prefix("/api").unwrap_or(path);
+
+        // ── Auth ─────────────────────────────────────────────────────────────
+        if api_path == "/auth/check" {
+            // Always report as logged-in (no real auth in this stub)
+            let body = napcat_ok(&true);
+            return napcat_response(body, is_head);
+        }
+
+        // Local-token endpoint: only loopback connections may fetch the token.
+        // This is the server-side gate that makes the auto-login safe.
+        if api_path == "/auth/local-token" {
+            if peer_ip.is_loopback() {
+                #[derive(Serialize)]
+                struct LocalTokenResponse<'a> {
+                    token: &'a str,
+                }
+                let body = napcat_ok(&LocalTokenResponse { token: LOCAL_AUTO_TOKEN });
+                return napcat_response(body, is_head);
+            }
+            // Non-loopback: refuse with 403
+            let body = napcat_err(403, "Forbidden");
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/auth/login" {
+            #[derive(Serialize)]
+            struct AuthResponse {
+                #[serde(rename = "Credential")]
+                credential: String,
+            }
+            let body = napcat_ok(&AuthResponse {
+                credential: LOCAL_AUTO_TOKEN.to_string(),
+            });
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/auth/update_token" {
+            let body = napcat_ok(&true);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/auth/passkey/generate-registration-options"
+            || api_path == "/auth/passkey/verify-registration"
+            || api_path == "/auth/passkey/generate-authentication-options"
+            || api_path == "/auth/passkey/verify-authentication"
+        {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        // ── Base / System ─────────────────────────────────────────────────────
+        if api_path == "/base/GetNapCatVersion" {
+            #[derive(Serialize)]
+            struct PackageInfo {
+                version: String,
+                #[serde(rename = "buildTime")]
+                build_time: String,
+            }
+            let body = napcat_ok(&PackageInfo {
+                version: "1.0.0-rsliteyukibot".to_string(),
+                build_time: "2026-04-22T00:00:00Z".to_string(),
+            });
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/base/getLatestTag" {
+            let body = napcat_ok(&"1.0.0-rsliteyukibot");
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/base/getAllReleases" {
+            #[derive(Serialize)]
+            struct Pagination {
+                page: u32,
+                #[serde(rename = "pageSize")]
+                page_size: u32,
+                total: u32,
+                #[serde(rename = "totalPages")]
+                total_pages: u32,
+            }
+            #[derive(Serialize)]
+            struct Releases {
+                versions: Vec<serde_json::Value>,
+                pagination: Pagination,
+            }
+            let body = napcat_ok(&Releases {
+                versions: vec![],
+                pagination: Pagination { page: 1, page_size: 20, total: 0, total_pages: 0 },
+            });
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/base/getMirrors" {
+            #[derive(Serialize)]
+            struct Mirrors {
+                mirrors: Vec<String>,
+            }
+            let body = napcat_ok(&Mirrors { mirrors: vec![] });
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/base/QQVersion" {
+            let body = napcat_ok(&"N/A");
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/base/Theme" {
+            let body = napcat_ok(&serde_json::json!({
+                "primaryColor": "#8FFFFF",
+                "backgroundImage": "",
+                "backgroundOpacity": 0.5
+            }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/base/SetTheme" {
+            let body = napcat_ok(&true);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/base/proxy" {
+            let body = napcat_ok(&"{}");
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/base/GetNapCatFileHash" {
+            let body = napcat_ok(&serde_json::json!({
+                "hash": "",
+                "file": "",
+                "algorithm": "sha256"
+            }));
+            return napcat_response(body, is_head);
+        }
+
+        // SSE: system status
+        if api_path == "/base/GetSysStatusRealTime" {
+            let snapshot = (self.snapshot_provider)();
+            let status = serde_json::json!({
+                "cpu": {
+                    "model": "Unknown",
+                    "speed": 0,
+                    "usage": snapshot.resource_usage.cpu.system_percent
+                },
+                "memory": {
+                    "total": snapshot.resource_usage.memory.total_bytes,
+                    "used": snapshot.resource_usage.memory.used_bytes,
+                    "usage": snapshot.resource_usage.memory.system_percent
+                },
+                "uptime": 0
+            });
+            let event_data = serde_json::to_string(&status).unwrap_or_default();
+            return sse_response(&event_data, is_head);
+        }
+
+        // ── Process ───────────────────────────────────────────────────────────
+        if api_path == "/Process/Restart" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/UpdateNapCat/update" {
+            let body = napcat_ok(&serde_json::json!({ "message": "Update not supported in RsLiteyukiBot" }));
+            return napcat_response(body, is_head);
+        }
+
+        // ── QQ Login ──────────────────────────────────────────────────────────
+        if api_path == "/QQLogin/CheckLoginStatus" {
+            let body = napcat_ok(&serde_json::json!({
+                "isLogin": false,
+                "isOffline": false,
+                "qrcodeurl": ""
+            }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/RefreshQRcode" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/GetQQLoginQrcode" {
+            let body = napcat_ok(&serde_json::json!({ "qrcode": "" }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/GetQuickLoginList" {
+            let body = napcat_ok(&Vec::<String>::new());
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/GetQuickLoginListNew" {
+            let body = napcat_ok(&Vec::<serde_json::Value>::new());
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/SetQuickLogin" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/GetQQLoginInfo" {
+            let body = napcat_ok(&serde_json::json!({
+                "uid": "",
+                "uin": 0,
+                "nick": "RsLiteyukiBot",
+                "avatarUrl": ""
+            }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/GetQuickLoginQQ" {
+            let body = napcat_ok(&"");
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/SetQuickLoginQQ" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/PasswordLogin" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/CaptchaLogin" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/NewDeviceLogin" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/GetNewDeviceQRCode" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/PollNewDeviceQR" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/ResetDeviceID" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/RestartNapCat" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/GetDeviceGUID" {
+            let body = napcat_ok(&serde_json::json!({ "guid": "" }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/SetDeviceGUID" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/GetGUIDBackups" {
+            let body = napcat_ok(&Vec::<String>::new());
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/RestoreGUIDBackup" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/CreateGUIDBackup" {
+            let body = napcat_ok(&serde_json::json!({ "path": "" }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/GetPlatformInfo" {
+            let body = napcat_ok(&serde_json::json!({ "platform": std::env::consts::OS }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/GetLinuxMAC" {
+            let body = napcat_ok(&serde_json::json!({ "mac": "" }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/SetLinuxMAC" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/GetLinuxMachineId" {
+            let body = napcat_ok(&serde_json::json!({ "machineId": "" }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/ComputeLinuxGUID" {
+            let body = napcat_ok(&serde_json::json!({ "guid": "", "machineId": "", "mac": "" }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/GetLinuxMachineInfoBackups" {
+            let body = napcat_ok(&Vec::<String>::new());
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/CreateLinuxMachineInfoBackup" {
+            let body = napcat_ok(&serde_json::json!({ "path": "" }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/RestoreLinuxMachineInfoBackup" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/ResetLinuxDeviceID" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/QQLogin/GetAllUsers" {
+            let body = napcat_ok(&Vec::<serde_json::Value>::new());
+            return napcat_response(body, is_head);
+        }
+
+        // ── OB11 Config ───────────────────────────────────────────────────────
+        if api_path == "/OB11Config/GetConfig" {
+            let config = OneBotConfig::default();
+            let body = napcat_ok(&config);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/OB11Config/SetConfig" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        // ── NapCat Config ─────────────────────────────────────────────────────
+        if api_path == "/NapCatConfig/GetConfig" || api_path == "/NapCatConfig/GetUinConfig" {
+            let config = NapCatConfig::default();
+            let body = napcat_ok(&config);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/NapCatConfig/SetConfig" || api_path == "/NapCatConfig/SetUinConfig" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        // ── WebUI Config ──────────────────────────────────────────────────────
+        if api_path == "/WebUIConfig/GetConfig" {
+            let snapshot = (self.snapshot_provider)();
+            let config = NapCatWebUIConfig {
+                port: self.bind_addr.port(),
+                ..NapCatWebUIConfig::default()
+            };
+            let _ = snapshot;
+            let body = napcat_ok(&config);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/WebUIConfig/UpdateConfig" {
+            let body = napcat_ok(&true);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/WebUIConfig/GetDisableWebUI" {
+            let body = napcat_ok(&false);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/WebUIConfig/UpdateDisableWebUI" {
+            let body = napcat_ok(&true);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/WebUIConfig/GetClientIP" {
+            let request_str = String::from_utf8_lossy(request);
+            let ip = extract_header(&request_str, "X-Forwarded-For")
+                .unwrap_or("127.0.0.1")
+                .to_string();
+            let body = napcat_ok(&serde_json::json!({ "ip": ip }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/WebUIConfig/GetSSLStatus" {
+            let body = napcat_ok(&serde_json::json!({
+                "enabled": false,
+                "certExists": false,
+                "keyExists": false,
+                "certContent": "",
+                "keyContent": ""
+            }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/WebUIConfig/UploadSSLCert" {
+            let body = napcat_ok(&serde_json::json!({ "message": "SSL not supported" }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/WebUIConfig/DeleteSSLCert" {
+            let body = napcat_ok(&serde_json::json!({ "message": "SSL not supported" }));
+            return napcat_response(body, is_head);
+        }
+
+        // ── Log ───────────────────────────────────────────────────────────────
+        if api_path == "/Log/GetLogList" {
+            let body = napcat_ok(&Vec::<String>::new());
+            return napcat_response(body, is_head);
+        }
+
+        if api_path.starts_with("/Log/GetLog") && !api_path.contains("RealTime") {
+            let body = napcat_ok(&"");
+            return napcat_response(body, is_head);
+        }
+
+        // SSE: real-time logs
+        if api_path == "/Log/GetLogRealTime" {
+            let entries = recent_buffered_logs(50);
+            let event_data = if let Some(last) = entries.last() {
+                serde_json::json!({
+                    "level": format!("{:?}", last.level).to_lowercase(),
+                    "message": last.message
+                })
+                .to_string()
+            } else {
+                serde_json::json!({ "level": "info", "message": "RsLiteyukiBot running" })
+                    .to_string()
+            };
+            return sse_response(&event_data, is_head);
+        }
+
+        // Terminal (WebSocket is handled separately; these are the REST endpoints)
+        if api_path == "/Log/terminal/create" {
+            let body = napcat_ok(&serde_json::json!({ "id": "term-0" }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/Log/terminal/list" {
+            let body = napcat_ok(&Vec::<serde_json::Value>::new());
+            return napcat_response(body, is_head);
+        }
+
+        if api_path.starts_with("/Log/terminal/") && api_path.ends_with("/close") {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        // ── File ──────────────────────────────────────────────────────────────
+        if api_path.starts_with("/File/") {
+            return self.route_file_api(method, api_path, request, is_head);
+        }
+
+        // ── Plugin ────────────────────────────────────────────────────────────
+        if api_path == "/Plugin/List" {
+            let body = napcat_ok(&serde_json::json!({
+                "plugins": [],
+                "pluginManagerNotFound": true,
+                "extensionPages": []
+            }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/Plugin/RegisterManager" {
+            let body = napcat_ok(&serde_json::json!({ "message": "Plugin manager not available" }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/Plugin/SetStatus" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/Plugin/Uninstall" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/Plugin/Import" {
+            let body = napcat_ok(&serde_json::json!({
+                "message": "Plugin import not supported",
+                "pluginId": "",
+                "installPath": ""
+            }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/Plugin/Store/List" {
+            let body = napcat_ok(&serde_json::json!({ "plugins": [] }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path.starts_with("/Plugin/Store/Detail/") {
+            let body = napcat_err(-1, "Plugin not found");
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/Plugin/Store/Install" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/Plugin/Config" {
+            if method.eq_ignore_ascii_case("GET") {
+                let body = napcat_ok(&serde_json::json!({
+                    "schema": [],
+                    "config": {},
+                    "supportReactive": false
+                }));
+                return napcat_response(body, is_head);
+            }
+            // POST: set config
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/Plugin/Config/Change" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        // SSE: plugin config
+        if api_path == "/Plugin/Config/SSE" {
+            let event_data = serde_json::json!({ "type": "complete" }).to_string();
+            return sse_response(&event_data, is_head);
+        }
+
+        // ── Mirror ────────────────────────────────────────────────────────────
+        if api_path == "/Mirror/List" {
+            let body = napcat_ok(&serde_json::json!({
+                "fileMirrors": [],
+                "rawMirrors": [],
+                "customMirror": null,
+                "timeout": 5000
+            }));
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/Mirror/SetCustom" {
+            let body = napcat_ok(&serde_json::Value::Null);
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/Mirror/Test" {
+            let body = napcat_ok(&serde_json::json!({
+                "mirror": "",
+                "latency": 0,
+                "success": false,
+                "error": "Mirror testing not supported"
+            }));
+            return napcat_response(body, is_head);
+        }
+
+        // SSE: mirror test
+        if api_path == "/Mirror/Test/SSE" {
+            let event_data = serde_json::json!({
+                "type": "complete",
+                "results": [],
+                "failed": [],
+                "fastest": null,
+                "message": "Mirror testing not supported"
+            })
+            .to_string();
+            return sse_response(&event_data, is_head);
+        }
+
+        // ── Debug WebSocket (handled by proxy in dev; stub for prod) ──────────
+        if api_path == "/Debug/ws" || api_path == "/ws/terminal" {
+            return build_response(
+                "426 Upgrade Required",
+                "text/plain; charset=utf-8",
+                b"WebSocket upgrade required",
+                is_head,
+            );
+        }
+
+        // ── Fallthrough: unknown /api/* ────────────────────────────────────────
+        let body = napcat_err(-1, "not found");
+        napcat_response(body, is_head)
+    }
+
+    /// Handle `/api/File/*` routes.
+    fn route_file_api(&self, method: &str, api_path: &str, _request: &[u8], is_head: bool) -> Vec<u8> {
+        // GET endpoints
+        if method.eq_ignore_ascii_case("GET") {
+            if api_path == "/File/list" {
+                let body = napcat_ok(&Vec::<serde_json::Value>::new());
+                return napcat_response(body, is_head);
+            }
+            if api_path == "/File/read" {
+                let body = napcat_ok(&"");
+                return napcat_response(body, is_head);
+            }
+            if api_path == "/File/font/exists/webui" {
+                let body = napcat_ok(&false);
+                return napcat_response(body, is_head);
+            }
+            if api_path.starts_with("/File/download") {
+                // Return empty binary
+                return build_response(
+                    "200 OK",
+                    "application/octet-stream",
+                    b"",
+                    is_head,
+                );
+            }
+        }
+
+        // POST endpoints
+        if method.eq_ignore_ascii_case("POST") {
+            if api_path == "/File/mkdir"
+                || api_path == "/File/delete"
+                || api_path == "/File/write"
+                || api_path == "/File/create"
+                || api_path == "/File/batchDelete"
+                || api_path == "/File/rename"
+                || api_path == "/File/move"
+                || api_path == "/File/batchMove"
+                || api_path == "/File/font/delete/webui"
+            {
+                let body = napcat_ok(&true);
+                return napcat_response(body, is_head);
+            }
+            if api_path.starts_with("/File/upload") || api_path == "/File/font/upload/webui" {
+                let body = napcat_ok(&true);
+                return napcat_response(body, is_head);
+            }
+            if api_path == "/File/batchDownload" {
+                return build_response("200 OK", "application/octet-stream", b"", is_head);
+            }
+        }
+
+        let body = napcat_err(-1, "not found");
+        napcat_response(body, is_head)
+    }
+
+    fn dev_frontend_redirect(&self, raw_path: &str, path: &str, request: &str) -> Option<String> {
         if path.starts_with("/api") {
             return None;
         }
@@ -366,11 +1128,7 @@ fn build_response(status: &str, content_type: &str, body: &[u8], head_only: bool
 }
 
 fn build_redirect_response(status: &str, location: &str, head_only: bool) -> Vec<u8> {
-    let response_body = if head_only {
-        &[][..]
-    } else {
-        b"redirecting"
-    };
+    let response_body = if head_only { &[][..] } else { b"redirecting" };
     let headers = format!(
         "HTTP/1.1 {status}\r\nLocation: {location}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
         response_body.len()
@@ -552,7 +1310,7 @@ mod tests {
     #[test]
     fn root_route_returns_injected_html() {
         let response =
-            test_server().route_http_request(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            test_server().route_http_request(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
         let (headers, body) = split_response(response);
         let body = String::from_utf8(body).expect("body should be utf8");
 
@@ -564,7 +1322,7 @@ mod tests {
     #[test]
     fn health_route_returns_runtime_metadata() {
         let response = test_server()
-            .route_http_request(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            .route_http_request(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
         let (headers, body) = split_response(response);
         let body: serde_json::Value =
             serde_json::from_slice(&body).expect("health body should be valid json");
@@ -573,7 +1331,10 @@ mod tests {
         assert_eq!(body["runtime"]["runtime_target"], "tauri2");
         assert_eq!(body["runtime"]["status"], "running");
         assert_eq!(body["runtime"]["adapter_count"], 3);
-        assert_eq!(body["runtime"]["resource_usage"]["cpu"]["system_percent"], 0.0);
+        assert_eq!(
+            body["runtime"]["resource_usage"]["cpu"]["system_percent"],
+            0.0
+        );
         assert_eq!(body["bind"], "0.0.0.0:14500");
         assert_eq!(body["desktop_url"], "http://127.0.0.1:14500/");
     }
@@ -590,7 +1351,7 @@ mod tests {
         crate::emit_console_log(crate::LogLevel::Info, "web.host.test", unique.as_str());
 
         let response =
-            test_server().route_http_request(b"GET /api/logs HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            test_server().route_http_request(b"GET /api/logs HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
         let (headers, body) = split_response(response);
         let body: serde_json::Value =
             serde_json::from_slice(&body).expect("logs body should be valid json");
@@ -605,9 +1366,49 @@ mod tests {
     }
 
     #[test]
+    fn ob11_config_route_returns_napcat_compatible_shape() {
+        let response = test_server().route_http_request(
+            b"GET /api/OB11Config/GetConfig HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (headers, body) = split_response(response);
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("ob11 config body should be valid json");
+
+        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert_eq!(body["code"], 0);
+        assert_eq!(body["data"]["network"]["httpServers"], serde_json::json!([]));
+        assert_eq!(body["data"]["network"]["httpClients"], serde_json::json!([]));
+        assert_eq!(body["data"]["network"]["httpSseServers"], serde_json::json!([]));
+        assert_eq!(body["data"]["network"]["websocketServers"], serde_json::json!([]));
+        assert_eq!(body["data"]["network"]["websocketClients"], serde_json::json!([]));
+        assert_eq!(body["data"]["parseMultMsg"], true);
+        assert_eq!(body["data"]["timeout"]["baseTimeout"], 10_000);
+    }
+
+    #[test]
+    fn i18n_route_returns_current_catalog_snapshot() {
+        let response =
+            test_server().route_http_request(b"GET /api/i18n HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let (headers, body) = split_response(response);
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("i18n body should be valid json");
+
+        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert_eq!(body["locale"], "zh-CN");
+        assert_eq!(body["fallback_locale"], "zh-CN");
+        assert_eq!(
+            body["messages"]["command.spec.help.summary"],
+            "显示当前作用域可用命令"
+        );
+        assert_eq!(body["messages"]["web.nav.overview"], "总览");
+        assert_eq!(body["messages"]["web.runtime.status.running"], "运行中");
+    }
+
+    #[test]
     fn static_asset_route_returns_injected_asset() {
         let response = test_server()
-            .route_http_request(b"GET /assets/bot.svg HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            .route_http_request(b"GET /assets/bot.svg HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
         let (headers, body) = split_response(response);
         let body = String::from_utf8(body).expect("body should be utf8");
 
@@ -619,7 +1420,7 @@ mod tests {
     #[test]
     fn head_request_returns_headers_without_body() {
         let response =
-            test_server().route_http_request(b"HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            test_server().route_http_request(b"HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
         let (headers, body) = split_response(response);
 
         assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
@@ -630,7 +1431,7 @@ mod tests {
     #[test]
     fn missing_asset_returns_not_found() {
         let response =
-            test_server().route_http_request(b"GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            test_server().route_http_request(b"GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
         let (headers, body) = split_response(response);
         let body = String::from_utf8(body).expect("body should be utf8");
 
@@ -672,14 +1473,14 @@ mod tests {
         };
 
         let js_response =
-            server.route_http_request(b"GET /assets/app.js HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            server.route_http_request(b"GET /assets/app.js HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
         let (js_headers, js_body) = split_response(js_response);
         let js_body = String::from_utf8(js_body).expect("js body should be utf8");
         assert!(js_headers.contains("Content-Type: text/javascript; charset=utf-8\r\n"));
         assert_eq!(js_body, "console.log('ok');");
 
         let spa_response =
-            server.route_http_request(b"GET /dashboard HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            server.route_http_request(b"GET /dashboard HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
         let (spa_headers, spa_body) = split_response(spa_response);
         let spa_body = String::from_utf8(spa_body).expect("spa body should be utf8");
         assert!(spa_headers.starts_with("HTTP/1.1 200 OK\r\n"));
@@ -693,8 +1494,8 @@ mod tests {
 
     #[test]
     fn dev_frontend_redirects_non_api_routes_when_probe_is_alive() {
-        let probe_listener = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .expect("probe listener should bind");
+        let probe_listener =
+            StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("probe listener should bind");
         let probe_addr = probe_listener
             .local_addr()
             .expect("probe listener should expose local addr");
@@ -711,18 +1512,22 @@ mod tests {
 
         let response = server.route_http_request(
             b"GET /dashboard?tab=runtime HTTP/1.1\r\nHost: 192.168.2.2:14500\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
         );
         let (headers, body) = split_response(response);
 
         assert!(headers.starts_with("HTTP/1.1 307 Temporary Redirect\r\n"));
         assert!(headers.contains("Location: http://192.168.2.2:1420/dashboard?tab=runtime\r\n"));
-        assert_eq!(String::from_utf8(body).expect("body should be utf8"), "redirecting");
+        assert_eq!(
+            String::from_utf8(body).expect("body should be utf8"),
+            "redirecting"
+        );
     }
 
     #[test]
     fn dev_frontend_redirect_keeps_local_api_and_static_routes() {
-        let probe_listener = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .expect("probe listener should bind");
+        let probe_listener =
+            StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("probe listener should bind");
         let probe_addr = probe_listener
             .local_addr()
             .expect("probe listener should expose local addr");
@@ -738,12 +1543,17 @@ mod tests {
         };
 
         let api_response =
-            server.route_http_request(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            server.route_http_request(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
         let (api_headers, _) = split_response(api_response);
         assert!(api_headers.starts_with("HTTP/1.1 200 OK\r\n"));
 
+        let i18n_response =
+            server.route_http_request(b"GET /api/i18n HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let (i18n_headers, _) = split_response(i18n_response);
+        assert!(i18n_headers.starts_with("HTTP/1.1 200 OK\r\n"));
+
         let icon_response =
-            server.route_http_request(b"GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            server.route_http_request(b"GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
         let (icon_headers, _) = split_response(icon_response);
         assert!(icon_headers.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(icon_headers.contains("Content-Type: image/x-icon\r\n"));

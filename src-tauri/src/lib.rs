@@ -1,39 +1,41 @@
-use std::fs;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use liteyukibot_core::app_host::EmbeddedAppHost;
 use liteyukibot_core::web_host::{
-    WebHostAsset, WebHostAssets, WebHostConfig, WebHostDevServer, WebHostService,
-    WebHostSnapshotProvider,
+    WebHostService, WebHostSnapshotProvider,
 };
-use liteyukibot_core::{LogLevel, emit_console_log};
+use liteyukibot_core::web_ui::{
+    APP_SHELL_WINDOW_ICON_ICO, build_default_web_host_assets, build_default_web_host_config,
+};
+use liteyukibot_core::{LogLevel, RuntimeTarget, emit_console_log};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{App, AppHandle, Manager, Runtime, WindowEvent};
 
-const PLACEHOLDER_HTML: &str = include_str!("../static/index.html");
-const FRONTEND_LOGO_SVG: &str = include_str!("../icons/bot.svg");
-const WINDOW_ICON_ICO: &[u8] = include_bytes!("../icons/bot.ico");
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ICON_ID: &str = "main-tray";
 const TRAY_SHOW_MENU_ID: &str = "tray-show";
 const TRAY_QUIT_MENU_ID: &str = "tray-quit";
-const FRONTEND_DIST_DIR: &str = "frontend/dist";
+const RUNTIME_API_BASE_GLOBAL: &str = "__LITEYUKI_RUNTIME_API_BASE__";
+/// JS global injected into the Tauri webview that carries the local auto-login
+/// token. The frontend reads this on startup and skips the login page.
+const LOCAL_TOKEN_GLOBAL: &str = "__LITEYUKI_LOCAL_TOKEN__";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app_host = tauri::async_runtime::block_on(EmbeddedAppHost::start_tauri())
-        .unwrap_or_else(|err| panic!("failed to bootstrap embedded app host: {err}"));
+    let app_host = tauri::async_runtime::block_on(EmbeddedAppHost::start_for_target(
+        RuntimeTarget::Tauri2,
+    ))
+    .unwrap_or_else(|err| panic!("failed to bootstrap embedded app host: {err}"));
     let snapshot_provider: WebHostSnapshotProvider = {
         let app_host = app_host.clone();
         Arc::new(move || app_host.snapshot())
     };
-    let assets = build_web_host_assets();
+    let assets = build_default_web_host_assets();
     let (server, listener) = tauri::async_runtime::block_on(async {
-        WebHostService::bind(build_web_host_config(), snapshot_provider, assets)
+        WebHostService::bind(build_default_web_host_config(), snapshot_provider, assets)
     })
     .unwrap_or_else(|err| {
         panic!("failed to bootstrap shared HTTP host: {err}");
@@ -63,8 +65,12 @@ pub fn run() {
     let allow_app_exit = Arc::new(AtomicBool::new(false));
     let allow_app_exit_for_tray = allow_app_exit.clone();
     let allow_app_exit_for_window = allow_app_exit.clone();
+    let runtime_api_base_script = build_runtime_api_base_init_script(server.desktop_url().as_str());
+    let local_token_script = build_local_token_init_script(server.local_token());
 
     tauri::Builder::default()
+        .append_invoke_initialization_script(runtime_api_base_script)
+        .append_invoke_initialization_script(local_token_script)
         .manage(app_host.clone())
         .manage(server)
         .setup(move |app| setup_system_tray(app, allow_app_exit_for_tray.clone()))
@@ -81,74 +87,6 @@ pub fn run() {
             format!("failed to shutdown embedded app host cleanly: {err}"),
         );
     }
-}
-
-fn build_web_host_assets() -> WebHostAssets {
-    let dist_dir = resolve_frontend_dist_dir();
-    let index_asset = dist_dir
-        .as_ref()
-        .and_then(|dir| fs::read_to_string(dir.join("index.html")).ok())
-        .map(|html| WebHostAsset::text("text/html; charset=utf-8", html))
-        .unwrap_or_else(|| WebHostAsset::text("text/html; charset=utf-8", PLACEHOLDER_HTML));
-
-    let assets = WebHostAssets::new(index_asset)
-        .with_asset(
-            "/assets/bot.svg",
-            WebHostAsset::text("image/svg+xml; charset=utf-8", FRONTEND_LOGO_SVG),
-        )
-        .with_asset(
-            "/favicon.ico",
-            WebHostAsset::binary("image/x-icon", WINDOW_ICON_ICO),
-        );
-
-    if let Some(dist_dir) = dist_dir {
-        assets.with_asset_directory(dist_dir)
-    } else {
-        assets
-    }
-}
-
-fn build_web_host_config() -> WebHostConfig {
-    let mut config = WebHostConfig::default();
-    config.dev_frontend = resolve_dev_frontend();
-    config
-}
-
-fn resolve_dev_frontend() -> Option<WebHostDevServer> {
-    let raw = std::env::var("LY_WEB_DEV_SERVER").ok()?;
-    let probe_addr = raw.trim().parse().ok()?;
-    Some(WebHostDevServer {
-        probe_addr,
-        public_port: probe_addr.port(),
-    })
-}
-
-fn resolve_frontend_dist_dir() -> Option<PathBuf> {
-    let current_dir = std::env::current_dir().ok();
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    resolve_frontend_dist_dir_from_candidates([
-        current_dir
-            .as_ref()
-            .map(|dir| dir.join(FRONTEND_DIST_DIR)),
-        current_dir
-            .as_ref()
-            .map(|dir| dir.join("..").join(FRONTEND_DIST_DIR)),
-        Some(manifest_dir.join("..").join(FRONTEND_DIST_DIR)),
-    ])
-}
-
-fn resolve_frontend_dist_dir_from_candidates(
-    candidates: impl IntoIterator<Item = Option<PathBuf>>,
-) -> Option<PathBuf> {
-    candidates
-        .into_iter()
-        .flatten()
-        .map(normalize_path)
-        .find(|dir| dir.join("index.html").is_file())
-}
-
-fn normalize_path(path: PathBuf) -> PathBuf {
-    fs::canonicalize(&path).unwrap_or(path)
 }
 
 fn setup_system_tray<R: Runtime>(
@@ -191,7 +129,7 @@ fn setup_system_tray<R: Runtime>(
     tray_builder = if let Some(icon) = app.default_window_icon().cloned() {
         tray_builder.icon(icon)
     } else {
-        match Image::from_bytes(WINDOW_ICON_ICO) {
+        match Image::from_bytes(APP_SHELL_WINDOW_ICON_ICO) {
             Ok(icon) => tray_builder.icon(icon),
             Err(err) => {
                 emit_console_log(
@@ -263,12 +201,25 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+fn build_runtime_api_base_init_script(runtime_api_base: &str) -> String {
+    let runtime_api_base = serde_json::to_string(runtime_api_base)
+        .expect("runtime api base should serialize into a JS string literal");
+    format!("window.{RUNTIME_API_BASE_GLOBAL} = {runtime_api_base};")
+}
+
+fn build_local_token_init_script(token: &str) -> String {
+    let token_json = serde_json::to_string(token)
+        .expect("local token should serialize into a JS string literal");
+    format!("window.{LOCAL_TOKEN_GLOBAL} = {token_json};")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::build_runtime_api_base_init_script;
     use serde::Deserialize;
     use std::collections::HashMap;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
     #[derive(Debug, Deserialize)]
     struct PackageJson {
@@ -296,14 +247,6 @@ mod tests {
     #[derive(Debug, Deserialize)]
     struct TauriBundleConfig {
         icon: Vec<String>,
-    }
-
-    fn temp_dir_path(name: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after unix epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!("rsliteyukibot-tauri-{name}-{unique}"))
     }
 
     fn repo_root() -> PathBuf {
@@ -341,63 +284,6 @@ mod tests {
 
     fn extract_pnpm_script(command: &str) -> Option<&str> {
         command.strip_prefix("pnpm ")
-    }
-
-    #[test]
-    fn resolve_frontend_dist_dir_uses_first_candidate_with_index_html() {
-        let missing_root = temp_dir_path("missing");
-        let valid_root = temp_dir_path("valid");
-
-        fs::create_dir_all(&missing_root).expect("missing candidate dir should exist");
-        fs::create_dir_all(&valid_root).expect("valid candidate dir should exist");
-        fs::write(valid_root.join("index.html"), "<!doctype html>")
-            .expect("index.html should be written");
-
-        let resolved = resolve_frontend_dist_dir_from_candidates([
-            Some(missing_root.clone()),
-            Some(valid_root.clone()),
-        ]);
-
-        assert_eq!(resolved, Some(normalize_path(valid_root.clone())));
-
-        let _ = fs::remove_file(valid_root.join("index.html"));
-        let _ = fs::remove_dir(&missing_root);
-        let _ = fs::remove_dir(&valid_root);
-    }
-
-    #[test]
-    fn resolve_frontend_dist_dir_returns_none_without_index_html() {
-        let missing_root = temp_dir_path("none");
-        fs::create_dir_all(&missing_root).expect("candidate dir should exist");
-
-        let resolved = resolve_frontend_dist_dir_from_candidates([Some(missing_root.clone())]);
-
-        assert!(resolved.is_none());
-
-        let _ = fs::remove_dir(&missing_root);
-    }
-
-    #[test]
-    fn resolve_dev_frontend_reads_probe_addr_from_env() {
-        unsafe {
-            std::env::set_var("LY_WEB_DEV_SERVER", "127.0.0.1:1420");
-        }
-
-        let dev_frontend = resolve_dev_frontend();
-
-        unsafe {
-            std::env::remove_var("LY_WEB_DEV_SERVER");
-        }
-
-        assert_eq!(
-            dev_frontend,
-            Some(WebHostDevServer {
-                probe_addr: "127.0.0.1:1420"
-                    .parse()
-                    .expect("socket addr should parse"),
-                public_port: 1420,
-            })
-        );
     }
 
     #[test]
@@ -454,5 +340,15 @@ mod tests {
                 resolved.display()
             );
         }
+    }
+
+    #[test]
+    fn runtime_api_base_init_script_assigns_window_global() {
+        let script = build_runtime_api_base_init_script("http://127.0.0.1:14500");
+
+        assert_eq!(
+            script,
+            "window.__LITEYUKI_RUNTIME_API_BASE__ = \"http://127.0.0.1:14500\";"
+        );
     }
 }

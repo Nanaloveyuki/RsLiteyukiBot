@@ -1,9 +1,18 @@
-export default function PageBackground() {
+const PageBackground = () => {
   return (
-    <div className="pointer-events-none fixed inset-0 -z-10 h-full w-full overflow-hidden bg-gradient-to-br from-cyan-50 via-white to-sky-50 dark:from-slate-950 dark:via-slate-950 dark:to-slate-900">
-      <div className="absolute left-[-10%] top-[-10%] h-[30rem] w-[30rem] rounded-full bg-cyan-200/36 blur-[100px] dark:bg-cyan-400/12" />
-      <div className="absolute right-[-10%] top-[14%] h-[24rem] w-[24rem] rounded-full bg-sky-200/34 blur-[92px] dark:bg-sky-400/12" />
-      <div className="absolute bottom-[-12%] left-[18%] h-[34rem] w-[34rem] rounded-full bg-cyan-100/58 blur-[108px] dark:bg-cyan-300/8" />
+    <div className='fixed inset-0 w-full h-full -z-10 overflow-hidden bg-gradient-to-br from-indigo-50 via-white to-pink-50 dark:from-gray-900 dark:via-gray-800 dark:to-gray-900'>
+      {/* 静态光斑 - ACG风格 */}
+      <div
+        className='absolute top-[-10%] left-[-10%] w-[500px] h-[500px] rounded-full bg-primary-200/40 blur-[100px]'
+      />
+      <div
+        className='absolute top-[20%] right-[-10%] w-[400px] h-[400px] rounded-full bg-secondary-200/40 blur-[90px]'
+      />
+      <div
+        className='absolute bottom-[-10%] left-[20%] w-[600px] h-[600px] rounded-full bg-pink-200/30 blur-[110px]'
+      />
     </div>
   );
-}
+};
+
+export default PageBackground;

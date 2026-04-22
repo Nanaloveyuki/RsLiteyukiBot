@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "RsLiteyukiBot Tauri2",
+        "title": "RsLiteyukiBot",
         "width": 1200,
         "height": 800,
         "minWidth": 960,
@@ -25,8 +25,8 @@
   "bundle": {
     "active": false,
     "icon": [
-      "icons/bot.png",
-      "icons/bot.ico"
+      "../assets/app-shell/bot.png",
+      "../assets/app-shell/bot.ico"
     ]
   }
 }

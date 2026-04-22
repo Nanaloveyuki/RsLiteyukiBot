@@ -1,77 +1,95 @@
-import type { ReactNode } from "react";
-
 import {
   LuActivity,
-  LuBot,
   LuFileText,
+  LuFolderOpen,
   LuInfo,
   LuLayoutDashboard,
-  LuPackage,
+  LuSettings,
   LuSignal,
   LuTerminal,
-} from "react-icons/lu";
+  LuZap,
+  LuPackage,
+  LuStore,
+  LuPuzzle,
+} from 'react-icons/lu';
 
+export type SiteConfig = typeof siteConfig;
 export interface MenuItem {
-  id: string;
   label: string;
-  href: string;
-  icon: ReactNode;
+  icon?: React.ReactNode;
+  autoOpen?: boolean;
+  href?: string;
+  items?: MenuItem[];
+  customIcon?: string;
 }
 
 export const siteConfig = {
-  name: "RsLiteyukiBot",
-  description: "Tauri2 desktop shell powered by a shared Rust runtime.",
-  links: {
-    repo: "https://github.com/LiteyukiStudio/RsLiteyukiBot",
-  },
+  name: 'LiteyukiBot',
+  description: 'LiteyukiBot WebUI.',
   navItems: [
     {
-      id: "overview",
-      label: "基础信息",
-      href: "/",
-      icon: <LuLayoutDashboard className="h-5 w-5" />,
+      label: '基础信息',
+      icon: <LuLayoutDashboard className='w-5 h-5' />,
+      href: '/',
     },
     {
-      id: "runtime",
-      label: "运行信息",
-      href: "/runtime",
-      icon: <LuActivity className="h-5 w-5" />,
+      label: '网络配置',
+      icon: <LuSignal className='w-5 h-5' />,
+      href: '/network',
     },
     {
-      id: "adapters",
-      label: "网络信息",
-      href: "/adapters",
-      icon: <LuSignal className="h-5 w-5" />,
+      label: '猫猫日志',
+      icon: <LuFileText className='w-5 h-5' />,
+      href: '/logs',
     },
     {
-      id: "llm",
-      label: "对话模式",
-      href: "/llm",
-      icon: <LuBot className="h-5 w-5" />,
+      label: '接口调试',
+      icon: <LuActivity className='w-5 h-5' />,
+      href: '/debug/http',
     },
     {
-      id: "commands",
-      label: "命令中心",
-      href: "/commands",
-      icon: <LuTerminal className="h-5 w-5" />,
+      label: '实时调试',
+      icon: <LuZap className='w-5 h-5' />,
+      href: '/debug/ws',
     },
     {
-      id: "plugins",
-      label: "插件面板",
-      href: "/plugins",
-      icon: <LuPackage className="h-5 w-5" />,
+      label: '文件管理',
+      icon: <LuFolderOpen className='w-5 h-5' />,
+      href: '/file_manager',
     },
     {
-      id: "logs",
-      label: "日志信息",
-      href: "/logs",
-      icon: <LuFileText className="h-5 w-5" />,
+      label: '插件管理',
+      icon: <LuPackage className='w-5 h-5' />,
+      href: '/plugins',
     },
     {
-      id: "diagnostics",
-      label: "诊断信息",
-      href: "/diagnostics",
-      icon: <LuInfo className="h-5 w-5" />,
+      label: '插件商店',
+      icon: <LuStore className='w-5 h-5' />,
+      href: '/plugin_store',
+    },
+    {
+      label: '扩展页面',
+      icon: <LuPuzzle className='w-5 h-5' />,
+      href: '/extension',
+    },
+    {
+      label: '系统终端',
+      icon: <LuTerminal className='w-5 h-5' />,
+      href: '/terminal',
+    },
+    {
+      label: '系统配置',
+      icon: <LuSettings className='w-5 h-5' />,
+      href: '/config',
+    },
+    {
+      label: '关于我们',
+      icon: <LuInfo className='w-5 h-5' />,
+      href: '/about',
     },
   ] as MenuItem[],
+  links: {
+    github: 'https://github.com/LiteyukiStudio/RsLiteyukiBot',
+    docs: 'https://bot.liteyuki.icu/',
+  },
 };

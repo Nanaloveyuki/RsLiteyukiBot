@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tauriDevAddress } from "./tauri-dev-config.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..");
@@ -10,7 +11,7 @@ const forwardedArgs = args.length > 0 ? args : ["dev"];
 const env = { ...process.env };
 
 if (forwardedArgs[0] === "dev" && !env.LY_WEB_DEV_SERVER) {
-  env.LY_WEB_DEV_SERVER = "127.0.0.1:1420";
+  env.LY_WEB_DEV_SERVER = tauriDevAddress;
 }
 
 const result = spawnSync(process.execPath, [cli, ...forwardedArgs], {

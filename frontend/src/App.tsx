@@ -1,39 +1,91 @@
-import { Suspense, lazy } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Suspense, lazy, useEffect } from 'react';
+import { Provider } from 'react-redux';
+import { Route, Routes, useNavigate } from 'react-router-dom';
 
-import Layout from "@/layouts/default";
+import PageBackground from '@/components/page_background';
+import PageLoading from '@/components/page_loading';
+import Toaster from '@/components/toaster';
 
-const OverviewPage = lazy(() => import("@/pages/overview"));
-const RuntimePage = lazy(() => import("@/pages/runtime"));
-const AdaptersPage = lazy(() => import("@/pages/adapters"));
-const LlmPage = lazy(() => import("@/pages/llm"));
-const CommandsPage = lazy(() => import("@/pages/commands"));
-const PluginsPage = lazy(() => import("@/pages/plugins"));
-const LogsPage = lazy(() => import("@/pages/logs"));
-const DiagnosticsPage = lazy(() => import("@/pages/diagnostics"));
+import DialogProvider from '@/contexts/dialog';
 
-export default function App() {
+import useAuth from '@/hooks/auth';
+
+import store from '@/store';
+
+const WebLoginPage = lazy(() => import('@/pages/web_login'));
+const IndexPage = lazy(() => import('@/pages/index'));
+const DashboardIndexPage = lazy(() => import('@/pages/dashboard'));
+const AboutPage = lazy(() => import('@/pages/dashboard/about'));
+const ConfigPage = lazy(() => import('@/pages/dashboard/config'));
+const DebugPage = lazy(() => import('@/pages/dashboard/debug'));
+const HttpDebug = lazy(() => import('@/pages/dashboard/debug/http'));
+const WSDebug = lazy(() => import('@/pages/dashboard/debug/websocket'));
+const FileManagerPage = lazy(() => import('@/pages/dashboard/file_manager'));
+const LogsPage = lazy(() => import('@/pages/dashboard/logs'));
+const NetworkPage = lazy(() => import('@/pages/dashboard/network'));
+const TerminalPage = lazy(() => import('@/pages/dashboard/terminal'));
+const PluginPage = lazy(() => import('@/pages/dashboard/plugin'));
+const PluginStorePage = lazy(() => import('@/pages/dashboard/plugin_store'));
+const ExtensionPage = lazy(() => import('@/pages/dashboard/extension'));
+
+function App () {
   return (
-    <Suspense
-      fallback={
-        <div className="flex min-h-screen items-center justify-center bg-white/70 text-sm text-default-500 backdrop-blur-xs dark:bg-slate-950/65 dark:text-slate-300">
-          loading page...
-        </div>
-      }
-    >
-      <Routes>
-        <Route element={<Layout />}>
-          <Route index element={<OverviewPage />} />
-          <Route path="/runtime" element={<RuntimePage />} />
-          <Route path="/adapters" element={<AdaptersPage />} />
-          <Route path="/llm" element={<LlmPage />} />
-          <Route path="/commands" element={<CommandsPage />} />
-          <Route path="/plugins" element={<PluginsPage />} />
-          <Route path="/logs" element={<LogsPage />} />
-          <Route path="/diagnostics" element={<DiagnosticsPage />} />
-          <Route path="*" element={<Navigate replace to="/" />} />
-        </Route>
-      </Routes>
-    </Suspense>
+    <DialogProvider>
+      <Provider store={store}>
+        <PageBackground />
+        <Toaster />
+        <Suspense fallback={<PageLoading />}>
+          <AuthChecker>
+            <AppRoutes />
+          </AuthChecker>
+        </Suspense>
+      </Provider>
+    </DialogProvider>
   );
 }
+
+function AuthChecker ({ children }: { children: React.ReactNode; }) {
+  const { isAuth } = useAuth();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!isAuth) {
+      const search = new URLSearchParams(window.location.search);
+      const token = search.get('token');
+      let url = '/web_login';
+
+      if (token) {
+        url += `?token=${token}`;
+      }
+      navigate(url, { replace: true });
+    }
+  }, [isAuth, navigate]);
+
+  return <>{children}</>;
+}
+
+function AppRoutes () {
+  return (
+    <Routes>
+      <Route path='/' element={<IndexPage />}>
+        <Route index element={<DashboardIndexPage />} />
+        <Route path='network' element={<NetworkPage />} />
+        <Route path='config' element={<ConfigPage />} />
+        <Route path='logs' element={<LogsPage />} />
+        <Route path='debug' element={<DebugPage />}>
+          <Route path='ws' element={<WSDebug />} />
+          <Route path='http' element={<HttpDebug />} />
+        </Route>
+        <Route path='file_manager' element={<FileManagerPage />} />
+        <Route path='terminal' element={<TerminalPage />} />
+        <Route path='plugins' element={<PluginPage />} />
+        <Route path='plugin_store' element={<PluginStorePage />} />
+        <Route path='extension' element={<ExtensionPage />} />
+        <Route path='about' element={<AboutPage />} />
+      </Route>
+      <Route path='/web_login' element={<WebLoginPage />} />
+    </Routes>
+  );
+}
+
+export default App;

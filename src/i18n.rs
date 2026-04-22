@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 
 use crate::PluginManifestLoader;
+use serde::Serialize;
 use serde_json::Value;
 
 const BUNDLED_ZH_CN: &str =
@@ -71,6 +72,25 @@ impl I18nCatalog {
         self.translations
             .get(&locale)
             .and_then(|entries| entries.get(key).map(String::as_str))
+    }
+
+    #[allow(dead_code)]
+    fn resolved_messages_for(&self, locale: AppLocale) -> HashMap<String, String> {
+        let mut entries = self
+            .translations
+            .get(&AppLocale::default())
+            .cloned()
+            .unwrap_or_default();
+
+        if locale != AppLocale::default()
+            && let Some(locale_entries) = self.translations.get(&locale)
+        {
+            for (key, value) in locale_entries {
+                entries.insert(key.clone(), value.clone());
+            }
+        }
+
+        entries
     }
 
     fn merge_json_str(
@@ -147,6 +167,15 @@ static CURRENT_LOCALE: LazyLock<RwLock<AppLocale>> =
 static CATALOG: LazyLock<RwLock<I18nCatalog>> =
     LazyLock::new(|| RwLock::new(I18nCatalog::bundled_defaults()));
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct I18nSnapshot {
+    pub locale: String,
+    pub fallback_locale: String,
+    pub available_locales: Vec<String>,
+    pub messages: HashMap<String, String>,
+}
+
 pub(crate) fn current_locale() -> AppLocale {
     *CURRENT_LOCALE
         .read()
@@ -204,6 +233,11 @@ pub(crate) fn trf(key: &str, args: &[(&str, &str)]) -> String {
     trf_for(current_locale(), key, args)
 }
 
+#[allow(dead_code)]
+pub(crate) fn current_snapshot() -> I18nSnapshot {
+    snapshot_for(current_locale())
+}
+
 pub(crate) fn tr_for(locale: AppLocale, key: &str) -> String {
     lookup_with_locale(locale, key)
 }
@@ -231,6 +265,23 @@ fn lookup_with_locale(locale: AppLocale, key: &str) -> String {
         })
         .unwrap_or(key)
         .to_string()
+}
+
+#[allow(dead_code)]
+fn snapshot_for(locale: AppLocale) -> I18nSnapshot {
+    let catalog = CATALOG
+        .read()
+        .expect("i18n catalog lock should not be poisoned");
+
+    I18nSnapshot {
+        locale: locale.as_str().to_string(),
+        fallback_locale: AppLocale::default().as_str().to_string(),
+        available_locales: AppLocale::all()
+            .into_iter()
+            .map(|entry| entry.as_str().to_string())
+            .collect(),
+        messages: catalog.resolved_messages_for(locale),
+    }
 }
 
 fn runtime_core_i18n_dirs() -> Vec<PathBuf> {
@@ -413,5 +464,32 @@ mod tests {
 
         assert!(dirs.contains(&root.join("i18n").join("core")));
         assert!(dirs.contains(&root.join("resources").join("i18n").join("core")));
+    }
+
+    #[test]
+    fn snapshot_for_uses_requested_locale_with_default_fallback() {
+        let snapshot = snapshot_for(AppLocale::EnUs);
+
+        assert_eq!(snapshot.locale, "en-US");
+        assert_eq!(snapshot.fallback_locale, "zh-CN");
+        assert_eq!(
+            snapshot.messages.get("command.spec.help.summary").map(String::as_str),
+            Some("Show commands available in the current scope")
+        );
+        assert_eq!(
+            snapshot.messages.get("web.nav.overview").map(String::as_str),
+            Some("Overview")
+        );
+        assert_eq!(
+            snapshot
+                .messages
+                .get("web.runtime.status.running")
+                .map(String::as_str),
+            Some("Running")
+        );
+        assert!(
+            snapshot.messages.contains_key("tui.brand"),
+            "resolved snapshot should include default catalog entries"
+        );
     }
 }

@@ -8,13 +8,16 @@ pub mod core;
 pub mod llm;
 pub mod observability;
 pub mod plugin;
+mod runtime_support;
 pub mod session;
 pub mod web_host;
+pub mod web_ui;
 
 #[allow(dead_code)]
 mod app_config;
 #[allow(dead_code)]
 mod command_registry;
+mod external_commands;
 #[allow(dead_code)]
 mod i18n;
 #[allow(dead_code)]

@@ -332,5 +332,308 @@
   "tui.resume.already_active": "当前已处于 resume {uid}",
   "tui.resume.not_found": "未找到 resume: {uid}",
   "tui.resume.resumed": "已切换到 resume {uid}",
-  "tui.adapters.entry": "{adapter} [{status}] {transport} -> {url}"
+  "tui.adapters.entry": "{adapter} [{status}] {transport} -> {url}",
+  "web": {
+    "app": {
+      "loading_page": "页面加载中..."
+    },
+    "site": {
+      "description": "RsLiteyukiBot 共享运行时控制台"
+    },
+    "nav": {
+      "overview": "总览",
+      "runtime": "运行时",
+      "adapters": "适配器",
+      "llm": "LLM",
+      "commands": "命令",
+      "plugins": "插件",
+      "logs": "日志",
+      "diagnostics": "诊断"
+    },
+    "common": {
+      "empty_data": "暂无可用数据。",
+      "no_event_yet": "暂无事件",
+      "waiting_for_inbound_events": "等待传入事件",
+      "current": "当前",
+      "system": "系统",
+      "idle": "空闲",
+      "overview": "总览",
+      "config": "配置",
+      "loading": "加载中",
+      "waiting": "等待中",
+      "enabled": "已启用",
+      "disabled": "已禁用",
+      "metric": "指标",
+      "node": "节点",
+      "unavailable": "不可用"
+    },
+    "sidebar": {
+      "toggle_theme": "切换主题",
+      "refresh_status": "刷新状态"
+    },
+    "layout": {
+      "console": "控制台"
+    },
+    "runtime.status": "状态",
+    "runtime.target": "目标",
+    "adapters.capabilities": "能力",
+    "commands.groups": "分组",
+    "errors": {
+      "runtime_health_load": "加载运行时健康信息失败: {error}",
+      "runtime_logs_load": "加载运行时日志失败: {error}"
+    },
+    "overview": {
+      "description": "首页只保留关键运行时摘要，并将共享端点与快捷入口移出主焦点区域，让面板更紧凑也更清晰。",
+      "eyebrow": "仪表盘",
+      "health_api": "健康接口",
+      "system_info": "系统信息",
+      "adapter_instances": "适配器实例",
+      "events": "事件",
+      "cpu_total": "总 CPU",
+      "cpu_process": "进程 CPU",
+      "memory_total": "总内存",
+      "memory_process": "进程内存",
+      "system_cpu": "系统 CPU",
+      "system_cpu_detail": "当前整机占用",
+      "process_cpu": "进程 CPU",
+      "process_cpu_detail": "当前 RsLiteyukiBot 占用",
+      "system_memory": "系统内存",
+      "system_memory_detail": "已用 / 总量",
+      "process_memory": "进程内存",
+      "process_memory_detail": "进程占用与比例",
+      "adapters": "适配器",
+      "adapters_detail": "已连接实例数量",
+      "handled_events": "事件",
+      "handled_events_detail": "累计已处理事件数",
+      "resource_sampling": "资源采样",
+      "resource_sampling_detail": "来源于共享健康快照",
+      "resource_sampling_synced": "已同步",
+      "resource_sampling_waiting": "等待中",
+      "system_state": "系统状态",
+      "system_state_detail": "界面数据已整理为可读指标",
+      "system_state_initializing": "初始化中",
+      "system_state_stable": "稳定",
+      "cpu_usage": "CPU 占用",
+      "memory_usage": "内存占用"
+    },
+    "runtime": {
+      "description": "此页将运行时信息拆分为总览、配置与事件三个分区，避免所有内容挤在一张纯文本卡片里。",
+      "eyebrow": "运行时",
+      "waiting_for_snapshot": "等待运行时快照",
+      "shared_address": "共享地址",
+      "summary": "运行时摘要",
+      "last_event": "最近事件",
+      "last_event_description": "最近事件对诊断运行时行为很关键，因此它拥有独立卡片。",
+      "no_warnings": "当前没有运行时警告。",
+      "no_notes": "当前没有备注。",
+      "plugin_dirs_count": "插件目录 {count}",
+      "disabled_plugins_count": "禁用插件 {count}",
+      "locale": "语言",
+      "command_prefix": "命令前缀",
+      "help_whitelist": "Help 白名单",
+      "adapter_autostart": "自动启动",
+      "plugin_dirs": "插件目录",
+      "disabled_commands": "禁用命令",
+      "panels_description": "切换视图时会复用同一份后端快照，而不是在前端复制状态。",
+      "panels_title": "运行时面板",
+      "lifecycle": "生命周期",
+      "target_line": "运行目标",
+      "prefix_line": "LLM 前缀",
+      "handled_events_line": "已处理事件",
+      "help_whitelist_line": "Help 白名单",
+      "entrypoints": "入口点",
+      "entrypoints_description": "共享宿主让桌面端与浏览器端读取同一份运行时数据。",
+      "config_unavailable": "运行时配置暂不可用",
+      "topic": "主题",
+      "identity": {
+        "status_line": "状态 · {status}"
+      },
+      "status": {
+        "running": "运行中",
+        "starting": "启动中",
+        "loading": "加载中",
+        "initializing": "初始化中",
+        "unknown": "未知"
+      },
+      "target": {
+        "unknown": "未知",
+        "cli": "命令行",
+        "web": "Web",
+        "tauri2": "Tauri 2",
+        "docker": "Docker",
+        "cli-web": "CLI + Web",
+        "docker-web": "Docker + Web"
+      }
+    },
+    "adapters": {
+      "bind": "绑定地址",
+      "desktop": "桌面端",
+      "external": "外部访问",
+      "adapter_count": "适配器数量",
+      "api_requests": "API 请求",
+      "success_rate": "成功率",
+      "inflight": "进行中",
+      "description": "保留传输层控制室的感觉，但数据全部来自 RsLiteyukiBot 实际暴露的共享宿主、请求流量与适配器能力。",
+      "eyebrow": "传输层",
+      "success": "成功",
+      "requests": "请求数",
+      "shared_entry": "共享入口",
+      "shared_entry_description": "共享宿主同时服务桌面壳层与浏览器，后续 Docker/Web 目标也会复用这条路径。",
+      "section_description": "这些面板全部来自同一份健康快照，而不是前端自造一套传输状态。",
+      "section_title": "适配器能力",
+      "listen_address": "监听地址",
+      "listen_address_detail": "桌面端与 Web 客户端共享同一宿主。",
+      "desktop_entry": "桌面入口",
+      "desktop_entry_detail": "Tauri 壳层默认使用的回环地址。",
+      "external_hint": "外部提示",
+      "external_hint_detail": "为后续 Docker/Web 扩展准备的对外访问提示。",
+      "request_stats_description": "这里的流量统计来自同一份运行时健康快照。",
+      "request_stats": "请求统计",
+      "request_success": "成功请求: {count}",
+      "request_failed": "失败请求: {count}",
+      "request_timeout": "超时: {count}",
+      "request_inflight": "进行中: {count}",
+      "capabilities": {
+        "websocket": {
+          "title": "WebSocket 桥接",
+          "detail": "长连接适配器流量可以继续挂在共享运行时宿主上，而不需要再发明一套仅浏览器使用的传输层。"
+        },
+        "tcp_http": {
+          "title": "HTTP 控制面",
+          "detail": "健康检查、日志以及后续管理动作都继续走桌面端与浏览器已共享的这条 HTTP 面。"
+        },
+        "sse": {
+          "title": "流式就绪",
+          "detail": "运行时已经区分了面向传输的表面，未来要接入 SSE 或增量事件投递时也能沿用同一条后端路径。"
+        }
+      }
+    },
+    "commands": {
+      "description": "命令页沿用面板化控制台布局，并加入本地过滤，让 builtin 命令与策略语义更容易快速定位。",
+      "eyebrow": "命令",
+      "disabled": "已禁用",
+      "prefix": "前缀",
+      "whitelist": "白名单",
+      "search_placeholder": "搜索命令或说明",
+      "groups_description": "命令按真实功能边界分组，这个布局后续可以直接扩展成更完整的命令管理页。",
+      "groups_title": "命令分组",
+      "policy_description": "命令策略仍由后端掌控，因此这个页面只读取当前状态，不会先造第二套前端编辑器。",
+      "policy_notes": "策略说明",
+      "policy_line_one": "当前命令策略已经支持按 scope 启用 / 禁用，并且与 /help 白名单保持独立。",
+      "policy_line_two": "等你决定把策略编辑迁进 Web 后，这一页可以直接扩展成更丰富的控制面板。",
+      "empty_filtered": "当前过滤条件下没有匹配的命令。",
+      "disabled_commands": "禁用命令",
+      "disabled_empty": "当前没有禁用命令。",
+      "groups": {
+        "ops": {
+          "title": "运维",
+          "description": "直接影响运行时表面的控制台与 reload 控制命令。",
+          "help": "显示当前作用域可用命令。",
+          "reload": "从后端重新加载配置与适配器状态。",
+          "adapters": "查看适配器连接与共享端点信息。",
+          "log": "切换当前运行时的日志视图行为。",
+          "clear": "清空当前控制台窗口。"
+        },
+        "session": {
+          "title": "会话",
+          "description": "与当前会话绑定的对话、LLM 与历史命令。",
+          "ask": "通过共享运行时请求一条 LLM 回复。",
+          "llm": "管理模型、provider 与 prompt profile。",
+          "resumes": "列出已保存的会话快照。",
+          "history": "查看当前会话历史快照。",
+          "resume": "切换到指定的会话快照。"
+        },
+        "policy": {
+          "title": "策略",
+          "description": "由后端持有的命令 scope 与插件可用性策略命令。",
+          "commands": "按 scope 查看 builtin 与 plugin 命令。",
+          "commands_enable": "通过后端策略重新启用命令。",
+          "commands_disable": "通过后端策略禁用命令。",
+          "plugins": "查看插件可用性与目录。",
+          "plugins_toggle": "通过后端策略切换插件可用性。"
+        }
+      }
+    },
+    "diagnostics": {
+      "cpu": "CPU",
+      "warnings": "警告",
+      "notes": "备注",
+      "last_event": "最近事件",
+      "memory": "内存",
+      "events": "事件",
+      "description": "诊断页保留运维观察视角，同时把警告、备注、事件预览和资源快照重组成更易扫读的结构。",
+      "eyebrow": "诊断",
+      "section_description": "这里延续主仪表盘的诊断卡片风格，但内容全部替换成真实的 RsLiteyukiBot 运行时数据。",
+      "section_title": "运行时诊断",
+      "resource_snapshot": "资源快照",
+      "system_cpu": "系统 CPU",
+      "process_cpu": "进程 CPU",
+      "system_memory": "系统内存",
+      "process_memory": "进程内存",
+      "handled_events": "已处理事件"
+    },
+    "llm": {
+      "description": "此页把 /ask、provider 与 prompt profile 整理成面板化能力块，而不是继续停留在纯说明文本。",
+      "eyebrow": "LLM",
+      "entry": "入口",
+      "provider": "Provider",
+      "prompt": "Prompt",
+      "capabilities_description": "前端不会假装自己已经能编辑 provider；它现在只是把现有能力重新组织成更像控制台的视图。",
+      "capabilities_title": "LLM 能力",
+      "current_entry": "当前入口",
+      "switch_method": "切换方式",
+      "config_storage": "配置存储",
+      "panel_entry_detail": "桌面端与 Web 客户端共用同一条 /ask 命令链路，所以前端优先做观测与导航，而不是再造第二套协议。",
+      "panel_provider_detail": "Provider 仍通过 /llm provider list|add|remove|use 管理，因此当前前端只暴露状态与命令流，而不是重复造一个编辑器。",
+      "panel_prompt_detail": "Prompt profile 已经拥有独立存储；在真正的编辑器落地之前，这个页面先保持 profile 视角与命令流。",
+      "workflow_description": "完整对话工作流尚未迁进 Web，因此这个分区会先把真实命令路径与指引固化到卡片里。",
+      "workflow_title": "对话工作流",
+      "capabilities": {
+        "ask_entry": {
+          "title": "/ask 入口",
+          "detail": "Web 控制台继续挂在同一条 /ask 入口上，而不是单独做一套前端专用提问流程。"
+        },
+        "provider_routing": {
+          "title": "Provider 路由",
+          "detail": "Provider 选择依旧属于后端命令路径，因此 Web 视图当前优先强调可观测性。"
+        },
+        "prompt_store": {
+          "title": "Prompt Profile",
+          "detail": "Prompt profile 已经是独立存储，因此在编辑能力到来之前，先作为后端驱动的运行时元数据暴露是安全的。"
+        }
+      }
+    },
+    "logs": {
+      "description": "日志页直接读取共享运行时的近期控制台输出，让启动、网络与运行时故障无需依赖本地窗口也能远程观察。",
+      "eyebrow": "日志",
+      "entries": "条目",
+      "latest_level": "最新级别",
+      "module": "模块",
+      "updated": "更新时间",
+      "section_description": "这个面板默认展示最近 200 条日志，重点覆盖统一 logger 路径以及关键的共享宿主 / Tauri 壳层运行时日志。",
+      "section_title": "控制台输出",
+      "time": "时间",
+      "level": "级别",
+      "message": "消息",
+      "loading": "日志加载中...",
+      "empty": "当前还没有日志可展示。"
+    },
+    "plugins": {
+      "description": "插件页保留管理控制台结构，但内容严格绑定到当前运行时真正暴露出来的目录、禁用列表与运行时备注。",
+      "eyebrow": "插件",
+      "directories": "目录",
+      "directories_empty": "当前还没有上报插件目录。",
+      "disabled": "已禁用",
+      "disabled_prefix": "已禁用: {plugin}",
+      "search_placeholder": "搜索目录、插件或备注",
+      "section_description": "所有目录都直接来自健康快照，因此桌面端、Web 端以及未来 Docker 目标看到的是同一份结果。",
+      "section_title": "插件目录",
+      "disabled_empty": "当前没有禁用插件。",
+      "notes_empty": "当前没有插件运行时备注。",
+      "disabled_description": "禁用状态仍由后端管理，因此这个面板保持只读。",
+      "disabled_title": "禁用插件",
+      "notes_description": "插件相关的运行时备注会优先显示在这里，后续也可以自然扩展成更完整的插件详情页。",
+      "notes_title": "运行时备注"
+    }
+  }
 }

@@ -332,5 +332,308 @@
   "tui.resume.already_active": "already in resume {uid}",
   "tui.resume.not_found": "resume not found: {uid}",
   "tui.resume.resumed": "resumed session {uid}",
-  "tui.adapters.entry": "{adapter} [{status}] {transport} -> {url}"
+  "tui.adapters.entry": "{adapter} [{status}] {transport} -> {url}",
+  "web": {
+    "app": {
+      "loading_page": "loading page..."
+    },
+    "site": {
+      "description": "RsLiteyukiBot shared runtime console"
+    },
+    "nav": {
+      "overview": "Overview",
+      "runtime": "Runtime",
+      "adapters": "Adapters",
+      "llm": "LLM",
+      "commands": "Commands",
+      "plugins": "Plugins",
+      "logs": "Logs",
+      "diagnostics": "Diagnostics"
+    },
+    "common": {
+      "empty_data": "No data available.",
+      "no_event_yet": "No event yet",
+      "waiting_for_inbound_events": "Waiting for inbound events",
+      "current": "Current",
+      "system": "System",
+      "idle": "idle",
+      "overview": "Overview",
+      "config": "Config",
+      "loading": "loading",
+      "waiting": "waiting",
+      "enabled": "enabled",
+      "disabled": "disabled",
+      "metric": "Metric",
+      "node": "Node",
+      "unavailable": "Unavailable"
+    },
+    "sidebar": {
+      "toggle_theme": "Toggle theme",
+      "refresh_status": "Refresh status"
+    },
+    "layout": {
+      "console": "Console"
+    },
+    "runtime.status": "Status",
+    "runtime.target": "Target",
+    "adapters.capabilities": "Capabilities",
+    "commands.groups": "Groups",
+    "errors": {
+      "runtime_health_load": "failed to load runtime health: {error}",
+      "runtime_logs_load": "failed to load runtime logs: {error}"
+    },
+    "overview": {
+      "description": "The home page keeps only useful runtime summaries and moves shared endpoints and shortcuts away from the main focus area for a denser, cleaner panel.",
+      "eyebrow": "dashboard",
+      "health_api": "Health API",
+      "system_info": "System info",
+      "adapter_instances": "Adapter instances",
+      "events": "Events",
+      "cpu_total": "Total CPU",
+      "cpu_process": "Process CPU",
+      "memory_total": "Total memory",
+      "memory_process": "Process memory",
+      "system_cpu": "System CPU",
+      "system_cpu_detail": "Current full-system usage",
+      "process_cpu": "Process CPU",
+      "process_cpu_detail": "Current RsLiteyukiBot usage",
+      "system_memory": "System memory",
+      "system_memory_detail": "Used / total",
+      "process_memory": "Process memory",
+      "process_memory_detail": "Process usage and ratio",
+      "adapters": "Adapters",
+      "adapters_detail": "Connected instance count",
+      "handled_events": "Events",
+      "handled_events_detail": "Accumulated handled events",
+      "resource_sampling": "Resource sampling",
+      "resource_sampling_detail": "Sourced from the shared health snapshot",
+      "resource_sampling_synced": "Synced",
+      "resource_sampling_waiting": "Waiting",
+      "system_state": "System state",
+      "system_state_detail": "UI data has been converted into readable metrics",
+      "system_state_initializing": "Initializing",
+      "system_state_stable": "Stable",
+      "cpu_usage": "CPU usage",
+      "memory_usage": "Memory usage"
+    },
+    "runtime": {
+      "description": "This page splits runtime details into overview, config, and event sections so the information does not collapse into a single plain-text card.",
+      "eyebrow": "runtime",
+      "waiting_for_snapshot": "waiting for snapshot",
+      "shared_address": "Shared address",
+      "summary": "Runtime summary",
+      "last_event": "Last event",
+      "last_event_description": "The latest event is critical for diagnosing runtime behavior, so it gets its own card.",
+      "no_warnings": "No runtime warnings.",
+      "no_notes": "No notes right now.",
+      "plugin_dirs_count": "Plugin dirs {count}",
+      "disabled_plugins_count": "Disabled plugins {count}",
+      "locale": "Locale",
+      "command_prefix": "Command prefix",
+      "help_whitelist": "Help whitelist",
+      "adapter_autostart": "Autostart",
+      "plugin_dirs": "Plugin dirs",
+      "disabled_commands": "Disabled commands",
+      "panels_description": "Switching views reuses the same backend snapshot instead of duplicating state on the frontend.",
+      "panels_title": "Runtime panels",
+      "lifecycle": "Lifecycle",
+      "target_line": "runtime target",
+      "prefix_line": "llm prefix",
+      "handled_events_line": "handled events",
+      "help_whitelist_line": "help whitelist",
+      "entrypoints": "Entrypoints",
+      "entrypoints_description": "The shared host lets desktop and browser clients read the same runtime data.",
+      "config_unavailable": "runtime config unavailable",
+      "topic": "Topic",
+      "identity": {
+        "status_line": "status · {status}"
+      },
+      "status": {
+        "running": "Running",
+        "starting": "Starting",
+        "loading": "Loading",
+        "initializing": "Initializing",
+        "unknown": "Unknown"
+      },
+      "target": {
+        "unknown": "Unknown",
+        "cli": "CLI",
+        "web": "Web",
+        "tauri2": "Tauri 2",
+        "docker": "Docker",
+        "cli-web": "CLI + Web",
+        "docker-web": "Docker + Web"
+      }
+    },
+    "adapters": {
+      "bind": "Bind",
+      "desktop": "Desktop",
+      "external": "External",
+      "adapter_count": "Adapter count",
+      "api_requests": "API requests",
+      "success_rate": "Success rate",
+      "inflight": "Inflight",
+      "description": "Keep the control-room feeling of the transport page, but drive it from the real shared host, request traffic, and adapter capabilities exposed by RsLiteyukiBot.",
+      "eyebrow": "transport",
+      "success": "Success",
+      "requests": "Requests",
+      "shared_entry": "Shared entry",
+      "shared_entry_description": "The shared host serves both the desktop shell and the browser, and future Docker/Web targets will reuse the same path.",
+      "section_description": "These panels all come from the same health snapshot instead of inventing a separate frontend transport state.",
+      "section_title": "Adapter capabilities",
+      "listen_address": "Listen address",
+      "listen_address_detail": "Desktop and web clients share the same host.",
+      "desktop_entry": "Desktop entry",
+      "desktop_entry_detail": "Default loopback address for the Tauri shell.",
+      "external_hint": "External hint",
+      "external_hint_detail": "External-facing hint for later Docker/Web expansion.",
+      "request_stats_description": "Traffic statistics here come from the same runtime health snapshot.",
+      "request_stats": "Request stats",
+      "request_success": "Request success: {count}",
+      "request_failed": "Request failed: {count}",
+      "request_timeout": "Timeouts: {count}",
+      "request_inflight": "Inflight: {count}",
+      "capabilities": {
+        "websocket": {
+          "title": "WebSocket bridge",
+          "detail": "Long-lived adapter traffic can stay on the shared runtime host without inventing a second browser-only transport layer."
+        },
+        "tcp_http": {
+          "title": "HTTP control plane",
+          "detail": "Health, logs, and future management actions stay on the same HTTP surface that desktop and browser clients already share."
+        },
+        "sse": {
+          "title": "Streaming ready",
+          "detail": "The runtime already distinguishes transport-facing surfaces, so later SSE or incremental event delivery can extend the same backend path."
+        }
+      }
+    },
+    "commands": {
+      "description": "The commands page follows a panelized console layout and adds local filtering so builtin commands and policy semantics are easier to find quickly.",
+      "eyebrow": "commands",
+      "disabled": "Disabled",
+      "prefix": "Prefix",
+      "whitelist": "Whitelist",
+      "search_placeholder": "Search commands or descriptions",
+      "groups_description": "Commands are grouped by real functional boundaries so this layout can later grow into a fuller command-management page.",
+      "groups_title": "Command groups",
+      "policy_description": "Command policy is still owned by the backend, so this page reads current state without inventing a second frontend editor yet.",
+      "policy_notes": "Policy notes",
+      "policy_line_one": "The current command policy already supports enable / disable by scope and remains independent from the /help whitelist.",
+      "policy_line_two": "Once you decide to move policy editing into Web, this page can expand directly into a richer control panel.",
+      "empty_filtered": "No commands matched the current filter.",
+      "disabled_commands": "Disabled commands",
+      "disabled_empty": "No disabled commands right now.",
+      "groups": {
+        "ops": {
+          "title": "Operations",
+          "description": "Console and reload controls that shape the runtime surface itself.",
+          "help": "Show commands available in the current scope.",
+          "reload": "Reload config and adapter state from the backend.",
+          "adapters": "Inspect adapter connectivity and shared endpoints.",
+          "log": "Toggle log view behavior in the active runtime.",
+          "clear": "Clear the current console window."
+        },
+        "session": {
+          "title": "Session",
+          "description": "Conversation, LLM, and history-oriented commands tied to the active session.",
+          "ask": "Request an LLM reply through the shared runtime.",
+          "llm": "Manage models, providers, and prompt profiles.",
+          "resumes": "List saved session snapshots.",
+          "history": "Inspect current session history snapshots.",
+          "resume": "Switch into a saved session snapshot."
+        },
+        "policy": {
+          "title": "Policy",
+          "description": "Backend-owned policy commands for command scopes and plugin availability.",
+          "commands": "Inspect builtin and plugin commands by scope.",
+          "commands_enable": "Re-enable commands through backend policy.",
+          "commands_disable": "Disable commands through backend policy.",
+          "plugins": "Inspect plugin availability and directories.",
+          "plugins_toggle": "Toggle plugin availability through backend policy."
+        }
+      }
+    },
+    "diagnostics": {
+      "cpu": "CPU",
+      "warnings": "Warnings",
+      "notes": "Notes",
+      "last_event": "Last event",
+      "memory": "Memory",
+      "events": "Events",
+      "description": "The diagnostics page keeps an operations-observer feel while reorganizing warnings, notes, event previews, and resource snapshots into a faster-to-scan structure.",
+      "eyebrow": "diagnostics",
+      "section_description": "This continues the diagnostics-card feel from the main dashboard while replacing all content with actual RsLiteyukiBot runtime data.",
+      "section_title": "Runtime diagnostics",
+      "resource_snapshot": "Resource snapshot",
+      "system_cpu": "System CPU",
+      "process_cpu": "Process CPU",
+      "system_memory": "System memory",
+      "process_memory": "Process memory",
+      "handled_events": "Handled events"
+    },
+    "llm": {
+      "description": "This page organizes /ask, providers, and prompt profiles as panelized capability blocks instead of leaving them as plain instructions.",
+      "eyebrow": "llm",
+      "entry": "Entry",
+      "provider": "Provider",
+      "prompt": "Prompt",
+      "capabilities_description": "The frontend does not pretend it can already edit providers; it only reorganizes existing capabilities into a console-like view.",
+      "capabilities_title": "LLM capabilities",
+      "current_entry": "Current entry",
+      "switch_method": "Switch method",
+      "config_storage": "Config storage",
+      "panel_entry_detail": "Both desktop and web clients rely on the same /ask command path, so the frontend focuses on observability and navigation instead of inventing a second protocol.",
+      "panel_provider_detail": "Providers are still managed through /llm provider list|add|remove|use, so the frontend currently exposes status and command flow instead of a duplicate editor.",
+      "panel_prompt_detail": "Prompt profiles already have independent storage; this page keeps the profile perspective and command flow until it grows into a real editor.",
+      "workflow_description": "The full conversation workflow has not moved into Web yet, so this section locks the real command path and guidance into cards first.",
+      "workflow_title": "Conversation workflow",
+      "capabilities": {
+        "ask_entry": {
+          "title": "/ask entry",
+          "detail": "The web console stays attached to the same /ask entrypoint instead of shipping a second frontend-only prompt flow."
+        },
+        "provider_routing": {
+          "title": "Provider routing",
+          "detail": "Provider selection still belongs to the backend command path, so the web view focuses on observability first."
+        },
+        "prompt_store": {
+          "title": "Prompt profiles",
+          "detail": "Prompt profile storage is already independent, which makes it safe to expose as backend-backed runtime metadata before editing arrives."
+        }
+      }
+    },
+    "logs": {
+      "description": "The logs page reads recent shared-runtime console output directly, making startup, network, and runtime failures observable remotely without relying on a local window.",
+      "eyebrow": "logs",
+      "entries": "Entries",
+      "latest_level": "Latest level",
+      "module": "Module",
+      "updated": "Updated",
+      "section_description": "This panel shows the latest 200 log entries by default, prioritizing the unified logger path and critical shared-host / Tauri-shell runtime logs.",
+      "section_title": "Console output",
+      "time": "Time",
+      "level": "Level",
+      "message": "Message",
+      "loading": "Loading logs...",
+      "empty": "No logs to display yet."
+    },
+    "plugins": {
+      "description": "The plugins page keeps an admin-console structure while staying strictly tied to directories, disabled lists, and runtime notes that the current runtime actually exposes.",
+      "eyebrow": "plugins",
+      "directories": "Directories",
+      "directories_empty": "No plugin directories reported yet.",
+      "disabled": "Disabled",
+      "disabled_prefix": "disabled: {plugin}",
+      "search_placeholder": "Search directories, plugins, or notes",
+      "section_description": "All directories come directly from the health snapshot so desktop, web, and later Docker targets read the same result.",
+      "section_title": "Plugin directories",
+      "disabled_empty": "No disabled plugins right now.",
+      "notes_empty": "No plugin runtime notes right now.",
+      "disabled_description": "Disabled state is still managed by the backend, so this panel remains read-only.",
+      "disabled_title": "Disabled plugins",
+      "notes_description": "Plugin-related runtime notes surface here first and can later expand into a fuller plugin details page.",
+      "notes_title": "Runtime notes"
+    }
+  }
 }

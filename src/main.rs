@@ -1,257 +1,53 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::sync::RwLock;
+use std::time::Duration;
 
-use liteyukibot_core::adapter::AdapterManager;
-use liteyukibot_core::{
-    AdapterPacket, LiteyukiBot, LogLevel, LogMode, Rule, RuntimeSettings, RuntimeTarget, TimeZone,
-    TimestampFormat,
-};
 pub(crate) use liteyukibot_core::{
     BotEvent, PluginManifestLoader, PluginSdk, SessionEvent, SessionScope,
 };
-use serde_json::Value;
+use liteyukibot_core::{LiteyukiBot, LogLevel, RuntimeSettings, RuntimeTarget};
 use tokio::sync::mpsc;
 
 mod app_config;
 mod command_registry;
 mod config_edit;
+mod external_commands;
 mod i18n;
 mod llm;
 mod onebot_support;
+mod runtime_support;
 mod superuser;
 mod tui;
 
-use crate::llm::{
-    LlmClientError, LlmPromptPreview, LlmPromptProfile, LlmPromptStore, OpenAiResponsesClient,
-    build_prompt_preview, compose_user_prompt,
+use crate::external_commands::{ExternalCommandObserver, install_external_event_handlers};
+#[cfg(test)]
+use crate::external_commands::{llm_usage_text, matches_external_ask_command};
+use crate::llm::service::{
+    current_active_prompt_profile, current_llm_runtime_config, generate_llm_reply,
+    load_current_app_config_doc, load_llm_prompt_store, persist_llm_prompt_store,
+    resolve_llm_prompt_store_path,
+};
+use crate::llm::{LlmPromptPreview, OpenAiResponsesClient, build_prompt_preview};
+use crate::runtime_support::{
+    EXTERNAL_API_TIMEOUT, ExternalGateway, ExternalGatewaySnapshot, LLM_CONFIG_PATHS,
+    LlmCommandRuntime, apply_runtime_log_overrides_from_app_config, describe_runtime_config,
+    ensure_default_llm_config_file, ensure_llm_config_file, load_app_config_with_llm_overlay,
+    resolve_builtin_plugin_dirs, resolve_llm_config_path, resolve_password_config_path,
+};
+#[cfg(test)]
+use crate::runtime_support::{
+    push_explicit_plugin_dir_candidates, push_runtime_plugin_dir_candidates,
 };
 use app_config::*;
-use command_registry::{
-    AdapterProtocol, BuiltinCommandId, CommandNameOverrides, CommandScope,
-    command_argument_for_message, matches_builtin_command_message,
-};
 use i18n::{reload_catalog as reload_i18n_catalog, set_current_locale, tr, trf};
 use onebot_support::*;
 use superuser::SuperuserManager;
 
 const APP_TITLE: &str = "RsLiteyukiBot";
 const DEFAULT_RUNTIME_TARGET: RuntimeTarget = RuntimeTarget::Cli;
-const EXTERNAL_API_TIMEOUT: Duration = Duration::from_secs(12);
-const LLM_CONFIG_PATHS: [&str; 2] = ["llm-config.yaml", "llm-config.toml"];
-const LLM_PROMPT_STORE_PATH: &str = "llm-prompts.json";
-const PASSWORD_CONFIG_PATH: &str = "password.yaml";
 const DEFAULT_LLM_PROVIDER_BASE_URL: &str = "https://api.openai.com";
-const BUILTIN_PLUGIN_DIRS: [&str; 2] = ["builtin_plugin", "resources/builtin_plugin"];
-const DEV_BUILTIN_PLUGIN_DIRS: [&str; 1] = ["src/builtin_plugin"];
-
-static LLM_API_KEY_ROUND_ROBIN: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Clone)]
-struct LlmCommandRuntime {
-    command_prefix: Arc<RwLock<String>>,
-}
-
-impl LlmCommandRuntime {
-    fn new(command_prefix: impl Into<String>) -> Self {
-        Self {
-            command_prefix: Arc::new(RwLock::new(command_prefix.into())),
-        }
-    }
-
-    fn command_prefix(&self) -> String {
-        self.command_prefix
-            .read()
-            .expect("llm command prefix lock should not be poisoned")
-            .clone()
-    }
-
-    fn shared_command_prefix(&self) -> Arc<RwLock<String>> {
-        self.command_prefix.clone()
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn set_command_prefix(&self, command_prefix: impl Into<String>) {
-        *self
-            .command_prefix
-            .write()
-            .expect("llm command prefix lock should not be poisoned") = command_prefix.into();
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct ExternalGatewaySnapshot {
-    command_hits: u64,
-    api_requests: u64,
-    api_success: u64,
-    api_failed: u64,
-    api_timeouts: u64,
-    api_inflight: usize,
-}
-
-#[derive(Debug)]
-struct PendingApiCall {
-    started_at: Instant,
-}
-
-#[derive(Debug, Default)]
-struct ExternalGatewayState {
-    command_hits: u64,
-    api_requests: u64,
-    api_success: u64,
-    api_failed: u64,
-    api_timeouts: u64,
-    pending: HashMap<String, PendingApiCall>,
-}
-
-impl ExternalGatewayState {
-    fn snapshot(&self) -> ExternalGatewaySnapshot {
-        ExternalGatewaySnapshot {
-            command_hits: self.command_hits,
-            api_requests: self.api_requests,
-            api_success: self.api_success,
-            api_failed: self.api_failed,
-            api_timeouts: self.api_timeouts,
-            api_inflight: self.pending.len(),
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-struct ExternalGateway {
-    state: Arc<Mutex<ExternalGatewayState>>,
-    echo_seq: Arc<AtomicU64>,
-}
-
-impl ExternalGateway {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn snapshot(&self) -> ExternalGatewaySnapshot {
-        self.state
-            .lock()
-            .expect("external gateway lock should not be poisoned")
-            .snapshot()
-    }
-
-    fn next_echo(&self, prefix: &str) -> String {
-        let seq = self.echo_seq.fetch_add(1, Ordering::SeqCst);
-        format!("{prefix}-{seq}")
-    }
-
-    fn record_command_hit(&self) -> ExternalGatewaySnapshot {
-        let mut state = self
-            .state
-            .lock()
-            .expect("external gateway lock should not be poisoned");
-        state.command_hits = state.command_hits.saturating_add(1);
-        state.snapshot()
-    }
-
-    fn track_request(&self, echo: String) -> ExternalGatewaySnapshot {
-        let mut state = self
-            .state
-            .lock()
-            .expect("external gateway lock should not be poisoned");
-        state.api_requests = state.api_requests.saturating_add(1);
-        state.pending.insert(
-            echo,
-            PendingApiCall {
-                started_at: Instant::now(),
-            },
-        );
-        state.snapshot()
-    }
-
-    fn mark_send_failed(&self, echo: &str) -> ExternalGatewaySnapshot {
-        let mut state = self
-            .state
-            .lock()
-            .expect("external gateway lock should not be poisoned");
-        if state.pending.remove(echo).is_some() {
-            state.api_failed = state.api_failed.saturating_add(1);
-        }
-        state.snapshot()
-    }
-
-    fn observe_payload(&self, payload: &Value, timeout: Duration) -> ExternalGatewaySnapshot {
-        let mut state = self
-            .state
-            .lock()
-            .expect("external gateway lock should not be poisoned");
-        sweep_pending_timeouts(&mut state, timeout);
-
-        if let Some((echo, success)) = parse_onebot_v11_api_response(payload)
-            && state.pending.remove(&echo).is_some()
-        {
-            if success {
-                state.api_success = state.api_success.saturating_add(1);
-            } else {
-                state.api_failed = state.api_failed.saturating_add(1);
-            }
-        }
-
-        state.snapshot()
-    }
-
-    fn sweep_timeouts(&self, timeout: Duration) -> ExternalGatewaySnapshot {
-        let mut state = self
-            .state
-            .lock()
-            .expect("external gateway lock should not be poisoned");
-        sweep_pending_timeouts(&mut state, timeout);
-        state.snapshot()
-    }
-}
-
-fn sweep_pending_timeouts(state: &mut ExternalGatewayState, timeout: Duration) {
-    let expired: Vec<String> = state
-        .pending
-        .iter()
-        .filter_map(|(echo, call)| {
-            if call.started_at.elapsed() >= timeout {
-                Some(echo.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if expired.is_empty() {
-        return;
-    }
-
-    for echo in expired {
-        if state.pending.remove(&echo).is_some() {
-            state.api_timeouts = state.api_timeouts.saturating_add(1);
-        }
-    }
-}
-
-fn parse_onebot_v11_api_response(payload: &Value) -> Option<(String, bool)> {
-    let object = payload.as_object()?;
-    if !object.contains_key("status") && !object.contains_key("retcode") {
-        return None;
-    }
-
-    let echo = object.get("echo").and_then(value_to_string)?;
-    let success = object
-        .get("status")
-        .and_then(Value::as_str)
-        .map(|status| status.eq_ignore_ascii_case("ok"))
-        .or_else(|| {
-            object
-                .get("retcode")
-                .and_then(Value::as_i64)
-                .map(|code| code == 0)
-        })
-        .unwrap_or(false);
-    Some((echo, success))
-}
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -458,7 +254,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     install_external_event_handlers(
         &bot,
         external_gateway.clone(),
-        ui_tx.clone(),
+        TuiExternalCommandObserver {
+            ui_tx: ui_tx.clone(),
+        },
         help_whitelist.clone(),
         llm_runtime.clone(),
         bot.plugin_sdk().clone(),
@@ -515,256 +313,6 @@ fn resolve_runtime_target() -> RuntimeTarget {
         .unwrap_or(DEFAULT_RUNTIME_TARGET)
 }
 
-fn resolve_password_config_path() -> PathBuf {
-    if let Ok(path) = std::env::var("LY_PASSWORD_PATH")
-        && !path.trim().is_empty()
-    {
-        return PathBuf::from(path);
-    }
-    PathBuf::from(PASSWORD_CONFIG_PATH)
-}
-
-fn resolve_builtin_plugin_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    let mut seen = HashSet::new();
-
-    if let Ok(raw) = std::env::var("LY_PLUGIN_DIRS") {
-        for path in std::env::split_paths(&raw) {
-            push_explicit_plugin_dir_candidates(&mut dirs, &mut seen, path.as_path());
-        }
-    }
-
-    if let Ok(current_dir) = std::env::current_dir() {
-        push_runtime_plugin_dir_candidates(&mut dirs, &mut seen, current_dir.as_path(), true);
-    }
-
-    if let Ok(exe_path) = std::env::current_exe()
-        && let Some(parent) = exe_path.parent()
-    {
-        push_runtime_plugin_dir_candidates(&mut dirs, &mut seen, parent, false);
-    }
-
-    dirs
-}
-
-fn push_explicit_plugin_dir_candidates(
-    dirs: &mut Vec<PathBuf>,
-    seen: &mut HashSet<PathBuf>,
-    path: &std::path::Path,
-) {
-    push_unique_plugin_path(dirs, seen, path.to_path_buf());
-    push_runtime_plugin_dir_candidates(dirs, seen, path, true);
-}
-
-fn push_runtime_plugin_dir_candidates(
-    dirs: &mut Vec<PathBuf>,
-    seen: &mut HashSet<PathBuf>,
-    root: &std::path::Path,
-    include_dev_fallback: bool,
-) {
-    for candidate in BUILTIN_PLUGIN_DIRS {
-        push_unique_plugin_path(dirs, seen, root.join(candidate));
-    }
-    if include_dev_fallback {
-        for candidate in DEV_BUILTIN_PLUGIN_DIRS {
-            push_unique_plugin_path(dirs, seen, root.join(candidate));
-        }
-    }
-}
-
-fn push_unique_plugin_path(dirs: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
-    if seen.insert(path.clone()) {
-        dirs.push(path);
-    }
-}
-
-fn ensure_default_llm_config_file() -> Result<(), String> {
-    if let Ok(path) = std::env::var("LY_LLM_CONFIG_PATH")
-        && !path.trim().is_empty()
-    {
-        return ensure_llm_config_file(std::path::Path::new(path.trim()));
-    }
-
-    if LLM_CONFIG_PATHS
-        .iter()
-        .map(PathBuf::from)
-        .any(|path| path.exists())
-    {
-        return Ok(());
-    }
-
-    ensure_llm_config_file(std::path::Path::new(LLM_CONFIG_PATHS[0]))
-}
-
-fn load_app_config_with_llm_overlay() -> (AppConfigDoc, Vec<String>) {
-    let (mut app_config, mut warnings) = load_app_config_with_warnings(false);
-    if let Some(path) = resolve_llm_config_path() {
-        match load_app_config_from_path(path.as_path()) {
-            Ok(overlay_doc) => {
-                if let Some(overlay_llm) = overlay_doc.llm {
-                    app_config.llm = Some(merge_llm_config_sections(
-                        app_config.llm.take(),
-                        overlay_llm,
-                    ));
-                }
-            }
-            Err(err) => {
-                let path_display = path.display().to_string();
-                let err_text = err.to_string();
-                warnings.push(
-                    trf(
-                        "startup.llm_overlay_load_failed",
-                        &[("path", path_display.as_str()), ("err", err_text.as_str())],
-                    )
-                    .to_string(),
-                );
-            }
-        }
-    }
-    warnings.extend(validate_app_config(&app_config));
-    warnings = dedup_warnings(warnings);
-    (app_config, warnings)
-}
-
-fn merge_llm_config_sections(
-    base: Option<LlmConfigSection>,
-    overlay: LlmConfigSection,
-) -> LlmConfigSection {
-    let mut merged = base.unwrap_or_default();
-    if overlay.enabled.is_some() {
-        merged.enabled = overlay.enabled;
-    }
-    if overlay.provider.is_some() {
-        merged.provider = overlay.provider;
-    }
-    if overlay.base_url.is_some() {
-        merged.base_url = overlay.base_url;
-    }
-    if overlay.provider_urls.is_some() {
-        merged.provider_urls = overlay.provider_urls;
-    }
-    if overlay.api_keys.is_some() {
-        merged.api_keys = overlay.api_keys;
-    }
-    if overlay.api_key.is_some() {
-        merged.api_key = overlay.api_key;
-    }
-    if overlay.model.is_some() {
-        merged.model = overlay.model;
-    }
-    if overlay.timeout_seconds.is_some() {
-        merged.timeout_seconds = overlay.timeout_seconds;
-    }
-    if overlay.system_prompt.is_some() {
-        merged.system_prompt = overlay.system_prompt;
-    }
-    if overlay.command_prefix.is_some() {
-        merged.command_prefix = overlay.command_prefix;
-    }
-    merged
-}
-
-fn resolve_llm_config_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("LY_LLM_CONFIG_PATH")
-        && !path.trim().is_empty()
-    {
-        return Some(PathBuf::from(path));
-    }
-    LLM_CONFIG_PATHS
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| path.exists())
-}
-
-fn apply_runtime_log_overrides_from_app_config(
-    runtime_config: &mut liteyukibot_core::BotRuntimeConfig,
-    app_config: &AppConfigDoc,
-) {
-    let runtime = app_config
-        .rust
-        .as_ref()
-        .and_then(|section| section.runtime.as_ref())
-        .or(app_config.runtime.as_ref());
-    if let Some(runtime) = runtime {
-        if let Some(worker_count) = runtime.worker_count
-            && worker_count > 0
-        {
-            runtime_config.worker_count = worker_count;
-        }
-        if let Some(ingress_queue) = runtime.ingress_queue
-            && ingress_queue > 0
-        {
-            runtime_config.ingress_queue = ingress_queue;
-        }
-        if let Some(worker_queue) = runtime.worker_queue
-            && worker_queue > 0
-        {
-            runtime_config.worker_queue = worker_queue;
-        }
-    }
-
-    let log = app_config
-        .rust
-        .as_ref()
-        .and_then(|section| section.log.as_ref())
-        .or(app_config.log.as_ref());
-    if let Some(log) = log {
-        if let Some(mode) = log.mode.as_deref()
-            && let Some(mode) = LogMode::parse(mode)
-        {
-            runtime_config.logger.mode = mode;
-        }
-        if let Some(level) = log.level.as_deref()
-            && let Some(level) = LogLevel::parse(level)
-        {
-            runtime_config.logger.min_level = level;
-        }
-        if let Some(timezone) = log.timezone.as_deref()
-            && let Some(timezone) = TimeZone::parse(timezone)
-        {
-            runtime_config.logger.timezone = timezone;
-        }
-        if let Some(timestamp_format) = log.timestamp_format.as_deref() {
-            if timestamp_format.trim().eq_ignore_ascii_case("custom") {
-                let pattern = log
-                    .timestamp_pattern
-                    .as_deref()
-                    .unwrap_or("%Y-%m-%d %H:%M:%S")
-                    .to_string();
-                runtime_config.logger.timestamp_format = TimestampFormat::Custom(pattern);
-            } else {
-                runtime_config.logger.timestamp_format = TimestampFormat::parse(timestamp_format);
-            }
-        } else if let Some(pattern) = log.timestamp_pattern.as_deref() {
-            runtime_config.logger.timestamp_format = TimestampFormat::Custom(pattern.to_string());
-        }
-    }
-}
-
-fn describe_runtime_config(runtime_config: &liteyukibot_core::BotRuntimeConfig) -> String {
-    format!(
-        "workers={}, ingress_queue={}, worker_queue={}, log_mode={}, log_level={}, log_tz={}, log_ts={}",
-        runtime_config.worker_count,
-        runtime_config.ingress_queue,
-        runtime_config.worker_queue,
-        runtime_config.logger.mode,
-        runtime_config.logger.min_level,
-        runtime_config.logger.timezone,
-        runtime_config.logger.timestamp_format
-    )
-}
-
-fn dedup_warnings(warnings: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut output = Vec::new();
-    for warning in warnings {
-        if seen.insert(warning.clone()) {
-            output.push(warning);
-        }
-    }
-    output
-}
-
 fn emit_external_stats(
     ui_tx: &mpsc::UnboundedSender<tui::UiEvent>,
     snapshot: &ExternalGatewaySnapshot,
@@ -779,451 +327,40 @@ fn emit_external_stats(
     });
 }
 
-fn matches_external_ask_command(message: &str, llm_runtime: &LlmCommandRuntime) -> bool {
-    let command_prefix = llm_runtime.command_prefix();
-    matches_builtin_command_message(
-        BuiltinCommandId::Ask,
-        message,
-        CommandScope::Adapter(AdapterProtocol::OneBot11),
-        CommandNameOverrides {
-            onebot_ask_prefix: Some(command_prefix.as_str()),
-        },
-    )
-}
-
-fn llm_usage_text(command_prefix: &str) -> String {
-    trf("main.ask.usage", &[("command", command_prefix)])
-}
-
-fn command_disabled_text(command_name: &str) -> String {
-    trf("main.command.disabled", &[("command", command_name)])
-}
-
-fn install_external_event_handlers(
-    bot: &LiteyukiBot,
-    gateway: ExternalGateway,
+#[derive(Clone)]
+struct TuiExternalCommandObserver {
     ui_tx: mpsc::UnboundedSender<tui::UiEvent>,
-    help_whitelist: Arc<RwLock<HashSet<String>>>,
-    llm_runtime: LlmCommandRuntime,
-    plugin_sdk: PluginSdk,
-    superuser_manager: SuperuserManager,
-) {
-    let adapter_manager = bot.adapter_manager().clone();
-    let gateway_for_su = gateway.clone();
-    let ui_tx_for_su = ui_tx.clone();
-    let superuser_for_su = superuser_manager.clone();
-    let plugin_sdk_for_su = plugin_sdk.clone();
-    bot.on_message(
-        "builtin.external.su",
-        Rule::new("command.su", |event| async move {
-            parse_su_password_argument(event.message.as_ref()).is_some()
-        }),
-        510,
-        true,
-        move |event| {
-            let adapter_manager = adapter_manager.clone();
-            let gateway = gateway_for_su.clone();
-            let ui_tx = ui_tx_for_su.clone();
-            let superuser_manager = superuser_for_su.clone();
-            let plugin_sdk = plugin_sdk_for_su.clone();
-            async move {
-                handle_external_su_command(
-                    &adapter_manager,
-                    &gateway,
-                    &ui_tx,
-                    &plugin_sdk,
-                    &superuser_manager,
-                    event,
-                )
-                .await
-            }
-        },
-    );
-
-    let adapter_manager = bot.adapter_manager().clone();
-    let gateway_for_help = gateway.clone();
-    let ui_tx_for_help = ui_tx.clone();
-    let help_whitelist_for_help = help_whitelist.clone();
-    let superuser_for_help = superuser_manager.clone();
-    let llm_runtime_for_help = llm_runtime.clone();
-    let plugin_sdk_for_help = plugin_sdk.clone();
-
-    bot.on_message(
-        "builtin.external.help",
-        Rule::new("command.help", |event| async move {
-            is_help_command(event.message.as_ref())
-        }),
-        500,
-        true,
-        move |event| {
-            let adapter_manager = adapter_manager.clone();
-            let gateway = gateway_for_help.clone();
-            let ui_tx = ui_tx_for_help.clone();
-            let help_whitelist = help_whitelist_for_help.clone();
-            let superuser_manager = superuser_for_help.clone();
-            let llm_runtime = llm_runtime_for_help.clone();
-            let plugin_sdk = plugin_sdk_for_help.clone();
-            async move {
-                if plugin_sdk.is_builtin_command_disabled("adapter:onebot11", "/help") {
-                    let text = command_disabled_text("/help");
-                    return reply_external_text(
-                        &adapter_manager,
-                        &gateway,
-                        &ui_tx,
-                        event.as_ref(),
-                        text.as_str(),
-                        "command-disabled-help",
-                    )
-                    .await;
-                }
-                if !superuser_manager.is_superuser(event.as_ref()) {
-                    return reply_external_text(
-                        &adapter_manager,
-                        &gateway,
-                        &ui_tx,
-                        event.as_ref(),
-                        tr("main.auth.su_required").as_str(),
-                        "su-required-help",
-                    )
-                    .await;
-                }
-                let debug_mode = whitelist_debug_enabled();
-                let (allowed, matched_entry, whitelist_size) = help_whitelist
-                    .read()
-                    .map(|set| {
-                        let matched = matched_help_whitelist_entry(event.as_ref(), &set);
-                        let allowed = is_help_session_allowed(event.as_ref(), &set);
-                        (allowed, matched, set.len())
-                    })
-                    .unwrap_or_else(|_| (false, None, 0));
-                if debug_mode {
-                    let _ = ui_tx.send(tui::UiEvent::Log {
-                        level: tui::UiLevel::Info,
-                        message: format!(
-                            "[debug.whitelist] /help text={:?} scope={:?} session={} user={} whitelist_size={} matched={:?} allowed={}",
-                            event.message.as_ref(),
-                            event.scope,
-                            event.session_id.as_ref(),
-                            event.user_id.as_ref(),
-                            whitelist_size,
-                            matched_entry,
-                            allowed
-                        ),
-                    });
-                }
-                if !allowed {
-                    return Ok(());
-                }
-                reply_help_command(
-                    &adapter_manager,
-                    &gateway,
-                    &ui_tx,
-                    &llm_runtime,
-                    &plugin_sdk,
-                    event,
-                )
-                .await
-            }
-        },
-    );
-
-    let adapter_manager = bot.adapter_manager().clone();
-    let gateway_for_ask = gateway.clone();
-    let ui_tx_for_ask = ui_tx.clone();
-    let llm_runtime_for_rule = llm_runtime.clone();
-    let superuser_for_ask = superuser_manager.clone();
-    let plugin_sdk_for_ask = plugin_sdk.clone();
-    bot.on_message(
-        "builtin.external.ask",
-        Rule::new("command.ask", move |event| {
-            let llm_runtime = llm_runtime_for_rule.clone();
-            async move { matches_external_ask_command(event.message.as_ref(), &llm_runtime) }
-        }),
-        490,
-        true,
-        move |event| {
-            let adapter_manager = adapter_manager.clone();
-            let gateway = gateway_for_ask.clone();
-            let ui_tx = ui_tx_for_ask.clone();
-            let llm_runtime = llm_runtime.clone();
-            let superuser_manager = superuser_for_ask.clone();
-            let plugin_sdk = plugin_sdk_for_ask.clone();
-            async move {
-                let ask_command = llm_runtime.command_prefix();
-                if plugin_sdk.is_builtin_command_disabled("adapter:onebot11", ask_command.as_str())
-                {
-                    let text = command_disabled_text(ask_command.as_str());
-                    return reply_external_text(
-                        &adapter_manager,
-                        &gateway,
-                        &ui_tx,
-                        event.as_ref(),
-                        text.as_str(),
-                        "command-disabled-ask",
-                    )
-                    .await;
-                }
-                if !superuser_manager.is_superuser(event.as_ref()) {
-                    return reply_external_text(
-                        &adapter_manager,
-                        &gateway,
-                        &ui_tx,
-                        event.as_ref(),
-                        tr("main.auth.su_required").as_str(),
-                        "su-required-ask",
-                    )
-                    .await;
-                }
-                reply_ask_command(&adapter_manager, &gateway, &ui_tx, &llm_runtime, event).await
-            }
-        },
-    );
 }
 
-async fn handle_external_su_command(
-    adapter_manager: &AdapterManager,
-    gateway: &ExternalGateway,
-    ui_tx: &mpsc::UnboundedSender<tui::UiEvent>,
-    plugin_sdk: &PluginSdk,
-    superuser_manager: &SuperuserManager,
-    event: Arc<SessionEvent>,
-) -> Result<(), String> {
-    let Some(password_raw) = parse_su_password_argument(event.message.as_ref()) else {
-        return Ok(());
-    };
-    if plugin_sdk.is_builtin_command_disabled("adapter:onebot11", "/su") {
-        let text = command_disabled_text("/su");
-        return reply_external_text(
-            adapter_manager,
-            gateway,
-            ui_tx,
-            event.as_ref(),
-            text.as_str(),
-            "command-disabled-su",
-        )
-        .await;
+impl ExternalCommandObserver for TuiExternalCommandObserver {
+    fn record_stats(&self, snapshot: &ExternalGatewaySnapshot) {
+        emit_external_stats(&self.ui_tx, snapshot);
     }
 
-    if is_onebot_v11_payload(&event.payload) && !is_onebot_private_message(event.as_ref()) {
-        return reply_external_text(
-            adapter_manager,
-            gateway,
-            ui_tx,
-            event.as_ref(),
-            tr("main.su.private_only").as_str(),
-            "su-private-only",
-        )
-        .await;
-    }
-
-    if password_raw.trim().is_empty() {
-        return reply_external_text(
-            adapter_manager,
-            gateway,
-            ui_tx,
-            event.as_ref(),
-            tr("main.su.usage").as_str(),
-            "su-usage",
-        )
-        .await;
-    }
-
-    if !superuser_manager.verify_password(password_raw.as_str()) {
-        return reply_external_text(
-            adapter_manager,
-            gateway,
-            ui_tx,
-            event.as_ref(),
-            tr("main.su.denied").as_str(),
-            "su-denied",
-        )
-        .await;
-    }
-
-    let promoted = superuser_manager
-        .promote_user(event.as_ref())
-        .map_err(|err| {
-            let err = err.to_string();
-            trf("main.su.persist_failed", &[("err", err.as_str())])
-        })?;
-    let text = if promoted.added {
-        tr("main.su.enabled.added")
-    } else {
-        tr("main.su.enabled")
-    };
-    reply_external_text(
-        adapter_manager,
-        gateway,
-        ui_tx,
-        event.as_ref(),
-        text.as_str(),
-        "su-granted",
-    )
-    .await
-}
-
-async fn reply_help_command(
-    adapter_manager: &AdapterManager,
-    gateway: &ExternalGateway,
-    ui_tx: &mpsc::UnboundedSender<tui::UiEvent>,
-    llm_runtime: &LlmCommandRuntime,
-    plugin_sdk: &PluginSdk,
-    event: Arc<SessionEvent>,
-) -> Result<(), String> {
-    if !is_onebot_v11_payload(&event.payload) {
-        return Ok(());
-    }
-    let help_text = render_external_help_text_with_plugins(
-        llm_runtime.command_prefix().as_str(),
-        Some(plugin_sdk),
-    );
-    reply_external_text(
-        adapter_manager,
-        gateway,
-        ui_tx,
-        event.as_ref(),
-        help_text.as_str(),
-        "liteyuki-help",
-    )
-    .await
-}
-
-async fn reply_ask_command(
-    adapter_manager: &AdapterManager,
-    gateway: &ExternalGateway,
-    ui_tx: &mpsc::UnboundedSender<tui::UiEvent>,
-    llm_runtime: &LlmCommandRuntime,
-    event: Arc<SessionEvent>,
-) -> Result<(), String> {
-    if !is_onebot_v11_payload(&event.payload) {
-        return Ok(());
-    }
-    emit_external_stats(ui_tx, &gateway.record_command_hit());
-
-    let command_prefix = llm_runtime.command_prefix();
-    let prompt = command_argument_for_message(
-        BuiltinCommandId::Ask,
-        event.message.as_ref(),
-        CommandScope::Adapter(AdapterProtocol::OneBot11),
-        CommandNameOverrides {
-            onebot_ask_prefix: Some(command_prefix.as_str()),
-        },
-    )
-    .unwrap_or_default();
-    let reply_text = if prompt.is_empty() {
-        llm_usage_text(command_prefix.as_str())
-    } else {
-        match generate_llm_reply(&prompt).await {
-            Ok(output) => {
-                if output.trim().is_empty() {
-                    tr("main.llm.empty")
-                } else {
-                    output
-                }
-            }
-            Err(err) => trf("main.llm.failed", &[("err", err.as_str())]),
+    fn on_help_whitelist_evaluated(
+        &self,
+        event: &SessionEvent,
+        matched_entry: Option<&str>,
+        whitelist_size: usize,
+        allowed: bool,
+    ) {
+        if !whitelist_debug_enabled() {
+            return;
         }
-    };
-
-    let echo = gateway.next_echo("liteyuki-ask");
-    let payload = build_onebot_v11_text_reply_payload(event.as_ref(), &echo, &reply_text)
-        .ok_or_else(|| "failed to build onebot v11 ask response".to_string())?;
-    dispatch_onebot_reply(
-        adapter_manager,
-        gateway,
-        ui_tx,
-        event.as_ref(),
-        format!("ask-{}", event.event_id),
-        echo,
-        payload,
-    )
-    .await
-}
-
-async fn reply_external_text(
-    adapter_manager: &AdapterManager,
-    gateway: &ExternalGateway,
-    ui_tx: &mpsc::UnboundedSender<tui::UiEvent>,
-    event: &SessionEvent,
-    text: &str,
-    echo_prefix: &str,
-) -> Result<(), String> {
-    if !is_onebot_v11_payload(&event.payload) {
-        return Ok(());
+        let _ = self.ui_tx.send(tui::UiEvent::Log {
+            level: tui::UiLevel::Info,
+            message: format!(
+                "[debug.whitelist] /help text={:?} scope={:?} session={} user={} whitelist_size={} matched={:?} allowed={}",
+                event.message.as_ref(),
+                event.scope,
+                event.session_id.as_ref(),
+                event.user_id.as_ref(),
+                whitelist_size,
+                matched_entry,
+                allowed
+            ),
+        });
     }
-    emit_external_stats(ui_tx, &gateway.record_command_hit());
-    let echo = gateway.next_echo(echo_prefix);
-    let payload = build_onebot_v11_text_reply_payload(event, &echo, text)
-        .ok_or_else(|| "failed to build onebot v11 text response".to_string())?;
-    dispatch_onebot_reply(
-        adapter_manager,
-        gateway,
-        ui_tx,
-        event,
-        format!("{echo_prefix}-{}", event.event_id),
-        echo,
-        payload,
-    )
-    .await
-}
-
-async fn generate_llm_reply(prompt: &str) -> Result<String, String> {
-    let llm_config = current_llm_runtime_config()?;
-    if !llm_config.enabled {
-        return Err(tr("main.llm.disabled"));
-    }
-    if !llm_config.provider.eq_ignore_ascii_case("openai") {
-        return Err(trf(
-            "main.llm.provider.unsupported",
-            &[("provider", llm_config.provider.as_str())],
-        ));
-    }
-    let Some(api_key) = pick_next_api_key(&llm_config) else {
-        return Err(tr("main.llm.api_key_missing"));
-    };
-    let prompt_profile = current_active_prompt_profile()?;
-    let composed_prompt = compose_user_prompt(prompt, prompt_profile.soul.as_str());
-
-    let client = OpenAiResponsesClient::from_runtime_with_api_key(&llm_config, &api_key)
-        .map_err(|err: LlmClientError| err.to_string())?;
-    client
-        .generate(composed_prompt.as_str())
-        .await
-        .map_err(|err| err.to_string())
-}
-
-fn pick_next_api_key(llm_config: &LlmRuntimeConfig) -> Option<String> {
-    let key_count = llm_config.api_keys.len();
-    if key_count == 0 {
-        return None;
-    }
-    let index = LLM_API_KEY_ROUND_ROBIN.fetch_add(1, Ordering::SeqCst) as usize % key_count;
-    llm_config.api_keys.get(index).cloned()
-}
-
-async fn dispatch_onebot_reply(
-    adapter_manager: &AdapterManager,
-    gateway: &ExternalGateway,
-    ui_tx: &mpsc::UnboundedSender<tui::UiEvent>,
-    event: &SessionEvent,
-    packet_id: String,
-    echo: String,
-    payload: Value,
-) -> Result<(), String> {
-    let adapter_id = event
-        .payload
-        .get("_adapter_id")
-        .and_then(value_to_string)
-        .ok_or_else(|| "missing adapter id in inbound payload".to_string())?;
-
-    emit_external_stats(ui_tx, &gateway.track_request(echo.clone()));
-    let packet = AdapterPacket::new(packet_id, "onebot.v11.api.send_msg", payload);
-    let send_result = adapter_manager.send(&adapter_id, packet).await;
-    if let Err(err) = send_result {
-        emit_external_stats(ui_tx, &gateway.mark_send_failed(&echo));
-        return Err(format!("send reply failed: {err}"));
-    }
-    Ok(())
 }
 
 fn reload_from_config(bot: &LiteyukiBot) -> tui::ReloadFuture<'_> {
@@ -1592,16 +729,6 @@ fn persist_llm_patch(patch: &config_edit::LlmConfigPatch) -> Result<PathBuf, Str
     Ok(path)
 }
 
-fn current_llm_runtime_config() -> Result<LlmRuntimeConfig, String> {
-    let doc = load_current_app_config_doc()?;
-    Ok(resolve_llm_config(&doc))
-}
-
-fn load_current_app_config_doc() -> Result<AppConfigDoc, String> {
-    let (doc, _) = load_app_config_with_llm_overlay();
-    Ok(doc)
-}
-
 fn resolve_llm_config_write_path() -> PathBuf {
     if let Ok(path) = std::env::var("LY_LLM_CONFIG_PATH")
         && !path.trim().is_empty()
@@ -1609,63 +736,6 @@ fn resolve_llm_config_write_path() -> PathBuf {
         return PathBuf::from(path);
     }
     PathBuf::from(LLM_CONFIG_PATHS[0])
-}
-
-fn resolve_llm_prompt_store_path() -> PathBuf {
-    if let Ok(path) = std::env::var("LY_LLM_PROMPT_STORE_PATH")
-        && !path.trim().is_empty()
-    {
-        return PathBuf::from(path);
-    }
-    PathBuf::from(LLM_PROMPT_STORE_PATH)
-}
-
-fn load_llm_prompt_store() -> Result<LlmPromptStore, String> {
-    let path = resolve_llm_prompt_store_path();
-    LlmPromptStore::load_or_default_from_path(path.as_path())
-}
-
-fn persist_llm_prompt_store(store: &LlmPromptStore) -> Result<PathBuf, String> {
-    let path = resolve_llm_prompt_store_path();
-    store.save_to_path(path.as_path())?;
-    Ok(path)
-}
-
-fn current_active_prompt_profile() -> Result<LlmPromptProfile, String> {
-    let store = load_llm_prompt_store()?;
-    Ok(store.active_profile())
-}
-
-fn ensure_llm_config_file(path: &std::path::Path) -> Result<(), String> {
-    if path.exists() {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            format!(
-                "failed to create llm config parent directory {}: {err}",
-                parent.display()
-            )
-        })?;
-    }
-
-    let ext = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|value| value.to_ascii_lowercase());
-    let template = match ext.as_deref() {
-        Some("toml") => {
-            "[llm]\nenabled = false\nprovider = \"openai\"\nbase_url = \"https://tokenflux.dev/v1\"\nmodel = \"gpt-4.1-mini\"\ntimeout_seconds = 20\ncommand_prefix = \"/ask\"\napi_keys = []\n"
-        }
-        _ => {
-            "llm:\n  enabled: false\n  provider: openai\n  base_url: https://tokenflux.dev/v1\n  model: gpt-4.1-mini\n  timeout_seconds: 20\n  command_prefix: /ask\n  api_keys: []\n"
-        }
-    };
-    std::fs::write(path, template)
-        .map_err(|err| format!("failed to write llm config {}: {err}", path.display()))?;
-    Ok(())
 }
 
 fn extract_llm_keys_from_doc(doc: &AppConfigDoc) -> Vec<String> {
