@@ -895,6 +895,12 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    fn lock_llm_config_env() -> std::sync::MutexGuard<'static, ()> {
+        llm_config_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     struct EnvVarGuard {
         key: &'static str,
         previous: Option<String>,
@@ -941,9 +947,7 @@ mod tests {
 
     #[test]
     fn llm_provider_use_rejects_unregistered_base_url_without_mutating_config() {
-        let _lock = llm_config_env_lock()
-            .lock()
-            .expect("llm config env lock should not be poisoned");
+        let _lock = lock_llm_config_env();
         let path = temp_llm_config_path("provider-use-invalid");
         let source = "llm:\n  base_url: https://api.openai.com\n  provider_urls:\n    - https://api.openai.com\n    - https://tokenflux.dev/v1\n";
         fs::write(&path, source).expect("test llm config should be written");
@@ -951,12 +955,10 @@ mod tests {
 
         let result = run_llm_command_for_test(tui::LlmCommandRequest::UseProviderUrl(
             "https://typo.example/v1".to_string(),
-        ));
+        ))
+        .expect_err("unregistered provider url should be rejected");
 
-        assert_eq!(
-            result,
-            Err("llm provider base-url not found: https://typo.example/v1".to_string())
-        );
+        assert!(result.contains("https://typo.example/v1"));
         let updated = fs::read_to_string(&path).expect("test llm config should remain readable");
         assert_eq!(updated, source);
 
@@ -965,9 +967,7 @@ mod tests {
 
     #[test]
     fn llm_provider_use_switches_to_registered_base_url() {
-        let _lock = llm_config_env_lock()
-            .lock()
-            .expect("llm config env lock should not be poisoned");
+        let _lock = lock_llm_config_env();
         let path = temp_llm_config_path("provider-use-valid");
         let source = "llm:\n  base_url: https://api.openai.com\n  provider_urls:\n    - https://api.openai.com\n    - https://tokenflux.dev/v1\n";
         fs::write(&path, source).expect("test llm config should be written");
@@ -978,7 +978,9 @@ mod tests {
         ))
         .expect("registered provider url should switch successfully");
 
-        assert!(result.contains("llm provider base-url switched: https://tokenflux.dev/v1"));
+        assert!(result.contains("https://tokenflux.dev/v1"));
+        assert!(result.contains("count=2"));
+        assert!(result.contains(path.display().to_string().as_str()));
         let updated = fs::read_to_string(&path).expect("updated llm config should be readable");
         assert!(updated.contains("base_url: 'https://tokenflux.dev/v1'"));
         assert!(updated.contains("provider_urls:"));
