@@ -1,4 +1,6 @@
-pub use liteyukibot_core::PluginManifestLoader;
+pub use liteyukibot_core::{
+    BotEvent, PluginManifestLoader, PluginSdk, SessionEvent, SessionScope,
+};
 
 #[allow(dead_code)]
 #[path = "../src/app_config.rs"]
@@ -12,6 +14,12 @@ mod i18n;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/llm/mod.rs"]
 mod llm;
+#[allow(dead_code, unused_imports)]
+#[path = "../src/onebot_support.rs"]
+mod onebot_support;
+#[allow(dead_code, unused_imports)]
+#[path = "../src/runtime_support.rs"]
+mod runtime_support;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/tui/mod.rs"]
 mod tui;
