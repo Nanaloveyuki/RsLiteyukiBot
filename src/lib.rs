@@ -8,7 +8,7 @@ pub mod core;
 pub mod llm;
 pub mod observability;
 pub mod plugin;
-mod runtime_support;
+pub(crate) mod runtime_support;
 pub mod session;
 pub mod web;
 pub mod web_host;

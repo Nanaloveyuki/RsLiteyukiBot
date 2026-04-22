@@ -43,12 +43,32 @@ export const logColor = {
   [LogLevel.FATAL]: 'red',
 } as const;
 
+export const parseLogLevel = (content: string, fallback: LogLevel = LogLevel.INFO): LogLevel => {
+  const bracketLevel = content.match(/\[([a-zA-Z]+)\]/)?.[1];
+  const pipeLevel = content.match(/\|\s*([A-Z]+)\s+/)?.[1];
+  const rawLevel = bracketLevel ?? pipeLevel;
+  const normalized = rawLevel?.toLowerCase();
+
+  switch (normalized) {
+    case LogLevel.DEBUG:
+      return LogLevel.DEBUG;
+    case LogLevel.INFO:
+      return LogLevel.INFO;
+    case LogLevel.WARN:
+    case 'warning':
+      return LogLevel.WARN;
+    case LogLevel.ERROR:
+      return LogLevel.ERROR;
+    case LogLevel.FATAL:
+      return LogLevel.FATAL;
+    default:
+      return fallback;
+  }
+};
+
 export const colorizeLogLevel = (content: string) => {
-  const logLevel = content.match(/\[[a-zA-Z]+\]/) || [];
   let _content = content;
-  const level =
-    (logLevel?.[0]?.replace('[', '').replace(']', '') as LogLevel) ??
-    LogLevel.INFO;
+  const level = parseLogLevel(content);
   const color = logColor[level];
   switch (color) {
     case 'green':

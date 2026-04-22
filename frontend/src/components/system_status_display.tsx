@@ -18,6 +18,33 @@ export interface SystemStatusItemProps {
   hasBackground?: boolean;
 }
 
+function formatSystemStatusValue(value: string | number, unit?: string) {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      return '-';
+    }
+    if (unit === '%') {
+      return value.toFixed(1);
+    }
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    if (!value.trim()) {
+      return '-';
+    }
+    if (unit === '%') {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) {
+        return numeric.toFixed(1);
+      }
+    }
+    return value;
+  }
+
+  return '-';
+}
+
 const SystemStatusItem: React.FC<SystemStatusItemProps> = ({
   title,
   value = '-',
@@ -25,6 +52,8 @@ const SystemStatusItem: React.FC<SystemStatusItemProps> = ({
   unit,
   hasBackground = false,
 }) => {
+  const displayValue = formatSystemStatusValue(value, unit);
+
   return (
     <div
       className={clsx(
@@ -43,7 +72,7 @@ const SystemStatusItem: React.FC<SystemStatusItemProps> = ({
         hasBackground ? 'text-white/80' : 'text-default-500'
       )}
       >
-        {value}
+        {displayValue}
         {unit && <span className='ml-0.5 opacity-70'>{unit}</span>}
       </div>
     </div>

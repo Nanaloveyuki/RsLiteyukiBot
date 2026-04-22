@@ -700,7 +700,7 @@ impl WebHostService {
                     "level": aggregate_log_level(appended.as_slice()),
                     "message": appended
                         .iter()
-                        .map(|entry| entry.message.as_str())
+                        .map(|entry| entry.line.as_str())
                         .collect::<Vec<_>>()
                         .join("\n")
                 });

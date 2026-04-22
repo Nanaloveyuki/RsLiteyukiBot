@@ -26,13 +26,20 @@ export interface XTermProps
   extends Omit<React.HTMLAttributes<HTMLDivElement>, 'onInput' | 'onResize'> {
   onInput?: (data: string) => void;
   onKey?: (key: string, event: KeyboardEvent) => void;
-  onResize?: (cols: number, rows: number) => void; // 新增属性
+  onResize?: (cols: number, rows: number) => void;
+  onTerminalReady?: (terminal: Terminal) => void;
+  onViewportChange?: (state: {
+    viewportY: number;
+    baseY: number;
+    atBottom: boolean;
+    terminal: Terminal;
+  }) => void;
 }
 
 const XTerm = forwardRef<XTermRef, XTermProps>((props, ref) => {
   const domRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
-  const { className, onInput, onKey, onResize, ...rest } = props;
+  const { className, onInput, onKey, onResize, onTerminalReady, onViewportChange, ...rest } = props;
   const { theme } = useTheme();
   useEffect(() => {
     // 根据屏幕宽度决定字体大小，手机端使用更小的字体
@@ -84,6 +91,23 @@ const XTerm = forwardRef<XTermRef, XTermProps>((props, ref) => {
       }
     });
 
+    const emitViewportChange = () => {
+      if (!onViewportChange) {
+        return;
+      }
+      const buffer = terminal.buffer.active;
+      onViewportChange({
+        viewportY: buffer.viewportY,
+        baseY: buffer.baseY,
+        atBottom: buffer.viewportY >= buffer.baseY,
+        terminal,
+      });
+    };
+
+    const scrollDisposable = terminal.onScroll(() => {
+      emitViewportChange();
+    });
+
     const resizeObserver = new ResizeObserver(() => {
       fitAddon.fit();
       // 获取当前终端尺寸
@@ -97,11 +121,14 @@ const XTerm = forwardRef<XTermRef, XTermProps>((props, ref) => {
     // 字体加载完成后重新调整终端大小
     document.fonts.ready.then(() => {
       fitAddon.fit();
+      onTerminalReady?.(terminal);
+      emitViewportChange();
 
       resizeObserver.observe(domRef.current!);
     });
 
     return () => {
+      scrollDisposable.dispose();
       resizeObserver.disconnect();
       setTimeout(() => {
         terminal.dispose();

@@ -4,10 +4,12 @@ import { useLocalStorage } from '@uidotdev/usehooks';
 import clsx from 'clsx';
 import { useEffect, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
+import { BsArrowDownCircle } from 'react-icons/bs';
 import { IoDownloadOutline } from 'react-icons/io5';
+import { Terminal } from '@xterm/xterm';
 
 import key from '@/const/key';
-import { colorizeLogLevelWithTag } from '@/utils/terminal';
+import { colorizeLogLevel } from '@/utils/terminal';
 
 import WebUIManager, { Log } from '@/controllers/webui_manager';
 
@@ -21,8 +23,50 @@ const RealTimeLogs = () => {
     new Set(['info', 'warn', 'error'])
   );
   const [dataArr, setDataArr] = useState<Log[]>([]);
+  const [isFollowing, setIsFollowing] = useState(true);
   const [backgroundImage] = useLocalStorage<string>(key.backgroundImage, '');
   const hasBackground = !!backgroundImage;
+  const isFollowingRef = useRef(true);
+
+  const renderLogs = async () => {
+    const terminal = Xterm.current?.terminalRef.current;
+    if (!terminal) {
+      return;
+    }
+
+    try {
+      const previousBuffer = terminal.buffer.active;
+      const distanceFromBottom = Math.max(
+        previousBuffer.baseY - previousBuffer.viewportY,
+        0
+      );
+      const content = dataArr
+        .filter((log) => {
+          if (logLevel === 'all') {
+            return true;
+          }
+          return logLevel.has(log.level);
+        })
+        .map((log) => colorizeLogLevel(log.message).content)
+        .join('\r\n');
+
+      Xterm.current?.clear();
+      if (content) {
+        await Xterm.current?.writeAsync(content);
+      }
+
+      if (isFollowingRef.current) {
+        terminal.scrollToBottom();
+        return;
+      }
+
+      const nextBaseY = terminal.buffer.active.baseY;
+      terminal.scrollToLine(Math.max(nextBaseY - distanceFromBottom, 0));
+    } catch (error) {
+      console.error(error);
+      toast.error('获取实时日志失败');
+    }
+  };
 
   const onDownloadLog = () => {
     const logContent = dataArr
@@ -32,7 +76,7 @@ const RealTimeLogs = () => {
         }
         return logLevel.has(log.level);
       })
-      .map((log) => colorizeLogLevelWithTag(log.message, log.level))
+      .map((log) => colorizeLogLevel(log.message).content)
       .join('\r\n');
     const blob = new Blob([logContent], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
@@ -43,27 +87,8 @@ const RealTimeLogs = () => {
     URL.revokeObjectURL(url);
   };
 
-  const writeStream = () => {
-    try {
-      const _data = dataArr
-        .filter((log) => {
-          if (logLevel === 'all') {
-            return true;
-          }
-          return logLevel.has(log.level);
-        })
-        .map((log) => colorizeLogLevelWithTag(log.message, log.level))
-        .join('\r\n');
-      Xterm.current?.clear();
-      Xterm.current?.write(_data);
-    } catch (error) {
-      console.error(error);
-      toast.error('获取实时日志失败');
-    }
-  };
-
   useEffect(() => {
-    writeStream();
+    void renderLogs();
   }, [logLevel, dataArr]);
 
   useEffect(() => {
@@ -93,6 +118,25 @@ const RealTimeLogs = () => {
     };
   }, []);
 
+  const handleViewportChange = ({ atBottom }: { atBottom: boolean; }) => {
+    isFollowingRef.current = atBottom;
+    setIsFollowing(atBottom);
+  };
+
+  const handleTerminalReady = (terminal: Terminal) => {
+    terminal.scrollToBottom();
+  };
+
+  const resumeFollowing = () => {
+    const terminal = Xterm.current?.terminalRef.current;
+    if (!terminal) {
+      return;
+    }
+    terminal.scrollToBottom();
+    isFollowingRef.current = true;
+    setIsFollowing(true);
+  };
+
   return (
     <>
       <title>实时日志 - Liteyuki WebUI</title>
@@ -114,9 +158,24 @@ const RealTimeLogs = () => {
         >
           下载日志
         </Button>
+        {!isFollowing && (
+          <Button
+            className='flex-shrink-0'
+            onPress={resumeFollowing}
+            startContent={<BsArrowDownCircle className='text-base' />}
+            color='warning'
+            variant='flat'
+          >
+            回到底部
+          </Button>
+        )}
       </div>
       <div className='flex-1 h-full overflow-hidden'>
-        <XTerm ref={Xterm} />
+        <XTerm
+          ref={Xterm}
+          onTerminalReady={handleTerminalReady}
+          onViewportChange={handleViewportChange}
+        />
       </div>
     </>
   );

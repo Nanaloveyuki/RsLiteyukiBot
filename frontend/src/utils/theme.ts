@@ -2,6 +2,7 @@ import { request } from './request';
 
 const style = document.createElement('style');
 document.head.appendChild(style);
+const fontBaseUrl = `${import.meta.env.BASE_URL}fonts/`;
 
 // 用于主题配置页面实时预览字体的临时样式标签
 const fontPreviewStyle = document.createElement('style');
@@ -30,14 +31,14 @@ const loadFontCSSForPreview = (mode: string) => {
     css = `
 @font-face {
   font-family: 'Aa偷吃可爱长大的';
-  src: url('/webui/fonts/AaCute.woff') format('woff');
+  src: url('${fontBaseUrl}AaCute.woff') format('woff');
   font-display: swap;
 }`;
   } else if (mode === 'custom') {
     css = `
 @font-face {
   font-family: 'CustomFont';
-  src: url('/webui/fonts/CustomFont.woff') format('woff');
+  src: url('${fontBaseUrl}CustomFont.woff') format('woff');
   font-display: swap;
 }`;
   }

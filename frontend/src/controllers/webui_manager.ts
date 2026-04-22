@@ -2,12 +2,25 @@ import CryptoJS from 'crypto-js';
 import { EventSourcePolyfill } from 'event-source-polyfill';
 
 import { LogLevel } from '@/const/enum';
+import { parseLogLevel } from '@/utils/terminal';
 
 import { serverRequest } from '@/utils/request';
 
 export interface Log {
   level: LogLevel;
   message: string;
+}
+
+function parseRealtimeLogBatch(message: string, fallbackLevel: LogLevel) {
+  return message
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0)
+    .map((line) => ({
+      level: parseLogLevel(line, fallbackLevel),
+      message: line,
+    }));
 }
 
 export default class WebUIManager {
@@ -189,9 +202,11 @@ export default class WebUIManager {
 
     eventSource.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data);
-        data.message = data.message.replace(/\n/g, '\r\n');
-        writer([data]);
+        const data = JSON.parse(event.data) as Log;
+        const logs = parseRealtimeLogBatch(data.message, data.level);
+        if (logs.length > 0) {
+          writer(logs);
+        }
       } catch (error) {
         console.error(error);
       }
