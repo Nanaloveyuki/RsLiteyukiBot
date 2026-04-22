@@ -89,7 +89,7 @@ const WebUIConfigCard = () => {
 
   return (
     <>
-      <title>WebUI配置 - NapCat WebUI</title>
+      <title>WebUI配置 - Liteyuki WebUI</title>
       <div className='flex flex-col gap-2'>
         <div className='flex-shrink-0 w-full font-bold text-default-600 dark:text-default-400 px-1'>背景图</div>
         <Controller

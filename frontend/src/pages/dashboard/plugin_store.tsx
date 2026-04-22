@@ -339,7 +339,7 @@ export default function PluginStorePage () {
 
   return (
     <>
-      <title>插件商店 - NapCat WebUI</title>
+      <title>插件商店 - Liteyuki WebUI</title>
       <div className='p-2 md:p-4 relative'>
         {/* 固定头部区域 */}
         <div className={clsx(

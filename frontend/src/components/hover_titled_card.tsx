@@ -24,8 +24,8 @@ export interface HoverTiltedCardProps {
 
 export default function HoverTiltedCard ({
   imageSrc,
-  altText = 'NapCat',
-  captionText = 'NapCat',
+  altText = 'Liteyuki',
+  captionText = 'Liteyuki',
   containerHeight = '200px',
   containerWidth = '100%',
   imageHeight = '200px',
@@ -35,7 +35,7 @@ export default function HoverTiltedCard ({
   showTooltip = false,
   overlayContent = (
     <div className='text-center mt-6 px-4 py-0.5 shadow-lg rounded-full bg-primary-600 text-default-100 bg-opacity-80'>
-      NapCat
+      Liteyuki
     </div>
   ),
   displayOverlayContent = true,

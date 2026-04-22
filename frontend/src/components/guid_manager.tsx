@@ -178,7 +178,7 @@ const GUIDManager: React.FC<GUIDManagerProps> = ({ showRestart = true, compact =
   const handleDelete = () => {
     dialog.confirm({
       title: '确认删除',
-      content: '删除 Registry20 后，QQ 将在下次启动时生成新的设备标识。确定要删除吗？',
+      content: '删除 Registry20 后，Liteyuki 将在下次启动时生成新的设备标识。确定要删除吗？',
       confirmText: '删除',
       cancelText: '取消',
       onConfirm: async () => {
@@ -259,7 +259,7 @@ const GUIDManager: React.FC<GUIDManagerProps> = ({ showRestart = true, compact =
   const handleLinuxDelete = () => {
     dialog.confirm({
       title: '确认删除',
-      content: '删除 machine-info 后，QQ 将在下次启动时生成新的设备标识。确定要删除吗？',
+      content: '删除 machine-info 后，Liteyuki 将在下次启动时生成新的设备标识。确定要删除吗？',
       confirmText: '删除',
       cancelText: '取消',
       onConfirm: async () => {
@@ -313,7 +313,7 @@ const GUIDManager: React.FC<GUIDManagerProps> = ({ showRestart = true, compact =
   const handleRestart = () => {
     dialog.confirm({
       title: '确认重启',
-      content: '确定要重启 NapCat 吗？这将导致当前连接断开。',
+      content: '确定要重启 Liteyuki 吗？这将导致当前连接断开。',
       confirmText: '重启',
       cancelText: '取消',
       onConfirm: async () => {
@@ -514,7 +514,7 @@ const GUIDManager: React.FC<GUIDManagerProps> = ({ showRestart = true, compact =
             </Button>
           </div>
           <div className='text-xs text-default-400'>
-            修改 MAC 后 GUID 将变化，需重启 NapCat 才能生效，操作前会自动备份
+            修改 MAC 后 GUID 将变化，需重启 Liteyuki 才能生效，操作前会自动备份
           </div>
         </div>
 
@@ -560,7 +560,7 @@ const GUIDManager: React.FC<GUIDManagerProps> = ({ showRestart = true, compact =
               onPress={handleRestart}
               startContent={<MdRefresh size={16} />}
             >
-              重启 NapCat
+              重启 Liteyuki
             </Button>
           </>
         )}
@@ -663,7 +663,7 @@ const GUIDManager: React.FC<GUIDManagerProps> = ({ showRestart = true, compact =
           </Button>
         </div>
         <div className='text-xs text-default-400'>
-          修改或删除 GUID 后需重启 NapCat 才能生效，操作前会自动备份
+          修改或删除 GUID 后需重启 Liteyuki 才能生效，操作前会自动备份
         </div>
       </div>
 
@@ -709,7 +709,7 @@ const GUIDManager: React.FC<GUIDManagerProps> = ({ showRestart = true, compact =
             onPress={handleRestart}
             startContent={<MdRefresh size={16} />}
           >
-            重启 NapCat
+            重启 Liteyuki
           </Button>
         </>
       )}

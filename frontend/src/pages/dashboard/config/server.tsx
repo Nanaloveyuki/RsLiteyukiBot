@@ -144,7 +144,7 @@ const ServerConfigCard = () => {
 
   return (
     <>
-      <title>服务器配置 - NapCat WebUI</title>
+      <title>服务器配置 - Liteyuki WebUI</title>
       <div className='flex flex-col gap-4'>
         <div className='flex flex-col gap-3'>
           <div className='flex-shrink-0 w-full font-bold text-default-600 dark:text-default-400 px-1'>服务器配置</div>

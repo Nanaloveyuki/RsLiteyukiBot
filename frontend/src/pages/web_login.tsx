@@ -243,7 +243,7 @@ export default function WebLoginPage () {
           </HoverEffectCard>
         </motion.div>
         <div className='mt-6 text-center text-sm' style={{ color: '#FF7FAC' }}>
-          UI Designed By NapCatUI
+          UI Designed By Liteyuki UI
         </div>
       </PureLayout>
     </>

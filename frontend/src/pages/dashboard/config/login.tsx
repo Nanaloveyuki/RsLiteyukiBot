@@ -93,7 +93,7 @@ const LoginConfigCard = () => {
         },
         () => {
           setIsRestarting(false);
-          toast.error('后端在 30 秒内未响应，请检查 NapCat 运行日志');
+          toast.error('后端在 30 秒内未响应，请检查 Liteyuki 运行日志');
         }
       );
 
@@ -115,18 +115,18 @@ const LoginConfigCard = () => {
 
   return (
     <>
-      <title>登录配置 - NapCat WebUI</title>
-      <div className='flex-shrink-0 w-full font-bold text-default-600 dark:text-default-400 px-1'>快速登录QQ</div>
+      <title>登录配置 - Liteyuki WebUI</title>
+      <div className='flex-shrink-0 w-full font-bold text-default-600 dark:text-default-400 px-1'>快速登录账号</div>
       <Controller
         control={control}
         name='quickLoginQQ'
         render={({ field }) => (
           <Input
             {...field}
-            label='快速登录QQ'
-            placeholder='请输入QQ号'
+            label='快速登录账号'
+            placeholder='请输入账号'
             isDisabled={!!quickLoginError}
-            errorMessage={quickLoginError ? '获取快速登录QQ失败' : undefined}
+            errorMessage={quickLoginError ? '获取快速登录账号失败' : undefined}
             classNames={{
               inputWrapper:
                 'bg-default-100/50 dark:bg-white/5 backdrop-blur-md border border-transparent hover:bg-default-200/50 dark:hover:bg-white/10 transition-all shadow-sm data-[hover=true]:border-default-300',

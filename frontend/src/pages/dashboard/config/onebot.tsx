@@ -79,7 +79,7 @@ const OneBotConfigCard = () => {
 
   return (
     <>
-      <title>OneBot配置 - NapCat WebUI</title>
+      <title>OneBot配置 - Liteyuki WebUI</title>
       <Controller
         control={control}
         name='musicSignUrl'

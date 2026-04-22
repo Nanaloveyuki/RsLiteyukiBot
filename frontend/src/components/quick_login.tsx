@@ -45,10 +45,10 @@ const QuickLogin: React.FC<QuickLoginProps> = ({
           classNames={{
             popoverContent: 'bg-opacity-50 backdrop-blur',
           }}
-          aria-label='QQ Login'
+          aria-label='Account Login'
           isDisabled={refresh}
           items={qqList}
-          placeholder='请选择QQ'
+          placeholder='请选择账号'
           renderValue={(items) => {
             return items.map((item) => (
               <div key={item.key} className='flex items-center gap-2'>

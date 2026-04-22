@@ -60,7 +60,7 @@ const UsagePie: React.FC<UsagePieProps> = ({
     <div className='flex flex-col gap-1 p-1 text-xs'>
       <div className='flex items-center gap-2'>
         <span className='w-2 h-2 rounded-full' style={{ backgroundColor: colors.qq }} />
-        <span>QQ进程: {cleanProcess.toFixed(1)}%</span>
+        <span>当前进程: {cleanProcess.toFixed(1)}%</span>
       </div>
       <div className='flex items-center gap-2'>
         <span className='w-2 h-2 rounded-full' style={{ backgroundColor: colors.other }} />

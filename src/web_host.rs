@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
+use sysinfo::System;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -41,8 +42,12 @@ fn napcat_ok<T: Serialize>(data: &T) -> Vec<u8> {
         message: &'a str,
         data: &'a T,
     }
-    serde_json::to_vec(&Envelope { code: 0, message: "ok", data })
-        .unwrap_or_else(|_| br#"{"code":0,"message":"ok","data":null}"#.to_vec())
+    serde_json::to_vec(&Envelope {
+        code: 0,
+        message: "ok",
+        data,
+    })
+    .unwrap_or_else(|_| br#"{"code":0,"message":"ok","data":null}"#.to_vec())
 }
 
 /// NapCat error envelope
@@ -53,13 +58,19 @@ fn napcat_err(code: i32, message: &str) -> Vec<u8> {
         message: &'a str,
         data: Option<()>,
     }
-    serde_json::to_vec(&Envelope { code, message, data: None })
-        .unwrap_or_else(|_| br#"{"code":-1,"message":"error","data":null}"#.to_vec())
+    serde_json::to_vec(&Envelope {
+        code,
+        message,
+        data: None,
+    })
+    .unwrap_or_else(|_| br#"{"code":-1,"message":"error","data":null}"#.to_vec())
 }
 
 /// Parse a header value from a raw HTTP request byte slice.
 fn extract_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
-    request.lines().find_map(|line| parse_named_header(line, name))
+    request
+        .lines()
+        .find_map(|line| parse_named_header(line, name))
 }
 
 /// Parse the request body (bytes after the blank line).
@@ -81,7 +92,12 @@ fn parse_json_body(request: &[u8]) -> serde_json::Value {
 
 /// Build a NapCat JSON response (200 OK, application/json).
 fn napcat_response(body: Vec<u8>, head_only: bool) -> Vec<u8> {
-    build_response("200 OK", "application/json; charset=utf-8", &body, head_only)
+    build_response(
+        "200 OK",
+        "application/json; charset=utf-8",
+        &body,
+        head_only,
+    )
 }
 
 /// Build an OPTIONS (CORS preflight) response.
@@ -104,6 +120,71 @@ fn sse_response(event_data: &str, head_only: bool) -> Vec<u8> {
         body.as_bytes(),
         head_only,
     )
+}
+
+fn round_metric(value: f32) -> f32 {
+    (value * 10.0).round() / 10.0
+}
+
+fn bytes_to_mebibytes(bytes: u64) -> u64 {
+    bytes / (1024 * 1024)
+}
+
+fn arch_label() -> String {
+    format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn current_cpu_profile() -> (String, usize, f32) {
+    let mut system = System::new();
+    system.refresh_cpu_all();
+
+    let cpus = system.cpus();
+    let model = cpus
+        .iter()
+        .find_map(|cpu| {
+            let brand = cpu.brand().trim();
+            (!brand.is_empty()).then(|| brand.to_string())
+        })
+        .unwrap_or_else(|| "Unknown".to_string());
+    let detected_cores = cpus.len();
+    let fallback_cores = std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1);
+    let core_count = detected_cores.max(fallback_cores);
+    let speed_ghz = cpus
+        .iter()
+        .find_map(|cpu| {
+            let frequency_mhz = cpu.frequency();
+            (frequency_mhz > 0).then_some(frequency_mhz as f32 / 1000.0)
+        })
+        .map(round_metric)
+        .unwrap_or(0.0);
+
+    (model, core_count, speed_ghz)
+}
+
+fn napcat_system_status(snapshot: &AppHostSnapshot) -> serde_json::Value {
+    let (cpu_model, cpu_core_count, cpu_speed_ghz) = current_cpu_profile();
+
+    serde_json::json!({
+        "cpu": {
+            "core": cpu_core_count,
+            "model": cpu_model,
+            "speed": cpu_speed_ghz,
+            "usage": {
+                "system": round_metric(snapshot.resource_usage.cpu.system_percent),
+                "qq": round_metric(snapshot.resource_usage.cpu.process_percent)
+            }
+        },
+        "memory": {
+            "total": bytes_to_mebibytes(snapshot.resource_usage.memory.total_bytes),
+            "usage": {
+                "system": bytes_to_mebibytes(snapshot.resource_usage.memory.used_bytes),
+                "qq": bytes_to_mebibytes(snapshot.resource_usage.memory.process_bytes)
+            }
+        },
+        "arch": arch_label()
+    })
 }
 
 pub type WebHostSnapshotProvider = Arc<dyn Fn() -> AppHostSnapshot + Send + Sync>;
@@ -332,7 +413,11 @@ impl WebHostService {
         }
     }
 
-    async fn handle_connection(&self, mut socket: TcpStream, peer_addr: SocketAddr) -> io::Result<()> {
+    async fn handle_connection(
+        &self,
+        mut socket: TcpStream,
+        peer_addr: SocketAddr,
+    ) -> io::Result<()> {
         let request = read_http_request(&mut socket).await?;
         if request.is_empty() {
             return Ok(());
@@ -442,7 +527,9 @@ impl WebHostService {
                 struct LocalTokenResponse<'a> {
                     token: &'a str,
                 }
-                let body = napcat_ok(&LocalTokenResponse { token: LOCAL_AUTO_TOKEN });
+                let body = napcat_ok(&LocalTokenResponse {
+                    token: LOCAL_AUTO_TOKEN,
+                });
                 return napcat_response(body, is_head);
             }
             // Non-loopback: refuse with 403
@@ -513,7 +600,12 @@ impl WebHostService {
             }
             let body = napcat_ok(&Releases {
                 versions: vec![],
-                pagination: Pagination { page: 1, page_size: 20, total: 0, total_pages: 0 },
+                pagination: Pagination {
+                    page: 1,
+                    page_size: 20,
+                    total: 0,
+                    total_pages: 0,
+                },
             });
             return napcat_response(body, is_head);
         }
@@ -563,19 +655,7 @@ impl WebHostService {
         // SSE: system status
         if api_path == "/base/GetSysStatusRealTime" {
             let snapshot = (self.snapshot_provider)();
-            let status = serde_json::json!({
-                "cpu": {
-                    "model": "Unknown",
-                    "speed": 0,
-                    "usage": snapshot.resource_usage.cpu.system_percent
-                },
-                "memory": {
-                    "total": snapshot.resource_usage.memory.total_bytes,
-                    "used": snapshot.resource_usage.memory.used_bytes,
-                    "usage": snapshot.resource_usage.memory.system_percent
-                },
-                "uptime": 0
-            });
+            let status = napcat_system_status(&snapshot);
             let event_data = serde_json::to_string(&status).unwrap_or_default();
             return sse_response(&event_data, is_head);
         }
@@ -587,7 +667,9 @@ impl WebHostService {
         }
 
         if api_path == "/UpdateNapCat/update" {
-            let body = napcat_ok(&serde_json::json!({ "message": "Update not supported in RsLiteyukiBot" }));
+            let body = napcat_ok(
+                &serde_json::json!({ "message": "Update not supported in Liteyuki" }),
+            );
             return napcat_response(body, is_head);
         }
 
@@ -627,11 +709,13 @@ impl WebHostService {
         }
 
         if api_path == "/QQLogin/GetQQLoginInfo" {
+            let snapshot = (self.snapshot_provider)();
             let body = napcat_ok(&serde_json::json!({
-                "uid": "",
-                "uin": 0,
-                "nick": "RsLiteyukiBot",
-                "avatarUrl": ""
+                "uid": snapshot.status,
+                "uin": snapshot.runtime_target,
+                "nick": snapshot.app_name,
+                "avatarUrl": serde_json::Value::Null,
+                "online": snapshot.status == "running"
             }));
             return napcat_response(body, is_head);
         }
@@ -858,7 +942,7 @@ impl WebHostService {
                 })
                 .to_string()
             } else {
-                serde_json::json!({ "level": "info", "message": "RsLiteyukiBot running" })
+                serde_json::json!({ "level": "info", "message": "Liteyuki running" })
                     .to_string()
             };
             return sse_response(&event_data, is_head);
@@ -1014,7 +1098,13 @@ impl WebHostService {
     }
 
     /// Handle `/api/File/*` routes.
-    fn route_file_api(&self, method: &str, api_path: &str, _request: &[u8], is_head: bool) -> Vec<u8> {
+    fn route_file_api(
+        &self,
+        method: &str,
+        api_path: &str,
+        _request: &[u8],
+        is_head: bool,
+    ) -> Vec<u8> {
         // GET endpoints
         if method.eq_ignore_ascii_case("GET") {
             if api_path == "/File/list" {
@@ -1031,12 +1121,7 @@ impl WebHostService {
             }
             if api_path.starts_with("/File/download") {
                 // Return empty binary
-                return build_response(
-                    "200 OK",
-                    "application/octet-stream",
-                    b"",
-                    is_head,
-                );
+                return build_response("200 OK", "application/octet-stream", b"", is_head);
             }
         }
 
@@ -1281,19 +1366,41 @@ mod tests {
             )
     }
 
-    fn test_server() -> WebHostService {
+    fn test_snapshot() -> AppHostSnapshot {
+        AppHostSnapshot {
+            app_name: "Liteyuki".to_string(),
+            status: "running".to_string(),
+            runtime_target: "tauri2".to_string(),
+            adapter_count: 3,
+            resource_usage: crate::app_host::AppHostResourceUsage {
+                cpu: crate::app_host::AppHostCpuUsage {
+                    system_percent: 63.2,
+                    process_percent: 18.6,
+                },
+                memory: crate::app_host::AppHostMemoryUsage {
+                    total_bytes: 16 * 1024 * 1024 * 1024,
+                    used_bytes: 7 * 1024 * 1024 * 1024,
+                    process_bytes: 512 * 1024 * 1024,
+                    system_percent: 43.75,
+                    process_percent: 3.125,
+                },
+            },
+            ..AppHostSnapshot::default()
+        }
+    }
+
+    fn test_server_with_snapshot(snapshot: AppHostSnapshot) -> WebHostService {
         WebHostService {
             bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_HTTP_PORT),
             browser_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             dev_frontend: None,
-            snapshot_provider: Arc::new(|| AppHostSnapshot {
-                status: "running".to_string(),
-                runtime_target: "tauri2".to_string(),
-                adapter_count: 3,
-                ..AppHostSnapshot::default()
-            }),
+            snapshot_provider: Arc::new(move || snapshot.clone()),
             assets: Arc::new(test_assets()),
         }
+    }
+
+    fn test_server() -> WebHostService {
+        test_server_with_snapshot(test_snapshot())
     }
 
     fn split_response(response: Vec<u8>) -> (String, Vec<u8>) {
@@ -1307,10 +1414,22 @@ mod tests {
         (headers, body)
     }
 
+    fn assert_json_number_close(value: &serde_json::Value, expected: f64) {
+        let actual = value
+            .as_f64()
+            .expect("json value should be a floating-point number");
+        assert!(
+            (actual - expected).abs() < 0.001,
+            "expected {expected}, got {actual}"
+        );
+    }
+
     #[test]
     fn root_route_returns_injected_html() {
-        let response =
-            test_server().route_http_request(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let response = test_server().route_http_request(
+            b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
         let (headers, body) = split_response(response);
         let body = String::from_utf8(body).expect("body should be utf8");
 
@@ -1321,8 +1440,10 @@ mod tests {
 
     #[test]
     fn health_route_returns_runtime_metadata() {
-        let response = test_server()
-            .route_http_request(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let response = test_server().route_http_request(
+            b"GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
         let (headers, body) = split_response(response);
         let body: serde_json::Value =
             serde_json::from_slice(&body).expect("health body should be valid json");
@@ -1331,12 +1452,68 @@ mod tests {
         assert_eq!(body["runtime"]["runtime_target"], "tauri2");
         assert_eq!(body["runtime"]["status"], "running");
         assert_eq!(body["runtime"]["adapter_count"], 3);
-        assert_eq!(
-            body["runtime"]["resource_usage"]["cpu"]["system_percent"],
-            0.0
+        assert_json_number_close(
+            &body["runtime"]["resource_usage"]["cpu"]["system_percent"],
+            63.2,
         );
         assert_eq!(body["bind"], "0.0.0.0:14500");
         assert_eq!(body["desktop_url"], "http://127.0.0.1:14500/");
+    }
+
+    #[test]
+    fn system_status_route_returns_frontend_compatible_shape() {
+        let response = test_server().route_http_request(
+            b"GET /api/base/GetSysStatusRealTime HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (headers, body) = split_response(response);
+        let body = String::from_utf8(body).expect("sse body should be utf8");
+        let payload = body
+            .strip_prefix("data: ")
+            .and_then(|value| value.strip_suffix("\n\n"))
+            .expect("sse body should contain one data event");
+        let payload: serde_json::Value =
+            serde_json::from_str(payload).expect("system status event should be valid json");
+
+        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(headers.contains("Content-Type: text/event-stream; charset=utf-8\r\n"));
+        assert_json_number_close(&payload["cpu"]["usage"]["system"], 63.2);
+        assert_json_number_close(&payload["cpu"]["usage"]["qq"], 18.6);
+        assert_eq!(payload["memory"]["total"], 16_384);
+        assert_eq!(payload["memory"]["usage"]["system"], 7_168);
+        assert_eq!(payload["memory"]["usage"]["qq"], 512);
+        assert_eq!(payload["arch"], arch_label());
+        assert!(
+            payload["cpu"]["core"]
+                .as_u64()
+                .is_some_and(|value| value >= 1),
+            "cpu core count should be populated, got {payload:?}"
+        );
+        assert!(
+            payload["cpu"]["model"]
+                .as_str()
+                .is_some_and(|value| !value.trim().is_empty()),
+            "cpu model should not be empty, got {payload:?}"
+        );
+    }
+
+    #[test]
+    fn qq_login_info_route_uses_runtime_identity() {
+        let response = test_server().route_http_request(
+            b"POST /api/QQLogin/GetQQLoginInfo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (headers, body) = split_response(response);
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("qq login info body should be valid json");
+
+        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert_eq!(body["code"], 0);
+        assert_eq!(body["data"]["nick"], "Liteyuki");
+        assert_eq!(body["data"]["uin"], "tauri2");
+        assert_eq!(body["data"]["uid"], "running");
+        assert_eq!(body["data"]["online"], true);
+        assert!(body["data"]["avatarUrl"].is_null());
     }
 
     #[test]
@@ -1350,8 +1527,10 @@ mod tests {
         );
         crate::emit_console_log(crate::LogLevel::Info, "web.host.test", unique.as_str());
 
-        let response =
-            test_server().route_http_request(b"GET /api/logs HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let response = test_server().route_http_request(
+            b"GET /api/logs HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
         let (headers, body) = split_response(response);
         let body: serde_json::Value =
             serde_json::from_slice(&body).expect("logs body should be valid json");
@@ -1377,19 +1556,36 @@ mod tests {
 
         assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
         assert_eq!(body["code"], 0);
-        assert_eq!(body["data"]["network"]["httpServers"], serde_json::json!([]));
-        assert_eq!(body["data"]["network"]["httpClients"], serde_json::json!([]));
-        assert_eq!(body["data"]["network"]["httpSseServers"], serde_json::json!([]));
-        assert_eq!(body["data"]["network"]["websocketServers"], serde_json::json!([]));
-        assert_eq!(body["data"]["network"]["websocketClients"], serde_json::json!([]));
+        assert_eq!(
+            body["data"]["network"]["httpServers"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            body["data"]["network"]["httpClients"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            body["data"]["network"]["httpSseServers"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            body["data"]["network"]["websocketServers"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            body["data"]["network"]["websocketClients"],
+            serde_json::json!([])
+        );
         assert_eq!(body["data"]["parseMultMsg"], true);
         assert_eq!(body["data"]["timeout"]["baseTimeout"], 10_000);
     }
 
     #[test]
     fn i18n_route_returns_current_catalog_snapshot() {
-        let response =
-            test_server().route_http_request(b"GET /api/i18n HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let response = test_server().route_http_request(
+            b"GET /api/i18n HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
         let (headers, body) = split_response(response);
         let body: serde_json::Value =
             serde_json::from_slice(&body).expect("i18n body should be valid json");
@@ -1407,8 +1603,10 @@ mod tests {
 
     #[test]
     fn static_asset_route_returns_injected_asset() {
-        let response = test_server()
-            .route_http_request(b"GET /assets/bot.svg HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let response = test_server().route_http_request(
+            b"GET /assets/bot.svg HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
         let (headers, body) = split_response(response);
         let body = String::from_utf8(body).expect("body should be utf8");
 
@@ -1419,8 +1617,10 @@ mod tests {
 
     #[test]
     fn head_request_returns_headers_without_body() {
-        let response =
-            test_server().route_http_request(b"HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let response = test_server().route_http_request(
+            b"HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
         let (headers, body) = split_response(response);
 
         assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
@@ -1430,8 +1630,10 @@ mod tests {
 
     #[test]
     fn missing_asset_returns_not_found() {
-        let response =
-            test_server().route_http_request(b"GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let response = test_server().route_http_request(
+            b"GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
         let (headers, body) = split_response(response);
         let body = String::from_utf8(body).expect("body should be utf8");
 
@@ -1472,15 +1674,19 @@ mod tests {
             assets: Arc::new(assets),
         };
 
-        let js_response =
-            server.route_http_request(b"GET /assets/app.js HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let js_response = server.route_http_request(
+            b"GET /assets/app.js HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
         let (js_headers, js_body) = split_response(js_response);
         let js_body = String::from_utf8(js_body).expect("js body should be utf8");
         assert!(js_headers.contains("Content-Type: text/javascript; charset=utf-8\r\n"));
         assert_eq!(js_body, "console.log('ok');");
 
-        let spa_response =
-            server.route_http_request(b"GET /dashboard HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let spa_response = server.route_http_request(
+            b"GET /dashboard HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
         let (spa_headers, spa_body) = split_response(spa_response);
         let spa_body = String::from_utf8(spa_body).expect("spa body should be utf8");
         assert!(spa_headers.starts_with("HTTP/1.1 200 OK\r\n"));
@@ -1542,18 +1748,24 @@ mod tests {
             assets: Arc::new(test_assets()),
         };
 
-        let api_response =
-            server.route_http_request(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let api_response = server.route_http_request(
+            b"GET /api/health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
         let (api_headers, _) = split_response(api_response);
         assert!(api_headers.starts_with("HTTP/1.1 200 OK\r\n"));
 
-        let i18n_response =
-            server.route_http_request(b"GET /api/i18n HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let i18n_response = server.route_http_request(
+            b"GET /api/i18n HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
         let (i18n_headers, _) = split_response(i18n_response);
         assert!(i18n_headers.starts_with("HTTP/1.1 200 OK\r\n"));
 
-        let icon_response =
-            server.route_http_request(b"GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n", IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let icon_response = server.route_http_request(
+            b"GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
         let (icon_headers, _) = split_response(icon_response);
         assert!(icon_headers.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(icon_headers.contains("Content-Type: image/x-icon\r\n"));

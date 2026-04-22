@@ -87,7 +87,7 @@ const HistoryLogs: React.FC<HistoryLogsProps> = (props) => {
 
   return (
     <>
-      <title>历史日志 - NapCat WebUI</title>
+      <title>历史日志 - Liteyuki WebUI</title>
       <Card className={clsx(
         'max-w-full h-full backdrop-blur-sm border border-white/40 dark:border-white/10 shadow-sm',
         hasBackground ? 'bg-white/20 dark:bg-black/10' : 'bg-white/60 dark:bg-black/40'

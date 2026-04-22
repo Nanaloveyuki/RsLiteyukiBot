@@ -408,9 +408,7 @@ mod tests {
         assert_eq!(
             dev_frontend,
             Some(WebHostDevServer {
-                probe_addr: "127.0.0.1:1420"
-                    .parse()
-                    .expect("socket addr should parse"),
+                probe_addr: "127.0.0.1:1420".parse().expect("socket addr should parse"),
                 public_port: 1420,
             })
         );
@@ -427,7 +425,10 @@ mod tests {
         assert_eq!(json["network"]["websocketServers"], serde_json::json!([]));
         assert_eq!(json["network"]["websocketClients"], serde_json::json!([]));
         assert_eq!(json["parseMultMsg"], true);
-        assert_eq!(json["timeout"]["baseTimeout"], DEFAULT_FILE_TRANSFER_TIMEOUT_MS);
+        assert_eq!(
+            json["timeout"]["baseTimeout"],
+            DEFAULT_FILE_TRANSFER_TIMEOUT_MS
+        );
         assert_eq!(
             json["timeout"]["uploadSpeedKBps"],
             DEFAULT_FILE_TRANSFER_SPEED_KBPS

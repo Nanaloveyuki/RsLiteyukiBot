@@ -101,7 +101,7 @@ const DashboardIndexPage: React.FC = () => {
 
   return (
     <>
-      <title>基础信息 - NapCat WebUI</title>
+      <title>基础信息 - Liteyuki WebUI</title>
       <section className='w-full p-2 md:p-4 md:max-w-[1000px] mx-auto overflow-hidden'>
         <div className='grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch'>
           <div className='flex flex-col gap-2'>

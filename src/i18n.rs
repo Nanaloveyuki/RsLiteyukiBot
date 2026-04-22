@@ -473,11 +473,17 @@ mod tests {
         assert_eq!(snapshot.locale, "en-US");
         assert_eq!(snapshot.fallback_locale, "zh-CN");
         assert_eq!(
-            snapshot.messages.get("command.spec.help.summary").map(String::as_str),
+            snapshot
+                .messages
+                .get("command.spec.help.summary")
+                .map(String::as_str),
             Some("Show commands available in the current scope")
         );
         assert_eq!(
-            snapshot.messages.get("web.nav.overview").map(String::as_str),
+            snapshot
+                .messages
+                .get("web.nav.overview")
+                .map(String::as_str),
             Some("Overview")
         );
         assert_eq!(

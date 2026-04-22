@@ -42,7 +42,7 @@ const PasswordLogin: React.FC<PasswordLoginProps> = ({ onSubmit, onCaptchaSubmit
 
   const handleSubmit = () => {
     if (!uin) {
-      toast.error('请输入QQ号');
+      toast.error('请输入账号');
       return;
     }
     if (!password) {
@@ -106,14 +106,14 @@ const PasswordLogin: React.FC<PasswordLoginProps> = ({ onSubmit, onCaptchaSubmit
                   radius='full'
                   src={`https://q1.qlogo.cn/g?b=qq&nk=${uin || '0'}&s=100`}
                   width={100}
-                  alt='QQ Avatar'
+                  alt='Account Avatar'
                 />
               </div>
               <div className='flex flex-col gap-4'>
                 <Input
                   type='text'
-                  label='QQ账号'
-                  placeholder='请输入QQ号'
+                  label='账号'
+                  placeholder='请输入账号'
                   value={uin}
                   onValueChange={setUin}
                   variant='bordered'
@@ -127,7 +127,7 @@ const PasswordLogin: React.FC<PasswordLoginProps> = ({ onSubmit, onCaptchaSubmit
                         </Button>
                       </DropdownTrigger>
                       <DropdownMenu
-                        aria-label='QQ Login History'
+                          aria-label='Login History'
                         items={qqList}
                         onAction={(key) => setUin(key.toString())}
                       >

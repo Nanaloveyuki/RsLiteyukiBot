@@ -65,11 +65,11 @@ const CoreConfigCard = () => {
 
   return (
     <>
-      <title>核心配置 - NapCat WebUI</title>
+      <title>核心配置 - Liteyuki WebUI</title>
       <div className='flex flex-col gap-1 mb-2'>
-        <h3 className='text-lg font-semibold text-default-700'>NapCat 核心配置</h3>
+        <h3 className='text-lg font-semibold text-default-700'>Liteyuki 核心配置</h3>
         <p className='text-sm text-default-500'>
-          控制 NapCat 框架底层的核心行为设定，修改后需重启生效。
+          控制 Liteyuki 框架底层的核心行为设定，修改后需重启生效。
         </p>
       </div>
       <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3'>

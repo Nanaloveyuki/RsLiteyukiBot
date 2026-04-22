@@ -75,7 +75,7 @@ const BypassConfigCard = () => {
 
   return (
     <>
-      <title>反检测配置 - NapCat WebUI</title>
+      <title>反检测配置 - Liteyuki WebUI</title>
       <div className='flex flex-col gap-1 mb-2'>
         <h3 className='text-lg font-semibold text-default-700'>反检测开关配置</h3>
         <p className='text-sm text-default-500'>

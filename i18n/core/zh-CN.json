@@ -55,7 +55,7 @@
   "help.onebot.su_private_only": "说明: OneBot 的 /su 仅允许私聊发送",
   "help.plugin_commands.title": "插件命令 (adapter:onebot11, {count}):",
   "help.plugin_commands.entry": "{name} - {description} [插件:{plugin}]",
-  "tui.brand": "RsLiteyukiBot",
+  "tui.brand": "Liteyuki",
   "tui.header.metrics": " target={target}  uptime={uptime}s  events={events}  adapter_events={adapter_events}  ext_cmd={external_commands}  api_inflight={api_inflight}  resume={resume} ",
   "tui.panel.runtime": "Runtime",
   "tui.panel.adapters": "Adapters",
@@ -338,7 +338,7 @@
       "loading_page": "页面加载中..."
     },
     "site": {
-      "description": "RsLiteyukiBot 共享运行时控制台"
+      "description": "Liteyuki 共享运行时控制台"
     },
     "nav": {
       "overview": "总览",
@@ -396,7 +396,7 @@
       "system_cpu": "系统 CPU",
       "system_cpu_detail": "当前整机占用",
       "process_cpu": "进程 CPU",
-      "process_cpu_detail": "当前 RsLiteyukiBot 占用",
+      "process_cpu_detail": "当前 Liteyuki 占用",
       "system_memory": "系统内存",
       "system_memory_detail": "已用 / 总量",
       "process_memory": "进程内存",
@@ -473,7 +473,7 @@
       "api_requests": "API 请求",
       "success_rate": "成功率",
       "inflight": "进行中",
-      "description": "保留传输层控制室的感觉，但数据全部来自 RsLiteyukiBot 实际暴露的共享宿主、请求流量与适配器能力。",
+      "description": "保留传输层控制室的感觉，但数据全部来自 Liteyuki 实际暴露的共享宿主、请求流量与适配器能力。",
       "eyebrow": "传输层",
       "success": "成功",
       "requests": "请求数",
@@ -563,7 +563,7 @@
       "events": "事件",
       "description": "诊断页保留运维观察视角，同时把警告、备注、事件预览和资源快照重组成更易扫读的结构。",
       "eyebrow": "诊断",
-      "section_description": "这里延续主仪表盘的诊断卡片风格，但内容全部替换成真实的 RsLiteyukiBot 运行时数据。",
+      "section_description": "这里延续主仪表盘的诊断卡片风格，但内容全部替换成真实的 Liteyuki 运行时数据。",
       "section_title": "运行时诊断",
       "resource_snapshot": "资源快照",
       "system_cpu": "系统 CPU",

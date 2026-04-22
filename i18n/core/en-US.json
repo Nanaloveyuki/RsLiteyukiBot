@@ -55,7 +55,7 @@
   "help.onebot.su_private_only": "Note: OneBot /su is only allowed in private messages",
   "help.plugin_commands.title": "plugin commands (adapter:onebot11, {count}):",
   "help.plugin_commands.entry": "{name} - {description} [plugin:{plugin}]",
-  "tui.brand": "RsLiteyukiBot",
+  "tui.brand": "Liteyuki",
   "tui.header.metrics": " target={target}  uptime={uptime}s  events={events}  adapter_events={adapter_events}  ext_cmd={external_commands}  api_inflight={api_inflight}  resume={resume} ",
   "tui.panel.runtime": "Runtime",
   "tui.panel.adapters": "Adapters",
@@ -338,7 +338,7 @@
       "loading_page": "loading page..."
     },
     "site": {
-      "description": "RsLiteyukiBot shared runtime console"
+      "description": "Liteyuki shared runtime console"
     },
     "nav": {
       "overview": "Overview",
@@ -396,7 +396,7 @@
       "system_cpu": "System CPU",
       "system_cpu_detail": "Current full-system usage",
       "process_cpu": "Process CPU",
-      "process_cpu_detail": "Current RsLiteyukiBot usage",
+      "process_cpu_detail": "Current Liteyuki usage",
       "system_memory": "System memory",
       "system_memory_detail": "Used / total",
       "process_memory": "Process memory",
@@ -473,7 +473,7 @@
       "api_requests": "API requests",
       "success_rate": "Success rate",
       "inflight": "Inflight",
-      "description": "Keep the control-room feeling of the transport page, but drive it from the real shared host, request traffic, and adapter capabilities exposed by RsLiteyukiBot.",
+      "description": "Keep the control-room feeling of the transport page, but drive it from the real shared host, request traffic, and adapter capabilities exposed by Liteyuki.",
       "eyebrow": "transport",
       "success": "Success",
       "requests": "Requests",
@@ -563,7 +563,7 @@
       "events": "Events",
       "description": "The diagnostics page keeps an operations-observer feel while reorganizing warnings, notes, event previews, and resource snapshots into a faster-to-scan structure.",
       "eyebrow": "diagnostics",
-      "section_description": "This continues the diagnostics-card feel from the main dashboard while replacing all content with actual RsLiteyukiBot runtime data.",
+      "section_description": "This continues the diagnostics-card feel from the main dashboard while replacing all content with actual Liteyuki runtime data.",
       "section_title": "Runtime diagnostics",
       "resource_snapshot": "Resource snapshot",
       "system_cpu": "System CPU",

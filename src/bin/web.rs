@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use liteyukibot_core::RuntimeTarget;
 use liteyukibot_core::app_host::EmbeddedAppHost;
-use liteyukibot_core::web_host::{
-    WebHostService, WebHostSnapshotProvider,
-};
+use liteyukibot_core::web_host::{WebHostService, WebHostSnapshotProvider};
 use liteyukibot_core::web_ui::{build_default_web_host_assets, build_default_web_host_config};
 use liteyukibot_core::{LogLevel, emit_console_log};
 
@@ -20,12 +18,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(move || app_host.snapshot())
     };
     let assets = build_default_web_host_assets();
-    let (server, listener) = WebHostService::bind(
-        build_default_web_host_config(),
-        snapshot_provider,
-        assets,
-    )
-    .map_err(std::io::Error::other)?;
+    let (server, listener) =
+        WebHostService::bind(build_default_web_host_config(), snapshot_provider, assets)
+            .map_err(std::io::Error::other)?;
 
     emit_console_log(
         LogLevel::Info,
@@ -37,7 +32,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             server.external_url_hint(),
         ),
     );
-    emit_console_log(LogLevel::Info, "web.host", "Press Ctrl+C to stop the shared web host.");
+    emit_console_log(
+        LogLevel::Info,
+        "web.host",
+        "Press Ctrl+C to stop the shared web host.",
+    );
 
     let serve_task = tokio::spawn({
         let server = server.clone();

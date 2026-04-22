@@ -112,7 +112,7 @@ export default function WSDebug () {
 
   return (
     <>
-      <title>Websocket调试 - NapCat WebUI</title>
+      <title>Websocket调试 - Liteyuki WebUI</title>
       <div className='h-[calc(100vh-4rem)] overflow-hidden flex flex-col p-2 md:p-4 gap-2 md:gap-4'>
         {/* Config Card */}
         <Card className={clsx(

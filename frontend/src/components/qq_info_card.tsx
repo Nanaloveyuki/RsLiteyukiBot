@@ -4,6 +4,7 @@ import { useLocalStorage } from '@uidotdev/usehooks';
 import clsx from 'clsx';
 import { BsTencentQq } from 'react-icons/bs';
 
+import logo from '@/assets/images/logo.png';
 import key from '@/const/key';
 import { SelfInfo } from '@/types/user';
 
@@ -18,6 +19,10 @@ export interface QQInfoCardProps {
 const QQInfoCard: React.FC<QQInfoCardProps> = ({ data, error, loading }) => {
   const [backgroundImage] = useLocalStorage<string>(key.backgroundImage, '');
   const hasBackground = !!backgroundImage;
+  const uin = data?.uin ? String(data.uin) : '';
+  const avatarSrc = data?.avatarUrl?.trim()
+    || (/^\d+$/.test(uin) ? `https://q1.qlogo.cn/g?b=qq&nk=${uin}&s=0` : logo);
+
   return (
     <Card
       className={clsx(
@@ -46,10 +51,7 @@ const QQInfoCard: React.FC<QQInfoCardProps> = ({ data, error, loading }) => {
             )}
             <div className='relative flex-shrink-0 z-10'>
               <Image
-                src={
-                  data?.avatarUrl ??
-                  `https://q1.qlogo.cn/g?b=qq&nk=${data?.uin}&s=0`
-                }
+                src={avatarSrc}
                 className='shadow-sm rounded-full w-14 aspect-square ring-2 ring-white/50 dark:ring-white/10'
               />
               <div

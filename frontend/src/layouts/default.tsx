@@ -68,7 +68,7 @@ const Layout: React.FC<{ children: React.ReactNode; }> = ({ children }) => {
           isOnlineRef.current = false;
           dialog.confirm({
             title: '账号已离线',
-            content: '您的 QQ 账号已掉线，是否重启进程以重新登录？',
+            content: '当前账号已离线，是否重启进程以重新登录？',
             confirmText: '重启进程',
             cancelText: '退出账户',
             onConfirm: async () => {

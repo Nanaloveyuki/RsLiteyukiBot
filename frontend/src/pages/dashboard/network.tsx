@@ -362,7 +362,7 @@ export default function NetworkPage () {
 
   return (
     <>
-      <title>网络配置 - NapCat WebUI</title>
+      <title>网络配置 - Liteyuki WebUI</title>
       <div className='p-2 md:p-4 relative'>
         <NetworkFormModal
           data={activeData}

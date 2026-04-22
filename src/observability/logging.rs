@@ -1,6 +1,6 @@
+use std::collections::VecDeque;
 use std::env;
 use std::fmt;
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
@@ -426,8 +426,14 @@ mod tests {
 
         let entries = recent_buffered_logs(5);
         assert_eq!(entries.len(), 5);
-        assert_eq!(entries[0].message, format!("entry {}", LOG_BUFFER_CAPACITY + 20));
-        assert_eq!(entries[4].message, format!("entry {}", LOG_BUFFER_CAPACITY + 24));
+        assert_eq!(
+            entries[0].message,
+            format!("entry {}", LOG_BUFFER_CAPACITY + 20)
+        );
+        assert_eq!(
+            entries[4].message,
+            format!("entry {}", LOG_BUFFER_CAPACITY + 24)
+        );
 
         set_console_log_output_enabled(previous);
         clear_buffered_logs();

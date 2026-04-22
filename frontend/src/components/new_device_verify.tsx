@@ -93,7 +93,7 @@ const NewDeviceVerify: React.FC<NewDeviceVerifyProps> = ({
 
   const statusText: Record<QRStatus, string> = {
     loading: '正在获取二维码...',
-    waiting: '请使用手机QQ扫描二维码完成验证',
+    waiting: '请使用移动端扫描二维码完成验证',
     scanned: '已扫描，请在手机上确认',
     confirmed: '验证成功，正在登录...',
     error: errorMsg || '获取二维码失败',
@@ -110,7 +110,7 @@ const NewDeviceVerify: React.FC<NewDeviceVerifyProps> = ({
   return (
     <div className='flex flex-col gap-4 items-center'>
       <p className='text-warning text-sm'>
-        检测到新设备登录，请使用手机QQ扫描下方二维码完成验证
+        检测到新设备登录，请使用移动端扫描下方二维码完成验证
       </p>
 
       <div className='flex flex-col items-center gap-3' style={{ minHeight: 280 }}>

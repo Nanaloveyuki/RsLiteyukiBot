@@ -151,7 +151,7 @@ export default function HttpDebug () {
 
   return (
     <>
-      <title>HTTP调试 - NapCat WebUI</title>
+      <title>HTTP调试 - Liteyuki WebUI</title>
       <div className='h-[calc(100vh-3.5rem)] pt-2 px-0 md:px-4'>
         <div className={clsx(
           'h-full flex flex-col overflow-hidden transition-all relative',

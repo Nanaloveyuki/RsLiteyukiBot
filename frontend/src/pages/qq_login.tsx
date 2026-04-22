@@ -76,7 +76,7 @@ export default function QQLoginPage () {
   // newDevicePullQrCodeSig is kept for step:2 login after QR verification
   const onSubmit = async () => {
     if (!uinValue) {
-      toast.error('请选择快捷登录的QQ');
+      toast.error('请选择快捷登录账号');
 
       return;
     }
@@ -86,7 +86,7 @@ export default function QQLoginPage () {
     } catch (error) {
       const msg = (error as Error).message;
 
-      toast.error(`快速登录QQ失败: ${msg}`);
+      toast.error(`快速登录失败: ${msg}`);
     } finally {
       setTimeout(() => {
         setIsLoading(false);
@@ -208,7 +208,7 @@ export default function QQLoginPage () {
         firstLoad.current = false;
       }
       if (data.isLogin) {
-        toast.success('QQ登录成功');
+        toast.success('登录成功');
         navigate('/', { replace: true });
       } else {
         setQrcode(data.qrcodeurl);
@@ -257,7 +257,7 @@ export default function QQLoginPage () {
       } catch (_error) {
         const msg = (_error as Error).message;
 
-        toast.error(`获取QQ列表失败: ${msg}`);
+        toast.error(`获取账号列表失败: ${msg}`);
       }
     } finally {
       setRefresh(false);
@@ -297,7 +297,7 @@ export default function QQLoginPage () {
 
   return (
     <>
-      <title>QQ登录 - NapCat WebUI</title>
+      <title>账号登录 - Liteyuki WebUI</title>
       <PureLayout>
         <motion.div
           initial={{ opacity: 0, y: 20, scale: 0.95 }}

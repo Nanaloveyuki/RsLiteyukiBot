@@ -12,7 +12,7 @@ import { Button } from '@heroui/button';
 import { useLocalStorage, useDebounce } from '@uidotdev/usehooks';
 import { useRequest } from 'ahooks';
 import clsx from 'clsx';
-import { FaCircleInfo, FaQq } from 'react-icons/fa6';
+import { FaCircleInfo } from 'react-icons/fa6';
 import { IoLogoChrome, IoLogoOctocat, IoSearch } from 'react-icons/io5';
 import { IoMdFlash, IoMdCheckmark, IoMdSettings } from 'react-icons/io';
 import { RiMacFill } from 'react-icons/ri';
@@ -141,7 +141,7 @@ const UpdateDialogContent: React.FC<{
               更新完成
             </p>
             <p className='text-xs text-default-500 mt-1'>
-              请重启 NapCat 以应用新版本
+              请重启 Liteyuki 以应用新版本
             </p>
           </div>
           <div className='mt-2 p-3 rounded-lg bg-warning-50/50 dark:bg-warning-900/20 border border-warning-200/50 dark:border-warning-700/30'>
@@ -149,7 +149,7 @@ const UpdateDialogContent: React.FC<{
               <svg className='w-4 h-4' fill='none' viewBox='0 0 24 24' stroke='currentColor'>
                 <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z' />
               </svg>
-              <span>重启 NapCat 生效</span>
+              <span>重启 Liteyuki 生效</span>
             </p>
           </div>
           <div className='flex gap-3 justify-center mt-2 w-full'>
@@ -444,7 +444,7 @@ const VersionSelectDialogContent: React.FC<VersionSelectDialogProps> = ({
             更新到 {selectedVersionTag} 完成
           </p>
           <p className='text-xs text-default-500 mt-1 mb-6'>
-            请重启 NapCat 以应用新版本
+            请重启 Liteyuki 以应用新版本
           </p>
           <div className='flex gap-3 justify-center'>
             <button
@@ -825,7 +825,7 @@ const NapCatVersion: React.FC<NapCatVersionProps> = ({ hasBackground = false }) 
   return (
     <>
       <SystemInfoItem
-        title='NapCat 版本'
+        title='Liteyuki 版本'
         icon={<IoLogoOctocat className='text-xl' />}
         hasBackground={hasBackground}
         value={
@@ -873,15 +873,6 @@ export interface SystemInfoProps {
 }
 const SystemInfo: React.FC<SystemInfoProps> = (props) => {
   const { archInfo } = props;
-  const {
-    data: qqVersionData,
-    loading: qqVersionLoading,
-    error: qqVersionError,
-  } = useRequest(WebUIManager.getQQVersion, {
-    cacheKey: 'qq-version',
-    staleTime: 60 * 60 * 1000,
-    cacheTime: 24 * 60 * 60 * 1000,
-  });
   const [backgroundImage] = useLocalStorage<string>(key.backgroundImage, '');
   const hasBackground = !!backgroundImage;
 
@@ -902,24 +893,6 @@ const SystemInfo: React.FC<SystemInfoProps> = (props) => {
       <CardBody className='flex-1'>
         <div className='flex flex-col gap-2 justify-between h-full'>
           <NapCatVersion hasBackground={hasBackground} />
-          <SystemInfoItem
-            title='QQ 版本'
-            icon={<FaQq className='text-lg' />}
-            hasBackground={hasBackground}
-            value={
-              qqVersionError
-                ? (
-                  `错误：${qqVersionError.message}`
-                )
-                : qqVersionLoading
-                  ? (
-                    <Spinner size='sm' />
-                  )
-                  : (
-                    qqVersionData
-                  )
-            }
-          />
           <SystemInfoItem
             title='WebUI 版本'
             icon={<IoLogoChrome className='text-xl' />}

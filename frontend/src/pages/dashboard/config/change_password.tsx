@@ -50,7 +50,7 @@ const ChangePasswordCard = () => {
 
   return (
     <>
-      <title>修改密码 - NapCat WebUI</title>
+      <title>修改密码 - Liteyuki WebUI</title>
 
       <Controller
         control={control}

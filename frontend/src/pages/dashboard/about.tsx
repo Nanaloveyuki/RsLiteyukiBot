@@ -154,7 +154,7 @@ function NapCatFileHash () {
                     </Tooltip>
                   </div>
                 )}
-                <p className='text-xs text-warning-500'>入群密钥绑定QQ，使用对应QQ申请入群即可。</p>
+                <p className='text-xs text-warning-500'>入群密钥绑定当前账号，使用对应账号申请入群即可。</p>
               </div>
             )
             : null}
@@ -191,7 +191,7 @@ export default function AboutPage () {
   ];
 
   const links = [
-    { icon: <BsGithub />, name: 'GitHub', href: 'https://github.com/NapNeko/NapCatQQ' },
+    { icon: <BsGithub />, name: 'GitHub', href: 'https://github.com/LiteyukiStudio/RsLiteyukiBot' },
     { icon: <BsTelegram />, name: 'Telegram', href: 'https://t.me/napcatqq' },
     { icon: <BsTencentQq />, name: '交流群 欢乐一家亲', href: 'https://qm.qq.com/q/VwpnklcXqo' },
     { icon: <BsTencentQq />, name: '交流群 皇亲国戚', href: 'https://qm.qq.com/q/gq18RH7o7S' },
@@ -204,16 +204,16 @@ export default function AboutPage () {
 
   return (
     <div className='flex flex-col h-full w-full gap-6 p-2 md:p-6'>
-      <title>关于 - NapCat WebUI</title>
+      <title>关于 - Liteyuki WebUI</title>
 
       {/* 头部标题区 */}
       <div className='flex flex-col gap-2'>
         <h1 className='text-2xl font-bold flex items-center gap-3 text-default-900'>
-          <Image src={logo} alt='NapCat Logo' width={32} height={32} />
-          关于 NapCat
+          <Image src={logo} alt='Liteyuki Logo' width={32} height={32} />
+          关于 Liteyuki
         </h1>
         <div className='flex items-center gap-4 text-small text-default-500'>
-          <p>现代化、轻量级的 QQ 机器人框架</p>
+          <p>现代化、轻量级的机器人运行框架</p>
           <Divider orientation='vertical' className='h-4' />
           <VersionInfo />
         </div>
@@ -232,11 +232,11 @@ export default function AboutPage () {
             </CardHeader>
             <CardBody className='py-4 text-default-600 leading-relaxed space-y-2'>
               <p>
-                NapCat (瞌睡猫) 是一个致力于打破 QQ 机器人开发壁垒的开源项目。我们利用 NTQQ 的底层能力，
-                构建了一个无需 GUI 即可在服务器端稳定运行的 Headless 框架。
+                Liteyuki 是一个致力于降低机器人开发与运行门槛的开源项目。我们围绕当前运行时能力，
+                构建了一个可在桌面端与服务端灵活运行的轻量化控制与集成框架。
               </p>
               <p>
-                无论是个人开发者还是企业用户，NapCat 都能提供开箱即用的 OneBot 11 协议支持，
+                无论是个人开发者还是企业用户，Liteyuki 都能提供开箱即用的 OneBot 11 协议支持，
                 助您快速将创意转化为现实。
               </p>
             </CardBody>
@@ -308,7 +308,7 @@ export default function AboutPage () {
       {/* 底部版权 - 移出 grid 布局 */}
       <div className='w-full text-center text-tiny text-default-400 py-4 mt-auto flex flex-col items-center gap-1'>
         <p className='flex items-center justify-center gap-1'>
-          Made with <span className='text-danger'>❤️</span> by NapCat Team
+          Made with <span className='text-danger'>❤️</span> by Liteyuki Team
         </p>
         <p>MIT License © {new Date().getFullYear()}</p>
       </div>

@@ -107,7 +107,7 @@ const SystemStatusDisplay: React.FC<SystemStatusDisplayProps> = ({ data }) => {
               hasBackground={hasBackground}
             />
             <SystemStatusItem
-              title='QQ主线程'
+              title='进程占用'
               value={data?.cpu.usage.qq}
               unit='%'
               hasBackground={hasBackground}
@@ -136,7 +136,7 @@ const SystemStatusDisplay: React.FC<SystemStatusDisplayProps> = ({ data }) => {
               hasBackground={hasBackground}
             />
             <SystemStatusItem
-              title='QQ主线程'
+              title='进程占用'
               value={data?.memory.usage.qq}
               unit='MB'
               hasBackground={hasBackground}

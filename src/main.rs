@@ -45,7 +45,7 @@ use i18n::{reload_catalog as reload_i18n_catalog, set_current_locale, tr, trf};
 use onebot_support::*;
 use superuser::SuperuserManager;
 
-const APP_TITLE: &str = "RsLiteyukiBot";
+const APP_TITLE: &str = "Liteyuki";
 const DEFAULT_RUNTIME_TARGET: RuntimeTarget = RuntimeTarget::Cli;
 const DEFAULT_LLM_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 

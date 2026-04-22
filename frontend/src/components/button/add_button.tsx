@@ -72,7 +72,7 @@ const AddButton: React.FC<AddButtonProps> = (props) => {
           <div className='flex gap-1 items-center'>
             HTTP服务器
             <Tooltip
-              content='「由NapCat建立」一个HTTP服务器，你可以「使用框架连接」此服务器或者「自己构造请求发送」至此服务器。NapCat会根据你配置的IP和端口等建立一个地址，你或者你的框架应该连接到这个地址。'
+              content='「由Liteyuki建立」一个HTTP服务器，你可以「使用框架连接」此服务器或者「自己构造请求发送」至此服务器。Liteyuki会根据你配置的IP和端口等建立一个地址，你或者你的框架应该连接到这个地址。'
               showArrow
               className='max-w-64'
             >
@@ -100,7 +100,7 @@ const AddButton: React.FC<AddButtonProps> = (props) => {
           <div className='flex gap-1 items-center'>
             HTTP SSE服务器
             <Tooltip
-              content='「由NapCat建立」一个HTTP SSE服务器，你可以「使用框架连接」此服务器或者「自己构造请求发送」至此服务器。NapCat会根据你配置的IP和端口等建立一个地址，你或者你的框架应该连接到这个地址。'
+              content='「由Liteyuki建立」一个HTTP SSE服务器，你可以「使用框架连接」此服务器或者「自己构造请求发送」至此服务器。Liteyuki会根据你配置的IP和端口等建立一个地址，你或者你的框架应该连接到这个地址。'
               showArrow
               className='max-w-64'
             >
@@ -128,7 +128,7 @@ const AddButton: React.FC<AddButtonProps> = (props) => {
           <div className='flex gap-1 items-center'>
             HTTP客户端
             <Tooltip
-              content='「由框架或者你自己建立」的一个用于「接收」NapCat向你发送请求的客户端，通常框架会提供一个HTTP地址。这个地址是你使用的框架提供的，NapCat会主动连接它。'
+              content='「由框架或者你自己建立」的一个用于「接收」Liteyuki向你发送请求的客户端，通常框架会提供一个HTTP地址。这个地址是你使用的框架提供的，Liteyuki会主动连接它。'
               showArrow
               className='max-w-64'
             >
@@ -156,7 +156,7 @@ const AddButton: React.FC<AddButtonProps> = (props) => {
           <div className='flex gap-1 items-center'>
             Websocket服务器
             <Tooltip
-              content='「由NapCat建立」一个WebSocket服务器，你的框架应该连接到此服务器。NapCat会根据你配置的IP和端口等建立一个WebSocket地址，你或者你的框架应该连接到这个地址。'
+              content='「由Liteyuki建立」一个WebSocket服务器，你的框架应该连接到此服务器。Liteyuki会根据你配置的IP和端口等建立一个WebSocket地址，你或者你的框架应该连接到这个地址。'
               showArrow
               className='max-w-64'
             >
@@ -184,7 +184,7 @@ const AddButton: React.FC<AddButtonProps> = (props) => {
           <div className='flex gap-1 items-center'>
             Websocket客户端
             <Tooltip
-              content='「由框架或者你自己建立」的WebSocket，通常框架会「提供」一个ws地址，NapCat会主动连接它。'
+              content='「由框架或者你自己建立」的WebSocket，通常框架会「提供」一个ws地址，Liteyuki会主动连接它。'
               showArrow
               className='max-w-64'
             >

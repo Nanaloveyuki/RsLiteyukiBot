@@ -33,17 +33,17 @@ interface SystemStatus {
   cpu: {
     core: number;
     model: string;
-    speed: string;
+    speed: number;
     usage: {
-      system: string;
-      qq: string;
+      system: number;
+      qq: number;
     };
   };
   memory: {
-    total: string;
+    total: number;
     usage: {
-      system: string;
-      qq: string;
+      system: number;
+      qq: number;
     };
   };
   arch: string;

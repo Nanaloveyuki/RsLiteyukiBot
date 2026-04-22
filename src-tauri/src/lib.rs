@@ -78,7 +78,7 @@ pub fn run() {
             handle_main_window_event(window, event, allow_app_exit_for_window.as_ref());
         })
         .run(tauri::generate_context!())
-        .expect("error while running RsLiteyukiBot Tauri shell");
+        .expect("error while running Liteyuki Tauri shell");
 
     if let Err(err) = tauri::async_runtime::block_on(app_host.shutdown()) {
         emit_console_log(
@@ -100,7 +100,7 @@ fn setup_system_tray<R: Runtime>(
 
     let mut tray_builder = TrayIconBuilder::with_id(TRAY_ICON_ID)
         .menu(&menu)
-        .tooltip("RsLiteyukiBot")
+        .tooltip("Liteyuki")
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| {
             if event.id() == TRAY_SHOW_MENU_ID {

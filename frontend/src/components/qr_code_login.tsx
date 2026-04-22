@@ -50,7 +50,7 @@ const QrCodeLogin: React.FC<QrCodeLoginProps> = ({ qrcode, loginError, onRefresh
               )}
               <QRCodeSVG size={180} value={qrcode || ' '} />
             </div>
-            <div className='mt-5 text-center text-default-500 text-sm'>请使用QQ或者TIM扫描上方二维码</div>
+            <div className='mt-5 text-center text-default-500 text-sm'>请使用移动端扫描应用扫描上方二维码</div>
             {onRefresh && qrcode && (
               <Button
                 className='mt-4'

@@ -70,6 +70,13 @@ const MusicInsert = () => {
     reset();
   };
 
+  const selectedMusicType = Array.from(musicType)[0] as MusicSegment['data']['type'];
+  const selectedMusicLabel = selectedMusicType === '163'
+    ? '网易云'
+    : selectedMusicType === 'xm'
+      ? '虾米'
+      : '默认平台';
+
   return (
     <div ref={containerRef} className='overflow-visible'>
       <Popover
@@ -105,7 +112,7 @@ const MusicInsert = () => {
                 placeholder='请选择音乐平台'
                 items={[
                   {
-                    name: 'QQ音乐',
+                    name: '默认平台音乐',
                     id: 'qq',
                   },
                   {
@@ -143,16 +150,14 @@ const MusicInsert = () => {
                     return;
                   }
                   showMusicSegment({
-                    type: Array.from(
-                      musicType
-                    )[0] as MusicSegment['data']['type'],
+                    type: selectedMusicType,
                     id: musicId,
                   });
                   setMusicId('');
                 }}
                 startContent={<TbMusicPlus />}
               >
-                创建{Array.from(musicType)[0] === '163' ? '网易云' : 'QQ'}音乐
+                创建{selectedMusicLabel}音乐
               </Button>
             </Tab>
             <Tab

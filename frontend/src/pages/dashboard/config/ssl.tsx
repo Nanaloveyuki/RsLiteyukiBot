@@ -74,7 +74,7 @@ const SSLConfigCard = () => {
 
   return (
     <>
-      <title>SSL配置 - NapCat WebUI</title>
+      <title>SSL配置 - Liteyuki WebUI</title>
       <div className='flex flex-col gap-4'>
         <div className='flex flex-col gap-3'>
           <div className='flex items-center gap-2'>

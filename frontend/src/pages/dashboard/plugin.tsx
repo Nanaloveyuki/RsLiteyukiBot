@@ -161,7 +161,7 @@ export default function PluginPage () {
 
   return (
     <>
-      <title>插件管理 - NapCat WebUI</title>
+      <title>插件管理 - Liteyuki WebUI</title>
       <div className='p-2 md:p-4 relative'>
         <PageLoading loading={loading} />
         <PluginConfigModal

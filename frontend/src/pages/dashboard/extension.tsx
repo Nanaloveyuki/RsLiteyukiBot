@@ -126,7 +126,7 @@ export default function ExtensionPage () {
 
   return (
     <>
-      <title>扩展页面 - NapCat WebUI</title>
+      <title>扩展页面 - Liteyuki WebUI</title>
       <div className='p-2 md:p-4 relative h-[calc(100vh-6rem)] md:h-[calc(100vh-4rem)] flex flex-col'>
         <PageLoading loading={loading} />
 

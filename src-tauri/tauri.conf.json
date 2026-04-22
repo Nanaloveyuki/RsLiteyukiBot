@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "RsLiteyukiBot",
+  "productName": "Liteyuki",
   "version": "0.1.0",
   "identifier": "org.liteyuki.rsliteyukibot.tauri",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "RsLiteyukiBot",
+        "title": "Liteyuki",
         "width": 1200,
         "height": 800,
         "minWidth": 960,

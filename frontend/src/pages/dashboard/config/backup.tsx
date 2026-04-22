@@ -81,7 +81,7 @@ const BackupConfigCard: React.FC = () => {
       <div>
         <h3 className='text-lg font-medium mb-4'>备份与恢复</h3>
         <p className='text-sm text-default-500 mb-4'>
-          您可以通过导入/导出配置文件来备份和恢复NapCat的所有设置
+          您可以通过导入/导出配置文件来备份和恢复 Liteyuki 的所有设置
         </p>
 
         <div className='flex flex-wrap gap-3'>

@@ -31,7 +31,7 @@ use std::collections::HashSet;
 #[cfg(test)]
 use std::path::PathBuf;
 
-const APP_TITLE: &str = "RsLiteyukiBot";
+const APP_TITLE: &str = "Liteyuki";
 const RESOURCE_USAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_STATUS_NOTES: usize = 32;
 
