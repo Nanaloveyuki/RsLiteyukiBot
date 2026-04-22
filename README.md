@@ -112,6 +112,9 @@ cargo run
 [@Snowykami](https://sfkm.me): Liteyuki 文档站支持和授权
 
 [@NapcatQQ](https://github.com/NapNeko/NapCatQQ): 前端页面样式
+
+## 版权&许可
+
 <details><summary>Napcat LICENSE</summary>
 <code>
 Limited Redistribution License for NapCat
@@ -135,6 +138,15 @@ Copyright © 2024 Mlikiowa
    - This code is provided "as is," without any express or implied warranties, including but not limited to the implied warranties of merchantability and fitness for a particular purpose. In no event shall the author be liable for any damages or other liability arising from, out of, or in connection with the use or distribution of this code.
 </code>
 </details>
+
+本项目采用混合所有制许可:
+- 前端部分: 
+  - 部分代码(使用NapcatUI源码部分)采用 `Napcat LICENSE`
+  - 部分代码(二次创作后部分)采用 [`LSO-Common.zh-CN v1.4 Modified`](./LICENSE)
+- 后端部分:
+  - 采用 [`LSO-Common.zh-CN v1.4 Modified`](./LICENSE)
+
+未涉及或未明晰内容, 如字体等版权由提供方许给的许可进行授权, 受制于篇幅不再详细描述.
 
 
 [Liteyuki6.0]: https://img.shields.io/badge/Liteyuki-6.0-blue?style=for-the-badge
