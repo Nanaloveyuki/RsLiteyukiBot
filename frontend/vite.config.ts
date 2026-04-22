@@ -195,26 +195,35 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks(id) {
-            if (id.includes('node_modules')) {
-              if (id.includes('react-dom')) {
-                return 'react-dom';
+            const normalizedId = id.replace(/\\/g, '/');
+
+            if (normalizedId.includes('/node_modules/')) {
+              if (
+                normalizedId.includes('/node_modules/react/')
+                || normalizedId.includes('/node_modules/react-dom/')
+                || normalizedId.includes('/node_modules/react-router/')
+                || normalizedId.includes('/node_modules/react-router-dom/')
+                || normalizedId.includes('/node_modules/scheduler/')
+              ) {
+                return 'react-vendor';
               }
-              if (id.includes('react-router-dom')) {
-                return 'react-router-dom';
-              }
-              if (id.includes('react-hook-form')) {
+              if (normalizedId.includes('/node_modules/react-hook-form/')) {
                 return 'react-hook-form';
               }
-              if (id.includes('react-hot-toast')) {
+              if (normalizedId.includes('/node_modules/react-hot-toast/')) {
                 return 'react-hot-toast';
               }
-              if (id.includes('qface')) {
+              if (normalizedId.includes('/node_modules/qface/')) {
                 return 'qface';
               }
-              if (id.includes('@uiw/react-codemirror') || id.includes('@codemirror/view') || id.includes('@codemirror/theme-one-dark')) {
+              if (
+                normalizedId.includes('/node_modules/@uiw/react-codemirror/')
+                || normalizedId.includes('/node_modules/@codemirror/view/')
+                || normalizedId.includes('/node_modules/@codemirror/theme-one-dark/')
+              ) {
                 return 'codemirror-core';
               }
-              if (id.includes('@codemirror/lang-')) {
+              if (normalizedId.includes('/node_modules/@codemirror/lang-')) {
                 return 'codemirror-lang';
               }
             }
