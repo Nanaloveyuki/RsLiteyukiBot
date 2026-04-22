@@ -18,20 +18,11 @@ pub(super) struct TerminalSession {
     history: Mutex<TerminalHistory>,
 }
 
+#[derive(Default)]
 struct TerminalProcessHandles {
     input_tx: Option<std::sync::mpsc::Sender<Vec<u8>>>,
     master: Option<Arc<Mutex<Box<dyn MasterPty + Send>>>>,
     killer: Option<Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>>>,
-}
-
-impl Default for TerminalProcessHandles {
-    fn default() -> Self {
-        Self {
-            input_tx: None,
-            master: None,
-            killer: None,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -459,5 +450,5 @@ pub(super) fn handle_terminal_client_message(
 
 pub(super) fn terminal_ws_text(text: impl Into<String>) -> Message {
     let payload = serde_json::json!({ "data": text.into() }).to_string();
-    Message::Text(payload.into())
+    Message::Text(payload)
 }

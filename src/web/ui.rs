@@ -55,7 +55,7 @@ impl Default for NapCatWebUIConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct NapCatBypassConfig {
     pub hook: bool,
@@ -86,19 +86,6 @@ pub struct NapCatConfig {
     #[serde(rename = "autoTimeSync")]
     pub auto_time_sync: bool,
     pub bypass: NapCatBypassConfig,
-}
-
-impl Default for NapCatBypassConfig {
-    fn default() -> Self {
-        Self {
-            hook: false,
-            window: false,
-            module: false,
-            process: false,
-            container: false,
-            js: false,
-        }
-    }
 }
 
 impl Default for NapCatConfig {
@@ -201,22 +188,13 @@ impl Default for OneBotHttpClientConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct OneBotHttpSseServerConfig {
     #[serde(flatten)]
     pub server: OneBotHttpServerConfig,
     #[serde(rename = "reportSelfMessage")]
     pub report_self_message: bool,
-}
-
-impl Default for OneBotHttpSseServerConfig {
-    fn default() -> Self {
-        Self {
-            server: OneBotHttpServerConfig::default(),
-            report_self_message: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -353,9 +331,10 @@ pub fn build_web_host_assets(dist_dir: Option<PathBuf>) -> WebHostAssets {
 }
 
 pub fn build_default_web_host_config() -> WebHostConfig {
-    let mut config = WebHostConfig::default();
-    config.dev_frontend = resolve_dev_frontend_from_env();
-    config
+    WebHostConfig {
+        dev_frontend: resolve_dev_frontend_from_env(),
+        ..WebHostConfig::default()
+    }
 }
 
 pub fn resolve_dev_frontend_from_env() -> Option<WebHostDevServer> {

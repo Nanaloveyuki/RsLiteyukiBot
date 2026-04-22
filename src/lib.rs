@@ -18,6 +18,7 @@ pub mod web_ui;
 mod app_config;
 #[allow(dead_code)]
 mod command_registry;
+#[allow(dead_code)]
 mod config_edit;
 mod external_commands;
 #[allow(dead_code)]

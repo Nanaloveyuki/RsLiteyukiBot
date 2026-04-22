@@ -520,8 +520,13 @@ impl WebHostService {
             let server = self.clone();
             tokio::spawn(async move {
                 if let Err(err) = server.handle_connection(socket, peer_addr).await {
+                    let level = if is_expected_client_disconnect(&err) {
+                        LogLevel::Debug
+                    } else {
+                        LogLevel::Warn
+                    };
                     emit_console_log(
-                        LogLevel::Warn,
+                        level,
                         "web.host",
                         format!("failed to serve shared HTTP request: {err}"),
                     );
@@ -563,6 +568,7 @@ impl WebHostService {
         socket.shutdown().await
     }
 
+    #[allow(clippy::result_large_err)]
     async fn handle_terminal_websocket(&self, socket: TcpStream) -> io::Result<()> {
         let request_path = Arc::new(Mutex::new(None::<String>));
         let capture = Arc::clone(&request_path);
@@ -652,13 +658,14 @@ impl WebHostService {
                         }
                     }
                     Ok(Message::Binary(payload)) => {
-                        if let Ok(text) = String::from_utf8(payload.to_vec()) {
-                            if let Err(err) = handle_terminal_client_message(&input_session, text.as_str()) {
-                                let _ = input_session.output_tx.send(format!(
-                                    "\r\n\u{1b}[31m[terminal:{}] {}\u{1b}[0m\r\n",
-                                    input_session.id, err
-                                ));
-                            }
+                        if let Ok(text) = String::from_utf8(payload.to_vec())
+                            && let Err(err) =
+                                handle_terminal_client_message(&input_session, text.as_str())
+                        {
+                            let _ = input_session.output_tx.send(format!(
+                                "\r\n\u{1b}[31m[terminal:{}] {}\u{1b}[0m\r\n",
+                                input_session.id, err
+                            ));
                         }
                     }
                     Ok(Message::Close(_)) => break,
@@ -2054,6 +2061,16 @@ fn guess_content_type(path: &Path) -> &'static str {
         Some("wasm") => "application/wasm",
         _ => "application/octet-stream",
     }
+}
+
+fn is_expected_client_disconnect(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::UnexpectedEof
+    ) || matches!(err.raw_os_error(), Some(10053 | 10054))
 }
 
 #[cfg(test)]
