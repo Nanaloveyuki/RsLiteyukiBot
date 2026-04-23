@@ -66,7 +66,6 @@ export default class MirrorManager {
           ...buildBearerAuthHeader(token),
           Accept: 'text/event-stream',
         },
-        withCredentials: true,
       }
     );
 

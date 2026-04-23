@@ -125,7 +125,6 @@ export default function PluginConfigModal ({ isOpen, onOpenChange, pluginId }: P
         ...buildBearerAuthHeader(token),
         Accept: 'text/event-stream',
       },
-      withCredentials: true,
     });
     eventSourceRef.current = es;
 

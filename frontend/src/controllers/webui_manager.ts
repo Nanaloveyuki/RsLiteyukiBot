@@ -73,7 +73,6 @@ function createManagedEventSource (
         ...buildBearerAuthHeader(token),
         Accept: 'text/event-stream',
       },
-      withCredentials: true,
     });
 
     eventSource.onopen = () => {

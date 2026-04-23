@@ -246,7 +246,6 @@ export default function PluginStorePage () {
             ...buildBearerAuthHeader(token),
             Accept: 'text/event-stream',
           },
-          withCredentials: true,
         }
       );
 
