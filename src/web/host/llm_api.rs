@@ -475,6 +475,7 @@ async fn send_json_request(
     extra_headers: &[(&str, &str)],
     payload: &Value,
 ) -> Result<Value, String> {
+    log_provider_request_body(endpoint, payload);
     let client = build_provider_http_client(timeout_ms)?;
     let mut request = client
         .post(endpoint)
@@ -505,6 +506,16 @@ async fn send_json_request(
     }
 
     serde_json::from_str(&body).map_err(|err| format!("upstream returned invalid JSON: {err}"))
+}
+
+fn log_provider_request_body(endpoint: &str, payload: &Value) {
+    let rendered = serde_json::to_string_pretty(payload)
+        .unwrap_or_else(|err| format!("<failed to serialize request body: {err}>"));
+    emit_console_log(
+        LogLevel::Debug,
+        "web.llm.request",
+        format!("POST {endpoint}\n{rendered}"),
+    );
 }
 
 fn build_provider_http_client(timeout_ms: u64) -> Result<Client, String> {
@@ -2072,5 +2083,37 @@ mod tests {
         assert!(summary.contains("reasoning=medium"));
         assert!(!summary.contains("hidden system prompt"));
         assert!(!summary.contains("hello from frontend"));
+    }
+
+    #[test]
+    fn fallback_prompt_keeps_multi_turn_history_in_transcript() {
+        let request = WebLlmChatRequest {
+            messages: vec![
+                WebLlmMessage {
+                    role: "user".to_string(),
+                    content: "你好".to_string(),
+                    attachments: vec![],
+                },
+                WebLlmMessage {
+                    role: "assistant".to_string(),
+                    content: "你好！有什么我可以帮助你的吗？".to_string(),
+                    attachments: vec![],
+                },
+                WebLlmMessage {
+                    role: "user".to_string(),
+                    content: "0.9的9循环和1是否相等".to_string(),
+                    attachments: vec![],
+                },
+            ],
+            ..Default::default()
+        };
+
+        let prompt =
+            compose_chat_fallback_prompt(&request, "只说一句结论").expect("prompt should build");
+
+        assert!(prompt.contains("Prompt profile instruction:\n只说一句结论"));
+        assert!(prompt.contains("user:\n你好"));
+        assert!(prompt.contains("assistant:\n你好！有什么我可以帮助你的吗？"));
+        assert!(prompt.contains("user:\n0.9的9循环和1是否相等"));
     }
 }

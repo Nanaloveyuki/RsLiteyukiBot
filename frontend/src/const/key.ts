@@ -11,6 +11,7 @@ enum key {
   httpDebugConfig = 'http-debug-config',
   wsDebugConfig = 'ws-debug-config',
   llmChatConfig = 'llm-chat-config',
+  llmChatConversations = 'llm-chat-conversations',
 }
 
 export default key;

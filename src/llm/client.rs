@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{Map, Value, json};
 
-use liteyukibot_core::SseParser;
+use liteyukibot_core::{LogLevel, SseParser, emit_console_log};
 
 const OUTPUT_TRUNCATE_LIMIT: usize = 320;
 
@@ -450,6 +450,7 @@ impl OpenAiResponsesClient {
         request: Value,
         dispatcher: &mut EventDispatcher<'_>,
     ) -> Result<ProviderTurn, LlmClientError> {
+        log_outbound_llm_request("responses", endpoint, &request);
         let response = self
             .client
             .post(endpoint)
@@ -616,6 +617,7 @@ impl OpenAiResponsesClient {
         request: Value,
         dispatcher: &mut EventDispatcher<'_>,
     ) -> Result<ProviderTurn, LlmClientError> {
+        log_outbound_llm_request("chat.completions", endpoint, &request);
         let response = self
             .client
             .post(endpoint)
@@ -676,6 +678,17 @@ impl OpenAiResponsesClient {
     }
 
     async fn send_json(&self, endpoint: &str, request: &Value) -> Result<Value, LlmClientError> {
+        let request_kind = if endpoint
+            .trim_end_matches('/')
+            .ends_with("/chat/completions")
+        {
+            "chat.completions"
+        } else if endpoint.trim_end_matches('/').ends_with("/responses") {
+            "responses"
+        } else {
+            "json"
+        };
+        log_outbound_llm_request(request_kind, endpoint, request);
         let response = self
             .client
             .post(endpoint)
@@ -1255,6 +1268,16 @@ fn llm_endpoint(base_url: &str, path_suffix: &str) -> String {
     }
 }
 
+fn log_outbound_llm_request(request_kind: &str, endpoint: &str, request: &Value) {
+    let rendered = serde_json::to_string_pretty(request)
+        .unwrap_or_else(|err| format!("<failed to serialize request body: {err}>"));
+    emit_console_log(
+        LogLevel::Debug,
+        "llm.request",
+        format!("POST {endpoint} ({request_kind})\n{rendered}"),
+    );
+}
+
 fn should_fallback_to_chat_completions(status: u16, detail: &str) -> bool {
     if matches!(status, 404 | 405) {
         return true;
@@ -1341,10 +1364,46 @@ fn truncate_text(raw: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use liteyukibot_core::observability::set_console_log_output_enabled;
+    use liteyukibot_core::recent_buffered_logs;
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::thread;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn log_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.as_deref() {
+                Some(value) => unsafe {
+                    std::env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.key);
+                },
+            }
+        }
+    }
 
     fn spawn_mock_http_server(raw_responses: Vec<String>) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -1646,6 +1705,49 @@ mod tests {
                 .and_then(Value::as_f64)
                 .is_some_and(|value| (value - 0.8_f64).abs() < 1e-6)
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_debug_log_includes_json_body_before_send() {
+        let _lock = log_test_lock()
+            .lock()
+            .expect("log test lock should not be poisoned");
+        let _level_guard = EnvVarGuard::set("LY_LOG_LEVEL", "debug");
+        let previous_console = set_console_log_output_enabled(false);
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let prompt = format!("hello-debug-{unique}");
+        let response = json!({
+            "id": "resp_1",
+            "output_text": "ok"
+        });
+        let (addr, _) = spawn_mock_http_server(vec![http_json_response(response)]);
+        let config = TestConfig {
+            base_url: format!("http://{addr}"),
+            stream: false,
+            temperature: Some(0.2),
+            top_p: Some(0.8),
+            top_k: None,
+        };
+        let client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
+            .expect("client should build");
+
+        let output = client
+            .generate(prompt.as_str())
+            .await
+            .expect("request should work");
+        assert_eq!(output, "ok");
+
+        assert!(recent_buffered_logs(200).iter().any(|entry| {
+            entry.module == "llm.request"
+                && entry.level == "DEBUG"
+                && entry.message.contains("/responses")
+                && entry.message.contains(prompt.as_str())
+        }));
+
+        set_console_log_output_enabled(previous_console);
     }
 
     #[test]

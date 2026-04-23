@@ -45,6 +45,21 @@ interface ChatMessage {
   meta?: string;
 }
 
+interface LlmChatConversation {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  providerLabel?: string;
+  model?: string;
+  messages: ChatMessage[];
+}
+
+interface LlmChatConversationsState {
+  activeId: string;
+  conversations: LlmChatConversation[];
+}
+
 interface LlmChatPreferences {
   baseUrl: string;
   model: string;
@@ -142,6 +157,81 @@ const FILE_PICKER_ACCEPT = [
 
 function nextMessageId () {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function nextConversationId () {
+  return `conversation-${nextMessageId()}`;
+}
+
+function createEmptyConversation (
+  providerLabel?: string,
+  model?: string
+): LlmChatConversation {
+  const now = Date.now();
+
+  return {
+    id: nextConversationId(),
+    title: '新对话',
+    createdAt: now,
+    updatedAt: now,
+    providerLabel,
+    model,
+    messages: [],
+  };
+}
+
+function createConversationState (
+  providerLabel?: string,
+  model?: string
+): LlmChatConversationsState {
+  const conversation = createEmptyConversation(providerLabel, model);
+
+  return {
+    activeId: conversation.id,
+    conversations: [conversation],
+  };
+}
+
+function normalizeConversationState (
+  state: LlmChatConversationsState | null | undefined,
+  providerLabel?: string,
+  model?: string
+): LlmChatConversationsState {
+  if (!state?.conversations?.length) {
+    return createConversationState(providerLabel, model);
+  }
+
+  if (state.conversations.some((conversation) => conversation.id === state.activeId)) {
+    return state;
+  }
+
+  return {
+    ...state,
+    activeId: state.conversations[0].id,
+  };
+}
+
+function formatConversationTime (updatedAt: number) {
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(updatedAt));
+}
+
+function titleFromMessage (message: ChatMessage) {
+  const content = message.content.trim();
+
+  if (content) {
+    return content.length > 18 ? `${content.slice(0, 18)}...` : content;
+  }
+
+  if (message.attachments?.length) {
+    return `附件对话 ${message.attachments.length}`;
+  }
+
+  return '新对话';
 }
 
 function parseOptionalNumber (raw: string, parser: (value: string) => number) {
@@ -496,9 +586,18 @@ export default function LlmChatPage () {
     key.llmChatConfig,
     DEFAULT_PREFERENCES
   );
+  const initialConversationStateRef = useRef<LlmChatConversationsState | null>(null);
+
+  if (!initialConversationStateRef.current) {
+    initialConversationStateRef.current = createConversationState();
+  }
+
+  const [storedConversationState, setStoredConversationState] = useLocalStorage<LlmChatConversationsState>(
+    key.llmChatConversations,
+    initialConversationStateRef.current
+  );
   const config = storedConfig ?? DEFAULT_PREFERENCES;
   const [draft, setDraft] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [attachments, setAttachments] = useState<LlmChatAttachment[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -537,6 +636,19 @@ export default function LlmChatPage () {
 
     toast.error(`加载模型配置失败: ${(settingsError as Error).message}`);
   }, [settingsError]);
+
+  const conversationState = useMemo(
+    () => normalizeConversationState(storedConversationState),
+    [storedConversationState]
+  );
+  const currentConversation = useMemo(
+    () => conversationState.conversations.find(
+      (conversation) => conversation.id === conversationState.activeId
+    ) ?? conversationState.conversations[0],
+    [conversationState]
+  );
+  const activeConversationId = currentConversation?.id ?? conversationState.activeId;
+  const messages = currentConversation?.messages ?? [];
 
   useEffect(() => {
     listRef.current?.scrollTo({
@@ -619,6 +731,106 @@ export default function LlmChatPage () {
     }));
   };
 
+  const updateStoredConversationState = (
+    updater: (state: LlmChatConversationsState) => LlmChatConversationsState
+  ) => {
+    setStoredConversationState((current) => updater(normalizeConversationState(current)));
+  };
+
+  const updateConversationById = (
+    conversationId: string,
+    updater: (conversation: LlmChatConversation) => LlmChatConversation
+  ) => {
+    updateStoredConversationState((state) => ({
+      ...state,
+      conversations: state.conversations.map((conversation) => (
+        conversation.id === conversationId ? updater(conversation) : conversation
+      )),
+    }));
+  };
+
+  const replaceConversationMessages = (
+    conversationId: string,
+    nextMessages: ChatMessage[]
+  ) => {
+    const firstUserMessage = nextMessages.find((message) => message.role === 'user');
+
+    updateConversationById(conversationId, (conversation) => ({
+      ...conversation,
+      title: conversation.title === '新对话' && firstUserMessage
+        ? titleFromMessage(firstUserMessage)
+        : conversation.title,
+      updatedAt: Date.now(),
+      providerLabel: currentProviderLabel,
+      model: currentModel,
+      messages: nextMessages,
+    }));
+  };
+
+  const handleCreateConversation = () => {
+    const conversation = createEmptyConversation(currentProviderLabel, currentModel);
+
+    setStoredConversationState((current) => {
+      const state = normalizeConversationState(current);
+
+      return {
+        activeId: conversation.id,
+        conversations: [conversation, ...state.conversations],
+      };
+    });
+    setDraft('');
+    setAttachments([]);
+    toast.success('已创建新对话');
+  };
+
+  const handleSwitchConversation = (conversationId: string) => {
+    if (conversationId === activeConversationId) {
+      return;
+    }
+
+    updateStoredConversationState((state) => ({
+      ...state,
+      activeId: conversationId,
+    }));
+    setDraft('');
+    setAttachments([]);
+  };
+
+  const handleDeleteConversation = (conversationId: string) => {
+    setStoredConversationState((current) => {
+      const state = normalizeConversationState(current);
+      const deleteIndex = state.conversations.findIndex(
+        (conversation) => conversation.id === conversationId
+      );
+      const remaining = state.conversations.filter(
+        (conversation) => conversation.id !== conversationId
+      );
+
+      if (remaining.length === 0) {
+        const nextConversation = createEmptyConversation(currentProviderLabel, currentModel);
+
+        return {
+          activeId: nextConversation.id,
+          conversations: [nextConversation],
+        };
+      }
+
+      return {
+        activeId: state.activeId === conversationId
+          ? remaining[Math.min(Math.max(deleteIndex, 0), remaining.length - 1)].id
+          : state.activeId,
+        conversations: remaining,
+      };
+    });
+
+    if (conversationId === activeConversationId) {
+      setDraft('');
+      setAttachments([]);
+    }
+
+    toast.success('对话已删除');
+  };
+
   const handleResetConfig = () => {
     if (!settings) {
       return;
@@ -631,11 +843,6 @@ export default function LlmChatPage () {
       reasoningEffort: 'medium',
     });
     toast.success('模型设置已重置');
-  };
-
-  const handleClearMessages = () => {
-    setMessages([]);
-    toast.success('会话已清空');
   };
 
   const appendFiles = async (fileList: File[]) => {
@@ -713,13 +920,15 @@ export default function LlmChatPage () {
       content: trimmedDraft,
       attachments: outgoingAttachments,
     };
-    const history: LlmConversationMessage[] = [...messages, userMessage].map((message) => ({
+    const targetConversationId = activeConversationId;
+    const optimisticMessages = [...messages, userMessage];
+    const history: LlmConversationMessage[] = optimisticMessages.map((message) => ({
       role: message.role,
       content: message.content,
       attachments: message.attachments,
     }));
 
-    setMessages((current) => [...current, userMessage]);
+    replaceConversationMessages(targetConversationId, optimisticMessages);
     setDraft('');
     setAttachments([]);
     setSubmitting(true);
@@ -737,26 +946,32 @@ export default function LlmChatPage () {
         reasoningEffort: supports.reasoningEffort ? config.reasoningEffort : undefined,
       });
 
-      setMessages((current) => [
-        ...current,
+      replaceConversationMessages(
+        targetConversationId,
+        [
+          ...optimisticMessages,
         {
           id: nextMessageId(),
           role: 'assistant',
           content: response.message,
           meta: `${response.model} · ${response.promptProfile}`,
         },
-      ]);
+        ],
+      );
     } catch (error) {
       const message = (error as Error).message;
       toast.error(`请求失败: ${message}`);
-      setMessages((current) => [
-        ...current,
+      replaceConversationMessages(
+        targetConversationId,
+        [
+          ...optimisticMessages,
         {
           id: nextMessageId(),
           role: 'system',
           content: message,
         },
-      ]);
+        ],
+      );
     } finally {
       setSubmitting(false);
     }
@@ -783,7 +998,7 @@ export default function LlmChatPage () {
               )}
               >
                 Ask LiteyukiBot
-                {settings?.promptProfile ? ` · Prompt ${settings.promptProfile}` : ''}
+                {settings?.promptProfile ? ` · 配置 ${settings.promptProfile}` : ''}
               </div>
             </div>
 
@@ -800,6 +1015,15 @@ export default function LlmChatPage () {
                 isIconOnly
                 radius='full'
                 variant='light'
+                aria-label='新建对话'
+                onPress={handleCreateConversation}
+              >
+                <LuPlus />
+              </Button>
+              <Button
+                isIconOnly
+                radius='full'
+                variant='light'
                 onPress={() => refreshSettings()}
                 isLoading={settingsLoading}
               >
@@ -809,8 +1033,8 @@ export default function LlmChatPage () {
                 isIconOnly
                 radius='full'
                 variant='light'
-                onPress={handleClearMessages}
-                isDisabled={messages.length === 0}
+                aria-label='删除当前对话'
+                onPress={() => handleDeleteConversation(activeConversationId)}
               >
                 <LuTrash2 />
               </Button>
@@ -825,7 +1049,105 @@ export default function LlmChatPage () {
                 : 'border-white/40 bg-white/60 dark:border-white/10 dark:bg-black/30'
             )}
           >
-            <div ref={listRef} className='flex-1 overflow-y-auto px-3 py-4 md:px-6 md:py-6'>
+            <div className='flex min-h-0 flex-1 flex-col md:flex-row'>
+              <aside
+                className={clsx(
+                  'shrink-0 border-b p-3 md:w-64 md:border-b-0 md:border-r',
+                  hasBackground
+                    ? 'border-white/10 bg-white/5'
+                    : 'border-white/20 bg-white/30 dark:bg-white/5'
+                )}
+              >
+                <div className='mb-3 flex items-center justify-between gap-2'>
+                  <div className={clsx(
+                    'text-xs font-semibold uppercase tracking-[0.18em]',
+                    hasBackground ? 'text-white/60' : 'text-default-400'
+                  )}
+                  >
+                    对话
+                  </div>
+                  <Button
+                    isIconOnly
+                    size='sm'
+                    radius='full'
+                    color='primary'
+                    variant='flat'
+                    aria-label='新建对话'
+                    onPress={handleCreateConversation}
+                  >
+                    <LuPlus />
+                  </Button>
+                </div>
+
+                <div className='flex gap-2 overflow-x-auto pb-1 md:max-h-[calc(100vh-17rem)] md:flex-col md:overflow-y-auto md:overflow-x-hidden md:pb-0'>
+                  {conversationState.conversations.map((conversation) => {
+                    const isActive = conversation.id === activeConversationId;
+
+                    return (
+                      <div
+                        key={conversation.id}
+                        className={clsx(
+                          'group flex min-w-56 items-center gap-2 rounded-2xl border p-2 transition md:min-w-0',
+                          isActive
+                            ? hasBackground
+                              ? 'border-white/30 bg-white/20 shadow-sm'
+                              : 'border-primary/20 bg-primary/10 shadow-sm'
+                            : hasBackground
+                              ? 'border-white/10 bg-white/5 hover:bg-white/10'
+                              : 'border-white/30 bg-white/45 hover:bg-white/75 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10'
+                        )}
+                      >
+                        <button
+                          type='button'
+                          className='min-w-0 flex-1 text-left'
+                          onClick={() => handleSwitchConversation(conversation.id)}
+                        >
+                          <div className={clsx(
+                            'truncate text-sm font-semibold',
+                            hasBackground ? 'text-white' : 'text-default-700 dark:text-default-100'
+                          )}
+                          >
+                            {conversation.title}
+                          </div>
+                          <div className={clsx(
+                            'mt-1 flex items-center gap-2 truncate text-xs',
+                            hasBackground ? 'text-white/55' : 'text-default-400'
+                          )}
+                          >
+                            <span>{conversation.messages.length} 条</span>
+                            <span>·</span>
+                            <span>{formatConversationTime(conversation.updatedAt)}</span>
+                          </div>
+                          <div className={clsx(
+                            'mt-1 truncate text-xs',
+                            hasBackground ? 'text-white/45' : 'text-default-400'
+                          )}
+                          >
+                            {conversation.model || currentModel || '未选择模型'}
+                          </div>
+                        </button>
+                        <Button
+                          isIconOnly
+                          size='sm'
+                          radius='full'
+                          variant='light'
+                          aria-label='删除对话'
+                          className={clsx(
+                            'shrink-0 opacity-70 transition group-hover:opacity-100',
+                            isActive && 'opacity-100'
+                          )}
+                          onPress={() => handleDeleteConversation(conversation.id)}
+                        >
+                          <LuTrash2 />
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </aside>
+
+              <div className='flex min-h-0 flex-1 flex-col'>
+                <div ref={listRef} className='flex-1 overflow-y-auto px-3 py-4 md:px-6 md:py-6'>
               {messages.length === 0
                 ? (
                   <div className='flex h-full items-center justify-center'>
@@ -976,6 +1298,8 @@ export default function LlmChatPage () {
             </div>
           </div>
         </div>
+        </div>
+        </div>
 
         <input
           ref={fileInputRef}
@@ -1123,7 +1447,7 @@ export default function LlmChatPage () {
                   </div>
 
                   <div className='rounded-2xl border border-default-200/60 bg-default-50/70 px-4 py-3 text-sm text-default-500 dark:border-white/10 dark:bg-white/5'>
-                    当前 Prompt Profile: {settings?.promptProfile || 'default'}
+                    当前配置档案: {settings?.promptProfile || 'default'}
                     <br />
                     附件支持:
                     {' '}
