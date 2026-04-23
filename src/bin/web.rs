@@ -1,27 +1,15 @@
-use std::sync::Arc;
-
 use liteyukibot_core::RuntimeTarget;
-use liteyukibot_core::app_host::EmbeddedAppHost;
-use liteyukibot_core::web_host::{WebHostService, WebHostSnapshotProvider};
-use liteyukibot_core::web_ui::{build_default_web_host_assets, build_default_web_host_config};
+use liteyukibot_core::web::runtime::EmbeddedWebRuntime;
 use liteyukibot_core::{LogLevel, emit_console_log};
 
 const DEFAULT_RUNTIME_TARGET: RuntimeTarget = RuntimeTarget::Web;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let app_host = EmbeddedAppHost::start_for_target(resolve_runtime_target())
+    let (app_host, server, listener) = EmbeddedWebRuntime::start(resolve_runtime_target())
         .await
-        .map_err(std::io::Error::other)?;
-    let snapshot_provider: WebHostSnapshotProvider = {
-        let app_host = app_host.clone();
-        Arc::new(move || app_host.snapshot())
-    };
-    let assets = build_default_web_host_assets();
-    let (server, listener) =
-        WebHostService::bind(build_default_web_host_config(), snapshot_provider, assets)
-            .map(|(server, listener)| (server.with_runtime_host(app_host.clone()), listener))
-            .map_err(std::io::Error::other)?;
+        .map_err(std::io::Error::other)?
+        .into_parts();
 
     emit_console_log(
         LogLevel::Info,

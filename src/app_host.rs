@@ -6,28 +6,19 @@ use serde::Serialize;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, get_current_pid};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::app_config::{
-    ensure_default_config_files, load_adapter_configs, prime_reload_warning_state,
-    resolve_app_locale, resolve_disabled_plugins, resolve_disabled_scope_commands,
-    resolve_help_whitelist, resolve_llm_config,
-};
 use crate::external_commands::{ExternalCommandObserver, install_external_event_handlers};
-use crate::i18n::{reload_catalog as reload_i18n_catalog, set_current_locale, tr, trf};
+use crate::i18n::{tr, trf};
 use crate::onebot_support::{payload_preview, should_hide_event_from_tui};
 use crate::runtime_support::{
-    EXTERNAL_API_TIMEOUT, ExternalGateway, ExternalGatewaySnapshot, LlmCommandRuntime,
-    apply_runtime_log_overrides_from_app_config, dedup_warnings, describe_runtime_config,
-    ensure_default_llm_config_file, load_app_config_with_llm_overlay, resolve_builtin_plugin_dirs,
-    resolve_password_config_path,
+    EXTERNAL_API_TIMEOUT, ExternalGatewaySnapshot, describe_runtime_config,
+    prepare_runtime_bootstrap,
 };
 #[cfg(test)]
 use crate::runtime_support::{
-    push_explicit_plugin_dir_candidates, push_runtime_plugin_dir_candidates,
+    dedup_warnings, push_explicit_plugin_dir_candidates, push_runtime_plugin_dir_candidates,
 };
-use crate::superuser::SuperuserManager;
 use crate::{
-    AdapterConfig, LiteyukiBot, LogLevel, PluginCatalogEntry, RuntimeSettings, RuntimeTarget,
-    emit_console_log,
+    AdapterConfig, LiteyukiBot, LogLevel, PluginCatalogEntry, RuntimeTarget, emit_console_log,
 };
 #[cfg(test)]
 use std::collections::HashSet;
@@ -262,85 +253,28 @@ pub struct EmbeddedAppHost {
 
 impl EmbeddedAppHost {
     pub async fn start_for_target(target: RuntimeTarget) -> Result<Self, String> {
-        if let Err(err) = ensure_default_config_files() {
-            emit_console_log(
-                LogLevel::Warn,
-                "app.host",
-                trf(
-                    "startup.ensure_default_config_failed",
-                    &[("err", err.to_string().as_str())],
-                ),
-            );
-        }
-        if let Err(err) = ensure_default_llm_config_file() {
-            emit_console_log(
-                LogLevel::Warn,
-                "app.host",
-                trf(
-                    "startup.ensure_default_llm_config_failed",
-                    &[("err", err.as_str())],
-                ),
-            );
-        }
-
-        let settings = match RuntimeSettings::try_load() {
-            Ok(settings) => settings,
-            Err(err) => {
-                emit_console_log(
-                    LogLevel::Warn,
-                    "app.host",
-                    trf(
-                        "startup.runtime_settings_fallback",
-                        &[("err", err.to_string().as_str())],
-                    ),
-                );
-                RuntimeSettings::default()
-            }
-        };
-        let _ = settings.clone().install_global();
-        let mut runtime_config = RuntimeSettings::global_runtime_config().clone();
-        runtime_config.logger.min_level = LogLevel::Error;
-
-        let (app_config, mut warnings) = load_app_config_with_llm_overlay();
-        prime_reload_warning_state(&app_config);
-        apply_runtime_log_overrides_from_app_config(&mut runtime_config, &app_config);
-        let effective_runtime_config = target.tune_runtime_config(runtime_config.clone());
-        let adapter_configs = load_adapter_configs(&app_config)
-            .map_err(|err| format!("failed to load adapters: {err}"))?;
-        let adapter_autostart = !adapter_configs.is_empty();
-        let help_whitelist = Arc::new(RwLock::new(resolve_help_whitelist(&app_config)));
-        let locale = resolve_app_locale(&app_config);
-        let llm_config = resolve_llm_config(&app_config);
-        let disabled_commands = resolve_disabled_scope_commands(&app_config);
-        let disabled_plugins = resolve_disabled_plugins(&app_config);
-        let llm_runtime = LlmCommandRuntime::new(llm_config.command_prefix.clone());
-        let external_gateway = ExternalGateway::new();
-        let plugin_dirs = resolve_builtin_plugin_dirs();
-        set_current_locale(locale);
-        warnings.extend(reload_i18n_catalog(plugin_dirs.iter()));
-        warnings = dedup_warnings(warnings);
-
-        let superuser_manager =
-            match SuperuserManager::load_or_init(resolve_password_config_path().as_path()) {
-                Ok(manager) => manager,
-                Err(err) => {
-                    emit_console_log(
-                        LogLevel::Warn,
-                        "app.host",
-                        trf(
-                            "startup.password_config_fallback",
-                            &[("err", err.to_string().as_str())],
-                        ),
-                    );
-                    SuperuserManager::in_memory()
-                }
-            };
+        let bootstrap = prepare_runtime_bootstrap(target, |warning| {
+            emit_console_log(LogLevel::Warn, "app.host", warning);
+        })?;
+        let effective_runtime_config = bootstrap.effective_runtime_config.clone();
+        let runtime_config = bootstrap.runtime_config;
+        let adapter_configs = bootstrap.adapter_configs;
+        let adapter_autostart = bootstrap.adapter_autostart;
+        let help_whitelist = bootstrap.help_whitelist;
+        let locale = bootstrap.locale;
+        let llm_runtime = bootstrap.llm_runtime;
+        let external_gateway = bootstrap.external_gateway;
+        let plugin_dirs = bootstrap.plugin_dirs;
+        let disabled_commands = bootstrap.disabled_commands;
+        let disabled_plugins = bootstrap.disabled_plugins;
+        let superuser_manager = bootstrap.superuser_manager;
+        let warnings = bootstrap.warnings;
 
         let state = Arc::new(RwLock::new(AppHostState::new(AppHostStateSnapshot {
             app_name: APP_TITLE.to_string(),
             status: "starting".to_string(),
             runtime_target: runtime_target_name(target).to_string(),
-            locale: locale.as_str().to_string(),
+            locale,
             runtime_config: describe_runtime_config(&effective_runtime_config),
             adapter_count: adapter_configs.len(),
             adapter_autostart,

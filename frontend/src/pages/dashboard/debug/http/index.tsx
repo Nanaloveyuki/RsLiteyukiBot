@@ -15,6 +15,8 @@ import type { CommandPaletteCommand, CommandPaletteExecuteMode } from '@/compone
 
 import { generateDefaultFromTypeBox } from '@/utils/typebox';
 import type { OneBotApiDebugRef } from '@/components/onebot/api/debug';
+import { buildBearerAuthHeader } from '@/utils/auth';
+import { resolveApiUrl } from '@/utils/runtime';
 
 export default function HttpDebug () {
   const [activeApi, setActiveApi] = useState<OneBotHttpApiPath | null>(null);
@@ -49,11 +51,11 @@ export default function HttpDebug () {
       try {
         const [apiData] = await Promise.all([
           fetchOneBotHttpApi(),
-          fetch('/api/Debug/create', {
+          fetch(resolveApiUrl('/Debug/create'), {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              Authorization: `Bearer ${localStorage.getItem('token')}`,
+              ...buildBearerAuthHeader(),
             },
           }).then(res => res.json()).then(data => {
             if (data.code === 0) {

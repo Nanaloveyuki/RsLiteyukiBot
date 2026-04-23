@@ -1,4 +1,6 @@
 import { serverRequest } from '@/utils/request';
+import { readStoredAuthToken } from '@/utils/auth';
+import { resolveRuntimeWebSocketUrl } from '@/utils/runtime';
 
 type TerminalCallback = (data: string) => void;
 
@@ -52,11 +54,9 @@ class TerminalManager {
     let conn = this.connections.get(id);
     const { cols = 80, rows = 24 } = config || {};
     if (!conn) {
-      const url = new URL(window.location.href);
-      url.protocol = url.protocol.replace('http', 'ws');
-      url.pathname = '/api/ws/terminal';
+      const url = new URL(resolveRuntimeWebSocketUrl('/api/ws/terminal'));
       url.searchParams.set('id', id);
-      const token = JSON.parse(localStorage.getItem('token') || '');
+      const token = readStoredAuthToken();
       if (!token) {
         throw new Error('No token found');
       }

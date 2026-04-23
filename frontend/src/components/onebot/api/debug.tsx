@@ -20,6 +20,8 @@ import CodeEditor from '@/components/code_editor';
 import PageLoading from '@/components/page_loading';
 
 import { request } from '@/utils/request';
+import { buildBearerAuthHeader, normalizeStoredStringValue, readStoredAuthToken } from '@/utils/auth';
+import { resolveRuntimeApiBase } from '@/utils/runtime';
 
 import { BaseResponseSchema, parseTypeBox, generateDefaultFromTypeBox } from '@/utils/typebox';
 import { Type } from '@sinclair/typebox';
@@ -40,10 +42,8 @@ export interface OneBotApiDebugRef {
 
 const OneBotApiDebug = forwardRef<OneBotApiDebugRef, OneBotApiDebugProps>((props, ref) => {
   const { path, data, adapterName } = props;
-  const currentURL = new URL(window.location.origin);
-  currentURL.port = '3000';
-  const defaultHttpUrl = currentURL.href;
-  const defaultToken = localStorage.getItem('token') || '';
+  const defaultHttpUrl = resolveRuntimeApiBase() ?? 'http://127.0.0.1:14500';
+  const defaultToken = readStoredAuthToken() ?? '';
   const [httpConfig, setHttpConfig] = useLocalStorage(key.httpDebugConfig, {
     url: defaultHttpUrl,
     token: defaultToken,
@@ -102,7 +102,7 @@ const OneBotApiDebug = forwardRef<OneBotApiDebugRef, OneBotApiDebugProps>((props
           params: parsedRequestBody,
         }, {
           headers: {
-            Authorization: `Bearer ${localStorage.getItem('token')}`,
+            ...buildBearerAuthHeader(),
           },
         }).then((res) => {
           if (res.data.code === 0) {
@@ -132,7 +132,7 @@ const OneBotApiDebug = forwardRef<OneBotApiDebugRef, OneBotApiDebugProps>((props
       request
         .post(requestURL.href, parsedRequestBody, {
           headers: {
-            Authorization: `Bearer ${httpConfig.token}`,
+            ...buildBearerAuthHeader(httpConfig.token),
           },
         }) // 移除 responseType: 'text'，以便 axios 自动解析 JSON
         .then((res) => {
@@ -175,6 +175,13 @@ const OneBotApiDebug = forwardRef<OneBotApiDebugRef, OneBotApiDebugProps>((props
       setActiveTab('request');
     },
   }));
+
+  useEffect(() => {
+    const normalizedToken = normalizeStoredStringValue(httpConfig.token) ?? '';
+    if (normalizedToken !== httpConfig.token) {
+      setHttpConfig({ ...httpConfig, token: normalizedToken });
+    }
+  }, [httpConfig, setHttpConfig]);
 
   useEffect(() => {
     if (data?.payloadExample) {

@@ -1,4 +1,6 @@
 import { TSchema } from '@sinclair/typebox';
+import { buildBearerAuthHeader } from '@/utils/auth';
+import { resolveApiUrl } from '@/utils/runtime';
 
 export interface OneBotHttpApiContent {
   description?: string;
@@ -14,10 +16,8 @@ let oneBotHttpApi: OneBotHttpApi = {};
 
 export async function fetchOneBotHttpApi (): Promise<OneBotHttpApi> {
   try {
-    const response = await fetch('/api/Debug/schemas', {
-      headers: {
-        Authorization: `Bearer ${localStorage.getItem('token')}`,
-      },
+    const response = await fetch(resolveApiUrl('/Debug/schemas'), {
+      headers: buildBearerAuthHeader(),
     });
     const data = await response.json();
     if (data.code === 0) {

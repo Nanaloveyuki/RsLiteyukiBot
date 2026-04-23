@@ -207,20 +207,14 @@ fn parse_multipart_boundary(content_type: &str) -> Option<String> {
 }
 
 fn parse_content_disposition_param(disposition: &str, name: &str) -> Option<String> {
-    disposition
-        .split(';')
-        .map(str::trim)
-        .find_map(|segment| {
-            let value = segment.strip_prefix(&format!("{name}="))?;
-            Some(trim_http_quoted_string(value))
-        })
+    disposition.split(';').map(str::trim).find_map(|segment| {
+        let value = segment.strip_prefix(&format!("{name}="))?;
+        Some(trim_http_quoted_string(value))
+    })
 }
 
 fn trim_http_quoted_string(value: &str) -> String {
-    value
-        .trim()
-        .trim_matches('"')
-        .replace("\\\"", "\"")
+    value.trim().trim_matches('"').replace("\\\"", "\"")
 }
 
 fn find_all_subslices(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
@@ -238,7 +232,9 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
     }
-    haystack.windows(needle.len()).position(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 pub(super) async fn read_http_request(socket: &mut TcpStream) -> io::Result<Vec<u8>> {

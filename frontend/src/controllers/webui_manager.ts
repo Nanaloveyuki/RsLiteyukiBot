@@ -2,13 +2,19 @@ import CryptoJS from 'crypto-js';
 import { EventSourcePolyfill } from 'event-source-polyfill';
 
 import { LogLevel } from '@/const/enum';
+import { buildBearerAuthHeader, readStoredAuthToken } from '@/utils/auth';
 import { parseLogLevel } from '@/utils/terminal';
+import { resolveApiUrl } from '@/utils/runtime';
 
 import { serverRequest } from '@/utils/request';
 
 export interface Log {
   level: LogLevel;
   message: string;
+}
+
+export interface EventStreamHandle {
+  close: () => void;
 }
 
 function parseRealtimeLogBatch(message: string, fallbackLevel: LogLevel) {
@@ -21,6 +27,81 @@ function parseRealtimeLogBatch(message: string, fallbackLevel: LogLevel) {
       level: parseLogLevel(line, fallbackLevel),
       message: line,
     }));
+}
+
+function createManagedEventSource (
+  path: string,
+  onMessage: (event: MessageEvent<string>) => void
+): EventStreamHandle {
+  let eventSource: EventSourcePolyfill | null = null;
+  let reconnectTimer: number | null = null;
+  let closed = false;
+  let retryDelayMs = 1000;
+
+  const clearReconnectTimer = () => {
+    if (reconnectTimer !== null) {
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  };
+
+  const scheduleReconnect = () => {
+    if (closed || reconnectTimer !== null) {
+      return;
+    }
+
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, retryDelayMs);
+    retryDelayMs = Math.min(retryDelayMs * 2, 10000);
+  };
+
+  const connect = () => {
+    if (closed) {
+      return;
+    }
+
+    const token = readStoredAuthToken();
+    if (!token) {
+      scheduleReconnect();
+      return;
+    }
+
+    eventSource = new EventSourcePolyfill(resolveApiUrl(path), {
+      headers: {
+        ...buildBearerAuthHeader(token),
+        Accept: 'text/event-stream',
+      },
+      withCredentials: true,
+    });
+
+    eventSource.onopen = () => {
+      retryDelayMs = 1000;
+    };
+
+    eventSource.onmessage = (event) => {
+      onMessage(event as MessageEvent<string>);
+    };
+
+    eventSource.onerror = (error) => {
+      console.error('SSE连接出错:', error);
+      eventSource?.close();
+      eventSource = null;
+      scheduleReconnect();
+    };
+  };
+
+  connect();
+
+  return {
+    close: () => {
+      closed = true;
+      clearReconnectTimer();
+      eventSource?.close();
+      eventSource = null;
+    },
+  };
 }
 
 export default class WebUIManager {
@@ -200,21 +281,11 @@ export default class WebUIManager {
     return data.data;
   }
 
-  public static getRealTimeLogs (writer: (data: Log[]) => void) {
-    const token = localStorage.getItem('token');
-    if (!token) {
+  public static getRealTimeLogs (writer: (data: Log[]) => void): EventStreamHandle {
+    if (!readStoredAuthToken()) {
       throw new Error('未登录');
     }
-    const _token = JSON.parse(token);
-    const eventSource = new EventSourcePolyfill('/api/Log/GetLogRealTime', {
-      headers: {
-        Authorization: `Bearer ${_token}`,
-        Accept: 'text/event-stream',
-      },
-      withCredentials: true,
-    });
-
-    eventSource.onmessage = (event) => {
+    return createManagedEventSource('/Log/GetLogRealTime', (event) => {
       try {
         const data = JSON.parse(event.data) as Log;
         const logs = parseRealtimeLogBatch(data.message, data.level);
@@ -224,48 +295,21 @@ export default class WebUIManager {
       } catch (error) {
         console.error(error);
       }
-    };
-
-    eventSource.onerror = (error) => {
-      console.error('SSE连接出错:', error);
-      eventSource.close();
-    };
-
-    return eventSource;
+    });
   }
 
-  public static getSystemStatus (writer: (data: SystemStatus) => void) {
-    const token = localStorage.getItem('token');
-    if (!token) {
+  public static getSystemStatus (writer: (data: SystemStatus) => void): EventStreamHandle {
+    if (!readStoredAuthToken()) {
       throw new Error('未登录');
     }
-    const _token = JSON.parse(token);
-    const eventSource = new EventSourcePolyfill(
-      '/api/base/GetSysStatusRealTime',
-      {
-        headers: {
-          Authorization: `Bearer ${_token}`,
-          Accept: 'text/event-stream',
-        },
-        withCredentials: true,
-      }
-    );
-
-    eventSource.onmessage = (event) => {
+    return createManagedEventSource('/base/GetSysStatusRealTime', (event) => {
       try {
         const data = JSON.parse(event.data) as SystemStatus;
         writer(data);
       } catch (error) {
         console.error(error);
       }
-    };
-
-    eventSource.onerror = (error) => {
-      console.error('SSE连接出错:', error);
-      eventSource.close();
-    };
-
-    return eventSource;
+    });
   }
 
   // 获取WebUI基础配置

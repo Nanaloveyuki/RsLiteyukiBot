@@ -17,6 +17,7 @@ import { ThemeSwitch } from '@/components/theme-switch';
 
 import WebUIManager from '@/controllers/webui_manager';
 import PureLayout from '@/layouts/pure';
+import { resolveApiUrl } from '@/utils/runtime';
 import { motion } from 'motion/react';
 
 /** Global injected by the Tauri init script — present only in desktop mode. */
@@ -120,7 +121,7 @@ export default function WebLoginPage () {
       //    The backend only returns the token when the TCP peer is loopback.
       //    The returned token is the credential — use it directly.
       try {
-        const res = await fetch('/api/auth/local-token', { method: 'GET' });
+        const res = await fetch(resolveApiUrl('/auth/local-token'), { method: 'GET' });
         if (res.ok) {
           const json = await res.json();
           if (json?.code === 0 && json?.data?.token) {

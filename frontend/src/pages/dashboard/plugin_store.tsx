@@ -19,6 +19,8 @@ import PluginDetailModal from '@/pages/dashboard/plugin_detail_modal';
 import { PluginStoreItem } from '@/types/plugin-store';
 import useDialog from '@/hooks/use-dialog';
 import key from '@/const/key';
+import { buildBearerAuthHeader, readStoredAuthToken } from '@/utils/auth';
+import { resolveApiUrl } from '@/utils/runtime';
 
 /** Fisher-Yates 洗牌算法，返回新数组 */
 function shuffleArray<T> (arr: T[]): T[] {
@@ -226,12 +228,11 @@ export default function PluginStorePage () {
 
     try {
       // 获取认证 token
-      const token = localStorage.getItem(key.token);
+      const token = readStoredAuthToken();
       if (!token) {
         toast.error('未登录，请先登录', { id: loadingToast });
         return;
       }
-      const _token = JSON.parse(token);
 
       const params = new URLSearchParams({ id: pluginId });
       if (mirror) {
@@ -239,10 +240,10 @@ export default function PluginStorePage () {
       }
 
       const eventSource = new EventSourcePolyfill(
-        `/api/Plugin/Store/Install/SSE?${params.toString()}`,
+        resolveApiUrl(`/Plugin/Store/Install/SSE?${params.toString()}`),
         {
           headers: {
-            Authorization: `Bearer ${_token}`,
+            ...buildBearerAuthHeader(token),
             Accept: 'text/event-stream',
           },
           withCredentials: true,

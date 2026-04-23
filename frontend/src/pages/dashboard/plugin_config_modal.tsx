@@ -7,7 +7,8 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import toast from '@/utils/toast';
 import { EventSourcePolyfill } from 'event-source-polyfill';
 import PluginManager, { PluginConfigSchemaItem } from '@/controllers/plugin_manager';
-import key from '@/const/key';
+import { buildBearerAuthHeader, readStoredAuthToken } from '@/utils/auth';
+import { resolveRuntimeHttpUrl } from '@/utils/runtime';
 
 interface Props {
   isOpen: boolean;
@@ -112,17 +113,16 @@ export default function PluginConfigModal ({ isOpen, onOpenChange, pluginId }: P
       eventSourceRef.current.close();
     }
 
-    const token = localStorage.getItem(key.token);
+    const token = readStoredAuthToken();
     if (!token) {
       console.warn('未登录，无法建立 SSE 连接');
       return;
     }
-    const _token = JSON.parse(token);
 
     const url = PluginManager.getConfigSSEUrl(pluginId, initialConfig);
-    const es = new EventSourcePolyfill(url, {
+    const es = new EventSourcePolyfill(resolveRuntimeHttpUrl(url), {
       headers: {
-        Authorization: `Bearer ${_token}`,
+        ...buildBearerAuthHeader(token),
         Accept: 'text/event-stream',
       },
       withCredentials: true,

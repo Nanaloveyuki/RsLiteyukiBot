@@ -27,6 +27,7 @@ __pycache__/
 /plugins/
 .npm-cache/
 .pnpm-store/
+.pnpm-tmp/
 
 #config
 /config/

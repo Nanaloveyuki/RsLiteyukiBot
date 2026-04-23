@@ -19,6 +19,9 @@ mod onebot_support;
 #[path = "../src/runtime_support.rs"]
 mod runtime_support;
 #[allow(dead_code, unused_imports)]
+#[path = "../src/superuser.rs"]
+mod superuser;
+#[allow(dead_code, unused_imports)]
 #[path = "../src/tui/mod.rs"]
 mod tui;
 

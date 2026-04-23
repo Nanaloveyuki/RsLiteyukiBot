@@ -1,6 +1,7 @@
 import { EventSourcePolyfill } from 'event-source-polyfill';
 import { serverRequest } from '@/utils/request';
-import key from '@/const/key';
+import { buildBearerAuthHeader, readStoredAuthToken } from '@/utils/auth';
+import { resolveApiUrl } from '@/utils/runtime';
 
 export interface MirrorTestResult {
   mirror: string;
@@ -53,17 +54,16 @@ export default class MirrorManager {
       onError?: (error: string) => void;
     }
   ): EventSourcePolyfill {
-    const token = localStorage.getItem(key.token);
+    const token = readStoredAuthToken();
     if (!token) {
       throw new Error('未登录');
     }
-    const _token = JSON.parse(token);
 
     const eventSource = new EventSourcePolyfill(
-      `/api/Mirror/Test/SSE?type=${type}`,
+      resolveApiUrl(`/Mirror/Test/SSE?type=${type}`),
       {
         headers: {
-          Authorization: `Bearer ${_token}`,
+          ...buildBearerAuthHeader(token),
           Accept: 'text/event-stream',
         },
         withCredentials: true,

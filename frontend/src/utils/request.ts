@@ -1,6 +1,7 @@
 import axios from 'axios';
 
 import key from '@/const/key';
+import { resolveApiUrl, resolveRuntimeHttpUrl } from '@/utils/runtime';
 
 export const serverRequest = axios.create({
   timeout: 30000, // 30秒，获取版本列表可能较慢
@@ -23,22 +24,28 @@ export const requestServerWithFetch = async (
     };
   }
 
-  const baseURL = '/api';
-
-  const response = await fetch(baseURL + url, options);
+  const response = await fetch(resolveApiUrl(url), options);
 
   return response;
 };
 
 serverRequest.interceptors.request.use((config) => {
-  const baseURL = '/api';
-
-  config.baseURL = baseURL;
+  if (config.url) {
+    config.url = resolveApiUrl(config.url);
+  }
 
   const token = localStorage.getItem(key.token);
 
   if (token) {
     config.headers['Authorization'] = `Bearer ${JSON.parse(token)}`;
+  }
+
+  return config;
+});
+
+request.interceptors.request.use((config) => {
+  if (config.url?.startsWith('/')) {
+    config.url = resolveRuntimeHttpUrl(config.url);
   }
 
   return config;

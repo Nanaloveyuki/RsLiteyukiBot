@@ -1,13 +1,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use liteyukibot_core::app_host::EmbeddedAppHost;
-use liteyukibot_core::web_host::{
-    WebHostService, WebHostSnapshotProvider,
-};
 use liteyukibot_core::web_ui::{
-    APP_SHELL_WINDOW_ICON_ICO, build_default_web_host_assets, build_default_web_host_config,
+    APP_SHELL_WINDOW_ICON_ICO,
 };
+use liteyukibot_core::web::runtime::EmbeddedWebRuntime;
 use liteyukibot_core::{LogLevel, RuntimeTarget, emit_console_log};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
@@ -25,22 +22,10 @@ const LOCAL_TOKEN_GLOBAL: &str = "__LITEYUKI_LOCAL_TOKEN__";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app_host = tauri::async_runtime::block_on(EmbeddedAppHost::start_for_target(
-        RuntimeTarget::Tauri2,
-    ))
-    .unwrap_or_else(|err| panic!("failed to bootstrap embedded app host: {err}"));
-    let snapshot_provider: WebHostSnapshotProvider = {
-        let app_host = app_host.clone();
-        Arc::new(move || app_host.snapshot())
-    };
-    let assets = build_default_web_host_assets();
-    let (server, listener) = tauri::async_runtime::block_on(async {
-        WebHostService::bind(build_default_web_host_config(), snapshot_provider, assets)
-    })
-    .map(|(server, listener)| (server.with_runtime_host(app_host.clone()), listener))
-    .unwrap_or_else(|err| {
-        panic!("failed to bootstrap shared HTTP host: {err}");
-    });
+    let (app_host, server, listener) =
+        tauri::async_runtime::block_on(EmbeddedWebRuntime::start(RuntimeTarget::Tauri2))
+            .unwrap_or_else(|err| panic!("failed to bootstrap shared HTTP runtime: {err}"))
+            .into_parts();
     let server_for_task = server.clone();
 
     tauri::async_runtime::spawn(async move {

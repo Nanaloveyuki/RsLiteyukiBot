@@ -14,24 +14,30 @@ import OneBotSendModal from '@/components/onebot/send_modal';
 import WSStatus from '@/components/onebot/ws_status';
 
 import { useWebSocketDebug } from '@/hooks/use-websocket-debug';
+import { buildBearerAuthHeader, normalizeStoredStringValue, readStoredAuthToken } from '@/utils/auth';
+import { resolveApiUrl, resolveRuntimeWebSocketUrl } from '@/utils/runtime';
 
 export default function WSDebug () {
-  const url = new URL(window.location.origin);
-  url.port = '3001';
-  url.protocol = 'ws:';
-  const defaultWsUrl = url.href;
+  const defaultWsUrl = resolveRuntimeWebSocketUrl('/api/Debug/ws');
   const [socketConfig, setSocketConfig] = useLocalStorage(key.wsDebugConfig, {
     url: defaultWsUrl,
-    token: '',
+    token: readStoredAuthToken() ?? '',
   });
   const [inputUrl, setInputUrl] = useState(socketConfig.url);
-  const [inputToken, setInputToken] = useState(socketConfig.token);
+  const [inputToken, setInputToken] = useState(normalizeStoredStringValue(socketConfig.token) ?? '');
   const [shouldConnect, setShouldConnect] = useState(false);
   const [backgroundImage] = useLocalStorage<string>(key.backgroundImage, '');
   const hasBackground = !!backgroundImage;
 
   const { sendMessage, readyState, FilterMessagesType, filteredMessages, clearMessages } =
-    useWebSocketDebug(socketConfig.url, socketConfig.token, shouldConnect);
+    useWebSocketDebug(socketConfig.url, normalizeStoredStringValue(socketConfig.token) ?? '', shouldConnect);
+
+  useEffect(() => {
+    const normalizedToken = normalizeStoredStringValue(socketConfig.token) ?? '';
+    if (normalizedToken !== socketConfig.token) {
+      setSocketConfig({ ...socketConfig, token: normalizedToken });
+    }
+  }, [setSocketConfig, socketConfig]);
 
   // Auto fetch adapter and set URL
   useEffect(() => {
@@ -41,28 +47,27 @@ export default function WSDebug () {
 
     if (!isDefaultUrl && !isWebDebugUrl) {
       setInputUrl(socketConfig.url);
-      setInputToken(socketConfig.token);
+      setInputToken(normalizeStoredStringValue(socketConfig.token) ?? '');
       return; // 已经有自定义/有效的配置，跳过自动创建
     }
 
     const initAdapter = async () => {
       try {
-        const response = await fetch('/api/Debug/create', {
+        const response = await fetch(resolveApiUrl('/Debug/create'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${localStorage.getItem('token')}`,
+            ...buildBearerAuthHeader(),
           },
         });
         const data = await response.json();
         if (data.code === 0) {
           // const adapterName = data.data.adapterName;
           const token = data.data.token;
-          const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 
           if (token) {
             // URL 中不再包含 Token，Token 单独放入输入框
-            const wsUrl = `${protocol}//${window.location.host}/api/Debug/ws`;
+            const wsUrl = resolveRuntimeWebSocketUrl('/api/Debug/ws');
 
             setSocketConfig({
               url: wsUrl,
@@ -84,8 +89,7 @@ export default function WSDebug () {
     // 允许以 / 开头的相对路径（如代理情况），以及标准的 ws/wss
     let finalUrl = inputUrl;
     if (finalUrl.startsWith('/')) {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      finalUrl = `${protocol}//${window.location.host}${finalUrl}`;
+      finalUrl = resolveRuntimeWebSocketUrl(finalUrl);
     }
 
     if (!finalUrl.startsWith('ws://') && !finalUrl.startsWith('wss://')) {

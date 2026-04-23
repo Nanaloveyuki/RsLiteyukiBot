@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,7 +11,12 @@ use argon2::password_hash::{PasswordHash, SaltString};
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+use super::{
+    HEALTH_ROUTE, extract_header, napcat_err, napcat_ok, napcat_response, parse_json_body,
+};
 
 const WEBUI_PASSWORD_FILENAME: &str = "password.json";
 const WEBUI_PASSWORD_VERSION: u8 = 1;
@@ -209,7 +215,9 @@ impl WebUiAuthManager {
         Self {
             inner: Arc::new(Mutex::new(WebUiAuthState {
                 path,
-                password_hash: document.password_hash.filter(|value| !value.trim().is_empty()),
+                password_hash: document
+                    .password_hash
+                    .filter(|value| !value.trim().is_empty()),
                 password_updated_at_ms: document.password_updated_at_ms,
                 bootstrap_login_token: generate_token(BOOTSTRAP_TOKEN_BYTES),
                 local_session_token: generate_token(SESSION_TOKEN_BYTES),
@@ -340,6 +348,136 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+pub(super) fn route_auth_api(
+    auth: &WebUiAuthManager,
+    api_path: &str,
+    request: &[u8],
+    peer_ip: IpAddr,
+    is_head: bool,
+) -> Option<Vec<u8>> {
+    if api_path == "/auth/state" {
+        let body = napcat_ok(&auth.status());
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/auth/local-token" {
+        if peer_ip.is_loopback() {
+            #[derive(Serialize)]
+            struct LocalTokenResponse<'a> {
+                token: &'a str,
+            }
+            let local_token = auth.local_session_token();
+            let body = napcat_ok(&LocalTokenResponse {
+                token: local_token.as_str(),
+            });
+            return Some(napcat_response(body, is_head));
+        }
+
+        let body = napcat_err(403, "Forbidden");
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/auth/login" {
+        let body = parse_json_body(request);
+        let result = body
+            .get("hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "token hash is required".to_string())
+            .and_then(|hash| auth.login_with_bootstrap_hash(hash));
+        return Some(napcat_response(login_response_payload(result), is_head));
+    }
+
+    if api_path == "/auth/login/password" {
+        let body = parse_json_body(request);
+        let result = body
+            .get("password")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "password is required".to_string())
+            .and_then(|password| auth.login_with_password(password));
+        return Some(napcat_response(login_response_payload(result), is_head));
+    }
+
+    if api_path == "/auth/update_token" || api_path == "/auth/update_password" {
+        let body = parse_json_body(request);
+        let current_session = bearer_token_from_request(request);
+        let old_password = body
+            .get("oldPassword")
+            .and_then(Value::as_str)
+            .or_else(|| body.get("oldToken").and_then(Value::as_str));
+        let new_password = body
+            .get("newPassword")
+            .and_then(Value::as_str)
+            .or_else(|| body.get("newToken").and_then(Value::as_str));
+        let body = match new_password {
+            Some(new_password) => {
+                match auth.update_password(current_session.as_deref(), old_password, new_password) {
+                    Ok(()) => napcat_ok(&true),
+                    Err(err) => napcat_err(-1, err.as_str()),
+                }
+            }
+            None => napcat_err(-1, "new password is required"),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/auth/passkey/generate-registration-options"
+        || api_path == "/auth/passkey/verify-registration"
+        || api_path == "/auth/passkey/generate-authentication-options"
+        || api_path == "/auth/passkey/verify-authentication"
+    {
+        let body = napcat_err(-1, "Passkey auth is not supported by the current runtime");
+        return Some(napcat_response(body, is_head));
+    }
+
+    None
+}
+
+pub(super) fn public_api_path(path: &str) -> bool {
+    matches!(
+        path,
+        HEALTH_ROUTE
+            | "/api/auth/check"
+            | "/api/auth/state"
+            | "/api/auth/local-token"
+            | "/api/auth/login"
+            | "/api/auth/login/password"
+    )
+}
+
+pub(super) fn bearer_token_from_request(request: &[u8]) -> Option<String> {
+    let request = String::from_utf8_lossy(request);
+    let header = extract_header(&request, "Authorization")?;
+    let (scheme, token) = header.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+pub(super) fn unauthorized_response(head_only: bool) -> Vec<u8> {
+    napcat_response(napcat_err(401, "Unauthorized"), head_only)
+}
+
+pub(super) fn request_is_authorized(auth: &WebUiAuthManager, request: &[u8]) -> bool {
+    bearer_token_from_request(request)
+        .map(|token| auth.is_session_token_valid(token.as_str()))
+        .unwrap_or(false)
+}
+
+fn login_response_payload(result: Result<String, String>) -> Vec<u8> {
+    #[derive(Serialize)]
+    struct AuthResponse {
+        #[serde(rename = "Credential")]
+        credential: String,
+    }
+
+    match result {
+        Ok(credential) => napcat_ok(&AuthResponse { credential }),
+        Err(err) => napcat_err(-1, err.as_str()),
+    }
 }
 
 #[cfg(test)]
