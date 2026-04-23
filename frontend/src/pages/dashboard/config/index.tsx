@@ -101,7 +101,7 @@ export default function ConfigPage () {
             <LoginConfigCard />
           </ConfigPageItem>
         </Tab>
-        <Tab title='修改密码' key='token'>
+        <Tab title='登录密码' key='token'>
           <ConfigPageItem size='sm'>
             <ChangePasswordCard />
           </ConfigPageItem>

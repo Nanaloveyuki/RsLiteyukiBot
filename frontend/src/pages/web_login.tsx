@@ -26,9 +26,12 @@ export default function WebLoginPage () {
   const urlSearchParams = new URLSearchParams(window.location.search);
   const urlToken = urlSearchParams.get('token');
   const [tokenValue, setTokenValue] = useState<string>(urlToken || '');
+  const [passwordValue, setPasswordValue] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   /** True while we are attempting the silent auto-login (Tauri token or local-token API). */
   const [isAutoLogging, setIsAutoLogging] = useState<boolean>(true);
+  const [authState, setAuthState] = useState<WebUiAuthState | null>(null);
+  const [loginMode, setLoginMode] = useState<'token' | 'password'>('token');
   const [, setLocalToken] = useLocalStorage<string>(key.token, '');
 
   // ── Core login helper ────────────────────────────────────────────────────
@@ -46,15 +49,13 @@ export default function WebLoginPage () {
   };
 
   const onSubmit = async () => {
-    if (!tokenValue) {
-      toast.error('请输入token');
-      return;
-    }
     setIsLoading(true);
     try {
-      const ok = await loginWithRawToken(tokenValue);
+      const ok = loginMode === 'password'
+        ? await loginWithRawPassword(passwordValue)
+        : await loginWithRawToken(tokenValue);
       if (!ok) {
-        toast.error('登录失败，请检查token');
+        toast.error(loginMode === 'password' ? '登录失败，请检查密码' : '登录失败，请检查token');
       }
     } catch (error) {
       toast.error((error as Error).message);
@@ -73,7 +74,7 @@ export default function WebLoginPage () {
   useEffect(() => {
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [tokenValue, isLoading, isAutoLogging]);
+  }, [tokenValue, passwordValue, isLoading, isAutoLogging, loginMode]);
 
   // ── Direct credential store (skips SHA256 + login round-trip) ───────────
   const storeCredentialAndNavigate = (credential: string) => {
@@ -86,6 +87,16 @@ export default function WebLoginPage () {
 
   // ── Auto-login on mount ──────────────────────────────────────────────────
   useEffect(() => {
+    const loadAuthState = async () => {
+      try {
+        const nextAuthState = await WebUIManager.getAuthState();
+        setAuthState(nextAuthState);
+        setLoginMode(nextAuthState.passwordConfigured ? 'password' : 'token');
+      } catch {
+        // leave defaults
+      }
+    };
+
     const tryAutoLogin = async () => {
       // 1. URL token (highest priority — e.g. deep-link from CLI)
       //    URL tokens are raw user tokens that must go through the login API.
@@ -122,8 +133,26 @@ export default function WebLoginPage () {
       }
     };
 
+    loadAuthState();
     tryAutoLogin().finally(() => setIsAutoLogging(false));
   }, []);
+
+  const loginWithRawPassword = async (rawPassword: string): Promise<boolean> => {
+    if (!rawPassword) {
+      toast.error('请输入密码');
+      return false;
+    }
+    try {
+      const credential = await WebUIManager.loginWithPassword(rawPassword);
+      if (credential) {
+        storeCredentialAndNavigate(credential);
+        return true;
+      }
+    } catch {
+      // fall through
+    }
+    return false;
+  };
 
   return (
     <>
@@ -159,6 +188,24 @@ export default function WebLoginPage () {
                   🔐 正在自动登录...
                 </div>
               )}
+              <div className='grid grid-cols-2 gap-2'>
+                <Button
+                  color={loginMode === 'token' ? 'primary' : 'default'}
+                  isDisabled={isLoading || isAutoLogging || authState?.tokenLoginEnabled === false}
+                  variant={loginMode === 'token' ? 'solid' : 'flat'}
+                  onPress={() => setLoginMode('token')}
+                >
+                  Token 登录
+                </Button>
+                <Button
+                  color={loginMode === 'password' ? 'primary' : 'default'}
+                  isDisabled={isLoading || isAutoLogging}
+                  variant={loginMode === 'password' ? 'solid' : 'flat'}
+                  onPress={() => setLoginMode('password')}
+                >
+                  密码登录
+                </Button>
+              </div>
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -178,7 +225,7 @@ export default function WebLoginPage () {
                 />
                 <Input
                   isClearable
-                  type='password'
+                  type={loginMode === 'password' ? 'password' : 'password'}
                   name='password'
                   autoComplete='current-password'
                   classNames={{
@@ -203,20 +250,36 @@ export default function WebLoginPage () {
                     ],
                   }}
                   isDisabled={isLoading || isAutoLogging}
-                  label='Token'
-                  placeholder='请输入token'
+                  label={loginMode === 'password' ? '密码' : 'Token'}
+                  placeholder={loginMode === 'password' ? '请输入密码' : '请输入token'}
                   radius='lg'
                   size='lg'
                   startContent={
                     <IoKeyOutline className='text-black/50 mb-0.5 dark:text-white/90 text-slate-400 pointer-events-none flex-shrink-0' />
                   }
-                  value={tokenValue}
-                  onChange={(e) => setTokenValue(e.target.value)}
-                  onClear={() => setTokenValue('')}
+                  value={loginMode === 'password' ? passwordValue : tokenValue}
+                  onChange={(e) => {
+                    if (loginMode === 'password') {
+                      setPasswordValue(e.target.value);
+                    } else {
+                      setTokenValue(e.target.value);
+                    }
+                  }}
+                  onClear={() => {
+                    if (loginMode === 'password') {
+                      setPasswordValue('');
+                    } else {
+                      setTokenValue('');
+                    }
+                  }}
                 />
               </form>
               <div className='text-center text-small text-default-600 dark:text-default-400 px-2'>
-                💡 提示：请从 LiteyukiBot 启动日志中查看登录密钥
+                {loginMode === 'password'
+                  ? '💡 提示：如果还没设置密码，请先使用启动 token 登录后在配置页完成定密'
+                  : (authState?.tokenLoginEnabled === false
+                      ? '🔒 当前已设置固定密码，远程 token 登录已停用；本机自动登录仍可用'
+                      : '💡 提示：请从 LiteyukiBot 启动日志中查看登录密钥')}
               </div>
               <Button
                 className='mx-10 mt-10 text-lg py-7'

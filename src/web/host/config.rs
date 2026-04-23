@@ -19,6 +19,29 @@ impl Default for ThemeConfigDoc {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(super) struct MirrorConfigDoc {
+    #[serde(rename = "fileMirrors")]
+    pub file_mirrors: Vec<String>,
+    #[serde(rename = "rawMirrors")]
+    pub raw_mirrors: Vec<String>,
+    #[serde(rename = "customMirror")]
+    pub custom_mirror: Option<String>,
+    pub timeout: u64,
+}
+
+impl Default for MirrorConfigDoc {
+    fn default() -> Self {
+        Self {
+            file_mirrors: default_file_mirrors(),
+            raw_mirrors: default_raw_mirrors(),
+            custom_mirror: None,
+            timeout: 5_000,
+        }
+    }
+}
+
 pub(super) fn state_path(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
@@ -46,7 +69,8 @@ fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
 }
 
 pub(super) fn load_webui_server_config(port: u16) -> NapCatWebUIConfig {
-    let mut config = read_json_file::<NapCatWebUIConfig>(state_path(WEBUI_SERVER_CONFIG_FILE).as_path());
+    let mut config =
+        read_json_file::<NapCatWebUIConfig>(state_path(WEBUI_SERVER_CONFIG_FILE).as_path());
     if config.host.trim().is_empty() {
         config.host = "0.0.0.0".to_string();
     }
@@ -61,6 +85,24 @@ pub(super) fn load_webui_server_config(port: u16) -> NapCatWebUIConfig {
 
 pub(super) fn save_webui_server_config(config: &NapCatWebUIConfig) -> Result<(), String> {
     write_json_file(state_path(WEBUI_SERVER_CONFIG_FILE).as_path(), config)
+}
+
+pub(super) fn load_mirror_config() -> MirrorConfigDoc {
+    let mut config = read_json_file::<MirrorConfigDoc>(state_path(MIRROR_CONFIG_FILE).as_path());
+    if config.file_mirrors.is_empty() {
+        config.file_mirrors = default_file_mirrors();
+    }
+    if config.raw_mirrors.is_empty() {
+        config.raw_mirrors = default_raw_mirrors();
+    }
+    if config.timeout == 0 {
+        config.timeout = 5_000;
+    }
+    config
+}
+
+pub(super) fn save_mirror_config(config: &MirrorConfigDoc) -> Result<(), String> {
+    write_json_file(state_path(MIRROR_CONFIG_FILE).as_path(), config)
 }
 
 pub(super) fn load_theme_config() -> ThemeConfigDoc {

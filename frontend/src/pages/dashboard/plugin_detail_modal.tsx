@@ -11,6 +11,7 @@ import { useState, useEffect } from 'react';
 import { PluginStoreItem } from '@/types/plugin-store';
 import { InstallStatus } from '@/components/display_card/plugin_store_card';
 import TailwindMarkdown from '@/components/tailwind_markdown';
+import { serverRequest } from '@/utils/request';
 
 interface PluginDetailModalProps {
   isOpen: boolean;
@@ -76,15 +77,10 @@ function extractGitHubRepo (url?: string): { owner: string; repo: string; } | nu
 
 /** 从 GitHub API 获取 README */
 async function fetchGitHubReadme (owner: string, repo: string): Promise<string> {
-  const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/readme`, {
-    headers: {
-      Accept: 'application/vnd.github.v3.raw',
-    },
+  const response = await serverRequest.get<ServerResponse<{ content: string; }>>('/base/GetGitHubReadme', {
+    params: { owner, repo },
   });
-  if (!response.ok) {
-    throw new Error('Failed to fetch README');
-  }
-  return response.text();
+  return response.data.data.content;
 }
 
 /** 清理 README 中的 HTML 标签，保留 Markdown */

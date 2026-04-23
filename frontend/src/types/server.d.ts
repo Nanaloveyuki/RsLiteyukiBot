@@ -8,6 +8,11 @@ interface AuthResponse {
   Credential: string;
 }
 
+interface WebUiAuthState {
+  passwordConfigured: boolean;
+  tokenLoginEnabled: boolean;
+}
+
 interface LoginListItem {
   uin: string;
   uid: string;

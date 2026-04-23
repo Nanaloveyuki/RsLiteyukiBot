@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::host::{WebHostAsset, WebHostAssets, WebHostConfig, WebHostDevServer};
+use crate::{AdapterConfig, AdapterEndpoint, AdapterRoute, AdapterTransport};
 
 pub const APP_SHELL_PLACEHOLDER_HTML: &str =
     include_str!("../../assets/app-shell/placeholder.html");
@@ -298,6 +299,136 @@ impl Default for OneBotConfig {
             timeout: OneBotTimeoutConfig::default(),
         }
     }
+}
+
+impl OneBotConfig {
+    pub fn to_runtime_adapter_configs(&self) -> Result<Vec<AdapterConfig>, String> {
+        let mut adapters = Vec::new();
+
+        for config in &self.network.http_servers {
+            if config.base.enable {
+                return Err(format!(
+                    "network.httpServers '{}' is not supported by the current runtime",
+                    config.base.name
+                ));
+            }
+        }
+
+        for config in &self.network.http_sse_servers {
+            if !config.server.base.enable {
+                continue;
+            }
+            adapters.push(AdapterConfig {
+                id: config.server.base.name.clone(),
+                enabled: true,
+                transport: AdapterTransport::Sse,
+                endpoint: AdapterEndpoint {
+                    url: format_http_bind_url(
+                        config.server.host.as_str(),
+                        config.server.port,
+                        "/sse",
+                    ),
+                    headers: Default::default(),
+                    token: non_empty_token(config.server.base.token.as_str()),
+                    timeout_ms: self.timeout.base_timeout.max(10),
+                },
+                route: AdapterRoute::default(),
+                queue_capacity: 256,
+                max_payload_size: None,
+                max_connections: None,
+            });
+        }
+
+        for config in &self.network.http_clients {
+            if !config.base.enable {
+                continue;
+            }
+            adapters.push(AdapterConfig {
+                id: config.base.name.clone(),
+                enabled: true,
+                transport: AdapterTransport::Http,
+                endpoint: AdapterEndpoint {
+                    url: config.url.clone(),
+                    headers: Default::default(),
+                    token: non_empty_token(config.base.token.as_str()),
+                    timeout_ms: self.timeout.base_timeout.max(10),
+                },
+                route: AdapterRoute::default(),
+                queue_capacity: 256,
+                max_payload_size: None,
+                max_connections: None,
+            });
+        }
+
+        for config in &self.network.websocket_clients {
+            if !config.base.enable {
+                continue;
+            }
+            adapters.push(AdapterConfig {
+                id: config.base.name.clone(),
+                enabled: true,
+                transport: AdapterTransport::WebSocketForward,
+                endpoint: AdapterEndpoint {
+                    url: config.url.clone(),
+                    headers: Default::default(),
+                    token: non_empty_token(config.base.token.as_str()),
+                    timeout_ms: self.timeout.base_timeout.max(10),
+                },
+                route: AdapterRoute::default(),
+                queue_capacity: 256,
+                max_payload_size: None,
+                max_connections: None,
+            });
+        }
+
+        for config in &self.network.websocket_servers {
+            if !config.base.enable {
+                continue;
+            }
+            adapters.push(AdapterConfig {
+                id: config.base.name.clone(),
+                enabled: true,
+                transport: AdapterTransport::WebSocketReverse,
+                endpoint: AdapterEndpoint {
+                    url: format_websocket_bind_url(config.host.as_str(), config.port),
+                    headers: Default::default(),
+                    token: non_empty_token(config.base.token.as_str()),
+                    timeout_ms: self.timeout.base_timeout.max(10),
+                },
+                route: AdapterRoute::default(),
+                queue_capacity: 256,
+                max_payload_size: None,
+                max_connections: None,
+            });
+        }
+
+        adapters.sort_by(|left, right| left.id.cmp(&right.id));
+        for adapter in &adapters {
+            adapter
+                .validate()
+                .map_err(|err| format!("adapter '{}' is invalid: {err}", adapter.id))?;
+        }
+
+        Ok(adapters)
+    }
+}
+
+fn non_empty_token(raw: &str) -> Option<String> {
+    let token = raw.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+fn format_websocket_bind_url(host: &str, port: u16) -> String {
+    format!("ws://{}:{}/", host.trim(), port)
+}
+
+fn format_http_bind_url(host: &str, port: u16, path: &str) -> String {
+    let normalized_path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    format!("http://{}:{}{}", host.trim(), port, normalized_path)
 }
 
 pub fn build_default_web_host_assets() -> WebHostAssets {

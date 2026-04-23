@@ -712,6 +712,26 @@ impl PluginSdk {
         }
     }
 
+    pub fn read_explicit_config_document(
+        &self,
+        descriptor: &PluginDescriptor,
+    ) -> Result<Value, PluginSdkError> {
+        let path = resolve_declared_plugin_config_path(descriptor)?;
+        let (_, _, document) =
+            read_plugin_config_document(Some(path.as_path())).map_err(PluginSdkError::Runtime)?;
+        Ok(document)
+    }
+
+    pub fn write_explicit_config_document(
+        &self,
+        descriptor: &PluginDescriptor,
+        value: &Value,
+    ) -> Result<(), PluginSdkError> {
+        let path = resolve_declared_plugin_config_path(descriptor)?;
+        let format = detect_config_format(path.as_path());
+        write_plugin_config_document(path.as_path(), format, value).map_err(PluginSdkError::Runtime)
+    }
+
     pub fn dispatch_event(&self, event: &BotEvent, logger: &Logger) {
         let handlers: Vec<PythonEventDispatchHandler> =
             match Python::with_gil(|py| -> Result<Vec<PythonEventDispatchHandler>, String> {
@@ -2454,6 +2474,25 @@ fn resolve_plugin_config_path(config_path: Option<&Path>) -> PathBuf {
         }
     }
     PathBuf::from("config.yaml")
+}
+
+fn resolve_declared_plugin_config_path(
+    descriptor: &PluginDescriptor,
+) -> Result<PathBuf, PluginSdkError> {
+    descriptor
+        .runtime
+        .options
+        .get("config_path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            PluginSdkError::Runtime(format!(
+                "plugin '{}' does not declare runtime.options.config_path",
+                descriptor.metadata.id
+            ))
+        })
 }
 
 fn detect_config_format(path: &Path) -> ConfigFormat {

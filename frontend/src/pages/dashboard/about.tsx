@@ -167,7 +167,7 @@ export default function AboutPage () {
     {
       icon: <IoRocketSharp size={20} />,
       title: '高性能架构',
-      desc: 'Node.js + Native 混合架构，资源占用低，响应速度快。',
+      desc: 'Node.js 前端&Rust后端架构，资源占用低，响应速度快。',
       className: 'bg-primary-50 text-primary',
     },
     {
@@ -191,13 +191,8 @@ export default function AboutPage () {
   ];
 
   const links = [
-    { icon: <BsGithub />, name: 'GitHub', href: 'https://github.com/LiteyukiStudio/RsLiteyukiBot' },
-    { icon: <BsTelegram />, name: 'Telegram', href: 'https://t.me/napcatqq' },
-    { icon: <BsTencentQq />, name: '交流群 欢乐一家亲', href: 'https://qm.qq.com/q/VwpnklcXqo' },
-    { icon: <BsTencentQq />, name: '交流群 皇亲国戚', href: 'https://qm.qq.com/q/gq18RH7o7S' },
-    { icon: <BsTencentQq />, name: '交流群 相亲相爱一家人', href: 'https://qm.qq.com/q/XyiyGPqa42' },
-    { icon: <BsTencentQq />, name: '交流群 开心家族', href: 'https://qm.qq.com/q/E4nfkGD6oK' },
-    { icon: <IoDocument />, name: '文档', href: 'https://napcat.napneko.icu/' },
+    { icon: <BsGithub />, name: 'GitHub', href: 'https://github.com/Nanaloveyuki/RsLiteyukiBot' },
+    { icon: <BsTencentQq />, name: '(Liteyuki)Bot交流群', href: 'https://qm.qq.com/q/HdpGRY33a0' },
   ];
 
   const cardStyle = 'bg-default/40 backdrop-blur-lg border-none shadow-none';
@@ -266,7 +261,8 @@ export default function AboutPage () {
               <h2 className='text-lg font-bold'>相关资源</h2>
             </CardHeader>
             <CardBody className='py-4 space-y-4'>
-              <NapCatFileHash />
+              {/* 预留：后续如果还需要展示入群密码，可直接恢复此模块 */}
+              {/* <NapCatFileHash /> */}
               <div className='flex flex-col gap-2'>
                 {links.map((link, idx) => (
                   <Link
@@ -294,7 +290,7 @@ export default function AboutPage () {
             </CardHeader>
             <CardBody className='py-4'>
               <div className='flex flex-wrap gap-2'>
-                {['TypeScript', 'React', 'Vite', 'Node.js', 'Electron', 'HeroUI'].map((tech) => (
+                {['TypeScript', 'React', 'Vite', 'Node.js', 'Rust', 'Tauri2', 'HeroUI'].map((tech) => (
                   <Chip key={tech} size='sm' variant='flat' className='bg-default-100/50 text-default-600'>
                     {tech}
                   </Chip>
@@ -308,9 +304,9 @@ export default function AboutPage () {
       {/* 底部版权 - 移出 grid 布局 */}
       <div className='w-full text-center text-tiny text-default-400 py-4 mt-auto flex flex-col items-center gap-1'>
         <p className='flex items-center justify-center gap-1'>
-          Made with <span className='text-danger'>❤️</span> by Liteyuki Team
+          Made with <span className='text-danger'>❤️</span> by Liteyuki Studio
         </p>
-        <p>MIT License © {new Date().getFullYear()}</p>
+        <p>NapCat License &amp; LSO v1.4 Common Modified License © {new Date().getFullYear()}</p>
       </div>
     </div>
   );

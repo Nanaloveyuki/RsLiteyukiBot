@@ -133,9 +133,6 @@ export default class PluginManager {
       '/Plugin/Import',
       formData,
       {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
         timeout: 60000, // 60秒超时
       }
     );

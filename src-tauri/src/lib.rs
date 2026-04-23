@@ -37,6 +37,7 @@ pub fn run() {
     let (server, listener) = tauri::async_runtime::block_on(async {
         WebHostService::bind(build_default_web_host_config(), snapshot_provider, assets)
     })
+    .map(|(server, listener)| (server.with_runtime_host(app_host.clone()), listener))
     .unwrap_or_else(|err| {
         panic!("failed to bootstrap shared HTTP host: {err}");
     });
@@ -66,7 +67,8 @@ pub fn run() {
     let allow_app_exit_for_tray = allow_app_exit.clone();
     let allow_app_exit_for_window = allow_app_exit.clone();
     let runtime_api_base_script = build_runtime_api_base_init_script(server.desktop_url().as_str());
-    let local_token_script = build_local_token_init_script(server.local_token());
+    let local_token = server.local_token();
+    let local_token_script = build_local_token_init_script(local_token.as_str());
 
     tauri::Builder::default()
         .append_invoke_initialization_script(runtime_api_base_script)

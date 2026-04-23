@@ -1,6 +1,4 @@
-pub use liteyukibot_core::{
-    BotEvent, PluginManifestLoader, PluginSdk, SessionEvent, SessionScope,
-};
+pub use liteyukibot_core::{BotEvent, PluginManifestLoader, PluginSdk, SessionEvent, SessionScope};
 
 #[allow(dead_code)]
 #[path = "../src/app_config.rs"]

@@ -47,7 +47,8 @@ impl WebTerminalState {
             "term-{}",
             self.next_session_id.fetch_add(1, Ordering::SeqCst) + 1
         );
-        let session = TerminalSession::new(session_id.clone(), cols, rows, preferred_terminal_shell());
+        let session =
+            TerminalSession::new(session_id.clone(), cols, rows, preferred_terminal_shell());
         self.sessions
             .lock()
             .expect("terminal session map should not be poisoned")
@@ -95,7 +96,10 @@ impl WebTerminalState {
             .sessions
             .lock()
             .expect("terminal session map should not be poisoned");
-        if sessions.get(id).is_some_and(|current| Arc::ptr_eq(current, session)) {
+        if sessions
+            .get(id)
+            .is_some_and(|current| Arc::ptr_eq(current, session))
+        {
             sessions.remove(id);
         }
     }
@@ -162,7 +166,8 @@ impl TerminalSession {
     }
 
     fn mark_closed(&self) {
-        self.lifecycle.store(TERMINAL_STATE_CLOSED, Ordering::SeqCst);
+        self.lifecycle
+            .store(TERMINAL_STATE_CLOSED, Ordering::SeqCst);
     }
 
     pub(super) async fn ensure_started(
@@ -194,7 +199,8 @@ impl TerminalSession {
 
         match self.start_process(terminal_state) {
             Ok(()) => {
-                self.lifecycle.store(TERMINAL_STATE_RUNNING, Ordering::SeqCst);
+                self.lifecycle
+                    .store(TERMINAL_STATE_RUNNING, Ordering::SeqCst);
                 let _ = self.output_tx.send(format!(
                     "\u{1b}[90m[terminal:{}] local {} session ready in {}\u{1b}[0m\r\n",
                     self.id,
@@ -212,7 +218,10 @@ impl TerminalSession {
         }
     }
 
-    fn start_process(self: &Arc<Self>, terminal_state: Arc<WebTerminalState>) -> Result<(), String> {
+    fn start_process(
+        self: &Arc<Self>,
+        terminal_state: Arc<WebTerminalState>,
+    ) -> Result<(), String> {
         let pty_system = native_pty_system();
         let pty_pair = pty_system
             .openpty(pty_size(

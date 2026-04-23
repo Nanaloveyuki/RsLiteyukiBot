@@ -16,7 +16,7 @@ import {
   WatchersIcon,
 } from '@/components/icons';
 
-import { request } from '@/utils/request';
+import { serverRequest } from '@/utils/request';
 import { openUrl } from '@/utils/url';
 
 import type {
@@ -39,54 +39,34 @@ function displayData (data: number, loading: boolean, error?: Error) {
 }
 
 export default function LiteyukiBotRepoInfo () {
-  // repo info
+  const repoParams = {
+    owner: 'LiteyukiStudio',
+    repo: 'RsLiteyukiBot',
+  };
+
   const {
-    data: repoOriData,
-    error: repoError,
-    loading: repoLoading,
+    data: snapshotData,
+    error: snapshotError,
+    loading: snapshotLoading,
   } = useRequest(() =>
-    request.get<GirhubRepo>('https://api.github.com/repos/LiteyukiStudio/RsLiteyukiBot')
+    serverRequest.get<ServerResponse<{
+      repo: GirhubRepo;
+      releases: GithubReleaseType[];
+      pulls: GithubPullRequest[];
+      contributors: GithubContributor[];
+    }>>('/base/GetGitHubRepoSnapshot', {
+      params: repoParams,
+    })
   );
 
-  // release info
-  const {
-    data: releaseOriData,
-    error: releaseError,
-    loading: releaseLoading,
-  } = useRequest(() =>
-    request.get<GithubReleaseType[]>(
-      'https://api.github.com/repos/LiteyukiStudio/RsLiteyukiBot/releases'
-    )
-  );
-
-  // pr info
-  const {
-    data: prData,
-    error: prError,
-    loading: prLoading,
-  } = useRequest(() =>
-    request.get<GithubPullRequest[]>(
-      'https://api.github.com/repos/LiteyukiStudio/RsLiteyukiBot/pulls'
-    )
-  );
-
-  // contributors info
-  const {
-    data: contributorsData,
-    error: contributorsError,
-    loading: contributorsLoading,
-  } = useRequest(() =>
-    request.get<GithubContributor[]>(
-      'https://api.github.com/repos/LiteyukiStudio/RsLiteyukiBot/contributors'
-    )
-  );
-
-  const repoData = repoOriData?.data;
-  const releaseData = releaseOriData?.data?.[0];
-  const prCount = prData?.data?.length || 0;
-  const contributorsCount = contributorsData?.data?.length || 0;
-
-  const releaseCount = releaseOriData?.data?.length || 0;
+  const repoData = snapshotData?.data?.data?.repo;
+  const releases = snapshotData?.data?.data?.releases || [];
+  const pulls = snapshotData?.data?.data?.pulls || [];
+  const contributors = snapshotData?.data?.data?.contributors || [];
+  const releaseData = releases[0];
+  const prCount = pulls.length;
+  const contributorsCount = contributors.length;
+  const releaseCount = releases.length;
 
   return (
     <Listbox
@@ -133,8 +113,8 @@ export default function LiteyukiBotRepoInfo () {
         key='star'
         endContent={displayData(
           repoData?.stargazers_count ?? 0,
-          false,
-          repoError
+          snapshotLoading,
+          snapshotError
         )}
         startContent={
           <IconWrapper className='bg-success/10 text-success'>
@@ -148,8 +128,8 @@ export default function LiteyukiBotRepoInfo () {
         key='issues'
         endContent={displayData(
           repoData?.open_issues_count ?? 0,
-          false,
-          repoError
+          snapshotLoading,
+          snapshotError
         )}
         startContent={
           <IconWrapper className='bg-success/10 text-success'>
@@ -161,7 +141,7 @@ export default function LiteyukiBotRepoInfo () {
       </ListboxItem>
       <ListboxItem
         key='pull_requests'
-        endContent={displayData(prCount, prLoading, prError)}
+        endContent={displayData(prCount, snapshotLoading, snapshotError)}
         startContent={
           <IconWrapper className='bg-primary/10 text-primary'>
             <PullRequestIcon className='text-lg' />
@@ -174,11 +154,11 @@ export default function LiteyukiBotRepoInfo () {
         key='releases'
         className='group h-auto py-3'
         endContent={
-          releaseError
+          snapshotError
             ? (
               <MdError className='text-primary-400' />
             )
-            : releaseLoading
+            : snapshotLoading
               ? (
                 <Spinner size='sm' />
               )
@@ -199,8 +179,8 @@ export default function LiteyukiBotRepoInfo () {
         key='contributors'
         endContent={displayData(
           contributorsCount,
-          contributorsLoading,
-          contributorsError
+          snapshotLoading,
+          snapshotError
         )}
         startContent={
           <IconWrapper className='bg-warning/10 text-warning'>
@@ -214,8 +194,8 @@ export default function LiteyukiBotRepoInfo () {
         key='watchers'
         endContent={displayData(
           repoData?.watchers_count ?? 0,
-          repoLoading,
-          repoError
+          snapshotLoading,
+          snapshotError
         )}
         startContent={
           <IconWrapper className='bg-default/50 text-foreground'>

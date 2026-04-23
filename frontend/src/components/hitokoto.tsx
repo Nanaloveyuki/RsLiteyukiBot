@@ -10,7 +10,7 @@ import { IoMdQuote } from 'react-icons/io';
 import { IoCopy, IoRefresh } from 'react-icons/io5';
 
 import key from '@/const/key';
-import { request } from '@/utils/request';
+import { serverRequest } from '@/utils/request';
 
 import PageLoading from './page_loading';
 
@@ -20,7 +20,7 @@ export default function Hitokoto () {
     error,
     loading,
     run,
-  } = useRequest(() => request.get<IHitokoto>('https://hitokoto.152710.xyz/'), {
+  } = useRequest(() => serverRequest.get<ServerResponse<IHitokoto>>('/base/GetHitokoto'), {
     throttleWait: 1000,
   });
   const backupData = {
@@ -28,7 +28,7 @@ export default function Hitokoto () {
     from: '暴风雨',
     from_who: '莎士比亚',
   };
-  const data = dataOri?.data || (error ? backupData : undefined);
+  const data = dataOri?.data?.data || (error ? backupData : undefined);
   const [backgroundImage] = useLocalStorage<string>(key.backgroundImage, '');
   const hasBackground = !!backgroundImage;
 

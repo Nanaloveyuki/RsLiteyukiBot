@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LiteEcho Settings</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f6f8fc;
+        --panel: rgba(255, 255, 255, 0.86);
+        --text: #152033;
+        --muted: #60708a;
+        --border: rgba(120, 140, 170, 0.25);
+        --accent: #4c8dae;
+        --accent-strong: #2e6b89;
+        --success: #1f8f63;
+        --danger: #bf3f5f;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0e1420;
+          --panel: rgba(20, 29, 44, 0.9);
+          --text: #eef4ff;
+          --muted: #99a9c2;
+          --border: rgba(134, 154, 184, 0.2);
+          --accent: #88c0d0;
+          --accent-strong: #a7d5e1;
+          --success: #46c58d;
+          --danger: #ef7b97;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+        background:
+          radial-gradient(circle at top left, rgba(136, 192, 208, 0.22), transparent 34%),
+          radial-gradient(circle at bottom right, rgba(255, 127, 172, 0.16), transparent 26%),
+          var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+      }
+
+      .shell {
+        width: min(780px, calc(100vw - 32px));
+        margin: 24px auto;
+        padding: 24px;
+        border: 1px solid var(--border);
+        border-radius: 24px;
+        background: var(--panel);
+        backdrop-filter: blur(18px);
+        box-shadow: 0 20px 60px rgba(15, 23, 42, 0.14);
+      }
+
+      h1 {
+        margin: 0 0 6px;
+        font-size: 28px;
+      }
+
+      .subtitle {
+        margin: 0 0 24px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 16px;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .field.wide {
+        grid-column: 1 / -1;
+      }
+
+      label {
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      input[type="text"] {
+        width: 100%;
+        padding: 12px 14px;
+        border-radius: 14px;
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.66);
+        color: var(--text);
+        font: inherit;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        input[type="text"] {
+          background: rgba(12, 18, 28, 0.72);
+        }
+      }
+
+      .toggle {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 16px;
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.5);
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .toggle {
+          background: rgba(12, 18, 28, 0.58);
+        }
+      }
+
+      .actions {
+        margin-top: 24px;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      button {
+        border: none;
+        border-radius: 999px;
+        padding: 12px 18px;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      button.primary {
+        background: var(--accent);
+        color: white;
+      }
+
+      button.secondary {
+        background: transparent;
+        color: var(--text);
+        border: 1px solid var(--border);
+      }
+
+      .status {
+        min-height: 20px;
+        font-size: 13px;
+      }
+
+      .status.ok {
+        color: var(--success);
+      }
+
+      .status.error {
+        color: var(--danger);
+      }
+
+      .hint {
+        margin-top: 20px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <h1>LiteEcho</h1>
+      <p class="subtitle">
+        Builtin example plugin powered by the Python compatibility bridge. Changes here are saved
+        through <code>/api/Plugin/Config</code> and applied on the next message event.
+      </p>
+
+      <div class="grid">
+        <div class="field wide">
+          <label for="enabled">Plugin Enabled</label>
+          <div class="toggle">
+            <span>Handle <code>/liteecho</code> messages</span>
+            <input id="enabled" type="checkbox" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="reply_prefix">Reply Prefix</label>
+          <input id="reply_prefix" type="text" placeholder="Optional text before the echo" />
+        </div>
+
+        <div class="field">
+          <label for="reply_suffix">Reply Suffix</label>
+          <input id="reply_suffix" type="text" placeholder="Optional text after the echo" />
+        </div>
+
+        <div class="field wide">
+          <label for="trim_input">Trim Input</label>
+          <div class="toggle">
+            <span>Remove leading and trailing spaces after the command prefix</span>
+            <input id="trim_input" type="checkbox" />
+          </div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="save" class="primary" type="button">Save</button>
+        <button id="reload" class="secondary" type="button">Reload</button>
+        <span id="status" class="status"></span>
+      </div>
+
+      <p class="hint">
+        Example: set prefix to <code>[echo] </code> and suffix to <code> !</code>, then send
+        <code>/liteecho hello</code>.
+      </p>
+    </main>
+
+    <script>
+      const pluginId = "builtin-liteecho";
+      const fields = ["enabled", "reply_prefix", "reply_suffix", "trim_input"];
+      const statusEl = document.getElementById("status");
+
+      function setStatus(message, kind) {
+        statusEl.textContent = message || "";
+        statusEl.className = kind ? `status ${kind}` : "status";
+      }
+
+      function currentConfig() {
+        return {
+          enabled: document.getElementById("enabled").checked,
+          reply_prefix: document.getElementById("reply_prefix").value,
+          reply_suffix: document.getElementById("reply_suffix").value,
+          trim_input: document.getElementById("trim_input").checked,
+        };
+      }
+
+      function applyConfig(config) {
+        document.getElementById("enabled").checked = Boolean(config.enabled);
+        document.getElementById("reply_prefix").value = String(config.reply_prefix ?? "");
+        document.getElementById("reply_suffix").value = String(config.reply_suffix ?? "");
+        document.getElementById("trim_input").checked = Boolean(config.trim_input);
+      }
+
+      async function requestJson(url, options) {
+        const response = await fetch(url, {
+          credentials: "include",
+          ...options,
+          headers: {
+            Accept: "application/json",
+            ...(options && options.headers ? options.headers : {}),
+          },
+        });
+        const payload = await response.json();
+        if (!response.ok || payload.code !== 0) {
+          throw new Error(payload.message || `Request failed: ${response.status}`);
+        }
+        return payload.data;
+      }
+
+      async function loadConfig() {
+        setStatus("Loading...", "");
+        try {
+          const data = await requestJson(`/api/Plugin/Config?id=${encodeURIComponent(pluginId)}`);
+          applyConfig(data.config || {});
+          setStatus("Loaded", "ok");
+        } catch (error) {
+          setStatus(error.message, "error");
+        }
+      }
+
+      async function saveConfig() {
+        setStatus("Saving...", "");
+        try {
+          await requestJson("/api/Plugin/Config", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              id: pluginId,
+              config: currentConfig(),
+            }),
+          });
+          setStatus("Saved", "ok");
+        } catch (error) {
+          setStatus(error.message, "error");
+        }
+      }
+
+      document.getElementById("save").addEventListener("click", saveConfig);
+      document.getElementById("reload").addEventListener("click", loadConfig);
+      loadConfig();
+    </script>
+  </body>
+</html>

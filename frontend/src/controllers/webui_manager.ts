@@ -30,6 +30,12 @@ export default class WebUIManager {
     return data.data;
   }
 
+  public static async getAuthState () {
+    const { data } =
+      await serverRequest.get<ServerResponse<WebUiAuthState>>('/auth/state');
+    return data.data;
+  }
+
   public static async loginWithToken (token: string) {
     const sha256 = CryptoJS.SHA256(token + '.napcat').toString();
     const { data } = await serverRequest.post<ServerResponse<AuthResponse>>(
@@ -39,10 +45,18 @@ export default class WebUIManager {
     return data.data.Credential;
   }
 
-  public static async changePassword (oldToken: string, newToken: string) {
+  public static async loginWithPassword (password: string) {
+    const { data } = await serverRequest.post<ServerResponse<AuthResponse>>(
+      '/auth/login/password',
+      { password }
+    );
+    return data.data.Credential;
+  }
+
+  public static async changePassword (oldPassword: string, newPassword: string) {
     const { data } = await serverRequest.post<ServerResponse<boolean>>(
-      '/auth/update_token',
-      { oldToken, newToken }
+      '/auth/update_password',
+      { oldPassword, newPassword }
     );
     return data.data;
   }

@@ -1,7 +1,9 @@
+mod auth;
 mod config;
 mod http;
 mod terminal;
 
+use self::auth::*;
 use self::config::*;
 use self::http::*;
 use self::terminal::*;
@@ -9,14 +11,15 @@ use self::terminal::*;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
+use std::io::Cursor;
 use std::net::{
     IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener, TcpStream as StdTcpStream,
 };
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
@@ -32,33 +35,33 @@ use tokio_tungstenite::accept_hdr_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
-use crate::app_config::{load_app_config_with_warnings, resolve_app_config_path, resolve_disabled_plugins};
-use crate::app_host::AppHostSnapshot;
+use super::ui::{NapCatConfig, NapCatWebUIConfig, OneBotConfig};
+use crate::app_config::{
+    load_app_config_with_warnings, resolve_app_config_path, resolve_disabled_plugins,
+};
+use crate::app_host::{AppHostPluginCatalogSnapshot, AppHostSnapshot, EmbeddedAppHost};
 use crate::config_edit::persist_disabled_plugins;
 use crate::i18n::current_snapshot as current_i18n_snapshot;
 use crate::observability::{BufferedLogEntry, recent_buffered_logs};
-use crate::runtime_support::resolve_builtin_plugin_dirs;
-use super::ui::{NapCatConfig, NapCatWebUIConfig, OneBotConfig};
-use crate::{LogLevel, PluginManifestLoader, emit_console_log};
+use crate::runtime_support::{resolve_builtin_plugin_dirs, resolve_local_plugin_dir};
+use crate::{LogLevel, PluginLoadState, PluginManifestLoader, PluginSdk, emit_console_log};
+use zip::ZipArchive;
 
 const DEFAULT_HTTP_PORT: u16 = 14500;
-const MAX_REQUEST_BYTES: usize = 16 * 1024;
+const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const REQUEST_READ_CHUNK_BYTES: usize = 2048;
 const HEALTH_ROUTE: &str = "/api/health";
 const LOGS_ROUTE: &str = "/api/logs";
 const I18N_ROUTE: &str = "/api/i18n";
 const LOGS_ROUTE_LIMIT: usize = 200;
 const DEV_FRONTEND_PROBE_TIMEOUT: Duration = Duration::from_millis(150);
-/// The fixed credential returned by `/api/auth/login` and `/api/auth/local-token`.
-/// Using a constant keeps the stub simple; a real implementation would use a
-/// cryptographically random value generated at startup.
-const LOCAL_AUTO_TOKEN: &str = "rsliteyukibot-local-token";
 const WEBUI_STATE_DIR: &str = "config/webui";
 const ONEBOT_CONFIG_FILE: &str = "config/webui/onebot-v11.json";
 const NAPCAT_CONFIG_FILE: &str = "config/webui/napcat.json";
 const NAPCAT_UIN_CONFIG_FILE: &str = "config/webui/napcat-uin.json";
 const WEBUI_SERVER_CONFIG_FILE: &str = "config/webui/server.json";
 const THEME_CONFIG_FILE: &str = "config/webui/theme.json";
+const MIRROR_CONFIG_FILE: &str = "config/webui/mirrors.json";
 const SSL_CERT_FILE: &str = "config/webui/cert.pem";
 const SSL_KEY_FILE: &str = "config/webui/key.pem";
 const CUSTOM_FONT_FILE: &str = "config/webui/fonts/CustomFont.woff";
@@ -162,6 +165,278 @@ fn workspace_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+fn unique_web_host_nonce() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
+fn install_local_plugin_archive(
+    request: &[u8],
+    runtime_host: Option<&EmbeddedAppHost>,
+) -> Result<Value, String> {
+    let upload = parse_multipart_form_data(request)?
+        .into_iter()
+        .find(|field| field.name == "plugin")
+        .ok_or_else(|| "missing plugin upload field".to_string())?;
+    let filename = upload
+        .filename
+        .as_deref()
+        .and_then(|value| {
+            Path::new(value)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::trim)
+        })
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "plugin filename is required".to_string())?
+        .to_string();
+    if !filename.to_ascii_lowercase().ends_with(".zip") {
+        return Err("plugin package must be a .zip archive".to_string());
+    }
+    if upload.data.is_empty() {
+        return Err("plugin package is empty".to_string());
+    }
+
+    let plugin_root = resolve_local_plugin_dir();
+    fs::create_dir_all(&plugin_root)
+        .map_err(|err| format!("failed to create plugin directory: {err}"))?;
+
+    let nonce = unique_web_host_nonce();
+    let stage_root = plugin_root.join(format!(".plugin-import-{nonce}"));
+    let extracted_root = stage_root.join("extract");
+    let install_root = stage_root.join("install");
+    fs::create_dir_all(&extracted_root)
+        .map_err(|err| format!("failed to create staging directory: {err}"))?;
+    fs::create_dir_all(&install_root)
+        .map_err(|err| format!("failed to create install staging directory: {err}"))?;
+
+    let install_result = (|| {
+        unpack_zip_archive(upload.data.as_slice(), extracted_root.as_path())?;
+        let plugin_source_dir = find_plugin_root_in_extracted_dir(extracted_root.as_path())?;
+        let manifest = PluginManifestLoader::load_manifest(&plugin_source_dir.join("plugin.json"))
+            .map_err(|err| err.to_string())?;
+        let plugin_id = manifest.descriptor.metadata.id.trim().to_string();
+        if plugin_id.is_empty() {
+            return Err("plugin manifest id is empty".to_string());
+        }
+        if plugin_id_already_exists(plugin_id.as_str(), runtime_host) {
+            return Err(format!("plugin '{plugin_id}' already exists"));
+        }
+
+        let final_dir = plugin_root.join(&plugin_id);
+        if final_dir.exists() {
+            return Err(format!("plugin '{plugin_id}' already exists"));
+        }
+
+        let staged_plugin_dir = install_root.join(&plugin_id);
+        copy_directory_recursive(plugin_source_dir.as_path(), staged_plugin_dir.as_path())?;
+        PluginManifestLoader::load_manifest(&staged_plugin_dir.join("plugin.json"))
+            .map_err(|err| err.to_string())?;
+        fs::rename(&staged_plugin_dir, &final_dir)
+            .map_err(|err| format!("failed to finalize plugin install: {err}"))?;
+
+        if let Some(runtime_host) = runtime_host {
+            let previous_disabled = run_async_for_web_host(runtime_host.plugin_catalog_snapshot())
+                .disabled_plugin_ids;
+            if let Err(err) =
+                run_async_for_web_host(runtime_host.apply_disabled_plugins(previous_disabled.clone()))
+            {
+                let _ = fs::remove_dir_all(&final_dir);
+                let _ =
+                    run_async_for_web_host(runtime_host.apply_disabled_plugins(previous_disabled));
+                return Err(format!("plugin installed but runtime reload failed, rolled back: {err}"));
+            }
+        }
+
+        Ok((plugin_id, final_dir))
+    })();
+
+    let _ = fs::remove_dir_all(&stage_root);
+
+    let (plugin_id, final_dir) = install_result?;
+    Ok(serde_json::json!({
+        "message": format!("插件 {plugin_id} 已安装"),
+        "pluginId": plugin_id,
+        "installPath": final_dir.display().to_string(),
+    }))
+}
+
+fn unpack_zip_archive(archive_bytes: &[u8], target_dir: &Path) -> Result<(), String> {
+    let reader = Cursor::new(archive_bytes);
+    let mut archive =
+        ZipArchive::new(reader).map_err(|err| format!("failed to open zip archive: {err}"))?;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|err| format!("failed to read zip entry {index}: {err}"))?;
+        let Some(relative_path) = entry.enclosed_name().map(|path| path.to_path_buf()) else {
+            return Err("zip archive contains an invalid path".to_string());
+        };
+        if relative_path.as_os_str().is_empty() {
+            continue;
+        }
+        let output_path = target_dir.join(relative_path);
+        if entry.is_dir() {
+            fs::create_dir_all(&output_path)
+                .map_err(|err| format!("failed to create extracted directory: {err}"))?;
+            continue;
+        }
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create extracted parent directory: {err}"))?;
+        }
+        let mut output = fs::File::create(&output_path)
+            .map_err(|err| format!("failed to create extracted file: {err}"))?;
+        io::copy(&mut entry, &mut output)
+            .map_err(|err| format!("failed to extract archive entry: {err}"))?;
+    }
+    Ok(())
+}
+
+fn plugin_id_already_exists(plugin_id: &str, runtime_host: Option<&EmbeddedAppHost>) -> bool {
+    runtime_host
+        .map(|host| {
+            run_async_for_web_host(host.plugin_catalog_snapshot())
+                .entries
+                .into_iter()
+                .any(|entry| entry.descriptor.metadata.id == plugin_id)
+        })
+        .unwrap_or_else(|| {
+            let plugin_dirs = resolve_builtin_plugin_dirs();
+            PluginManifestLoader::discover_in_dirs(plugin_dirs.iter())
+                .map(|manifests| {
+                    manifests
+                        .into_iter()
+                        .any(|manifest| manifest.descriptor.metadata.id == plugin_id)
+                })
+                .unwrap_or(false)
+        })
+}
+
+fn find_plugin_root_in_extracted_dir(root: &Path) -> Result<PathBuf, String> {
+    if root.join("plugin.json").is_file() {
+        return Ok(root.to_path_buf());
+    }
+
+    let mut candidates = Vec::new();
+    let entries =
+        fs::read_dir(root).map_err(|err| format!("failed to inspect extracted plugin: {err}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("failed to inspect extracted plugin: {err}"))?;
+        let path = entry.path();
+        if path.is_dir() && path.join("plugin.json").is_file() {
+            candidates.push(path);
+        }
+    }
+
+    match candidates.len() {
+        1 => Ok(candidates.remove(0)),
+        0 => Err("plugin.json was not found in the archive root".to_string()),
+        _ => Err("plugin archive contains multiple plugin roots".to_string()),
+    }
+}
+
+fn copy_directory_recursive(source: &Path, target: &Path) -> Result<(), String> {
+    fs::create_dir_all(target)
+        .map_err(|err| format!("failed to create install directory: {err}"))?;
+    let entries = fs::read_dir(source)
+        .map_err(|err| format!("failed to read plugin directory {}: {err}", source.display()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|err| format!("failed to read plugin directory entry: {err}"))?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        let metadata = entry
+            .metadata()
+            .map_err(|err| format!("failed to stat plugin entry: {err}"))?;
+        if metadata.is_dir() {
+            copy_directory_recursive(source_path.as_path(), target_path.as_path())?;
+        } else if metadata.is_file() {
+            if let Some(parent) = target_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|err| format!("failed to create plugin parent directory: {err}"))?;
+            }
+            fs::copy(&source_path, &target_path)
+                .map_err(|err| format!("failed to copy plugin file: {err}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn maybe_inject_plugin_page_auth_bridge(asset: WebHostAsset) -> WebHostAsset {
+    if !asset
+        .content_type()
+        .to_ascii_lowercase()
+        .starts_with("text/html")
+    {
+        return asset;
+    }
+
+    let body = String::from_utf8_lossy(asset.body()).into_owned();
+    let injected = inject_plugin_page_auth_bridge(body.as_str());
+    WebHostAsset::text(asset.content_type().to_string(), injected)
+}
+
+fn inject_plugin_page_auth_bridge(document: &str) -> String {
+    const SCRIPT: &str = r#"<script>
+(function () {
+  function readLiteyukiToken() {
+    try {
+      const raw = window.localStorage.getItem("token");
+      if (!raw) return "";
+      try {
+        const parsed = JSON.parse(raw);
+        return typeof parsed === "string" ? parsed : "";
+      } catch (_) {
+        return raw;
+      }
+    } catch (_) {
+      return "";
+    }
+  }
+
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    const token = readLiteyukiToken();
+    if (!token) {
+      return originalFetch(input, init);
+    }
+
+    const request = new Request(input, init);
+    const headers = new Headers(request.headers);
+    if (!headers.has("Authorization")) {
+      headers.set("Authorization", "Bearer " + token);
+    }
+
+    return originalFetch(new Request(request, { headers }));
+  };
+})();
+</script>"#;
+
+    if let Some(index) = document.rfind("</head>") {
+        let mut output = String::with_capacity(document.len() + SCRIPT.len());
+        output.push_str(&document[..index]);
+        output.push_str(SCRIPT);
+        output.push_str(&document[index..]);
+        return output;
+    }
+
+    if let Some(index) = document.rfind("</body>") {
+        let mut output = String::with_capacity(document.len() + SCRIPT.len());
+        output.push_str(&document[..index]);
+        output.push_str(SCRIPT);
+        output.push_str(&document[index..]);
+        return output;
+    }
+
+    let mut output = String::with_capacity(document.len() + SCRIPT.len());
+    output.push_str(SCRIPT);
+    output.push_str(document);
+    output
+}
+
 fn sanitize_workspace_relative_path(raw: &str) -> Result<PathBuf, String> {
     let trimmed = raw.trim().trim_start_matches(['/', '\\']);
     if trimmed.is_empty() {
@@ -214,7 +489,11 @@ fn build_workspace_file_info(path: &Path) -> Result<WorkspaceFileInfo, String> {
             .unwrap_or_default()
             .to_string(),
         is_directory: metadata.is_dir(),
-        size: if metadata.is_file() { metadata.len() } else { 0 },
+        size: if metadata.is_file() {
+            metadata.len()
+        } else {
+            0
+        },
         mtime: modified.to_rfc3339(),
     })
 }
@@ -234,6 +513,600 @@ fn localized_text(raw: &str) -> String {
         .get(raw)
         .cloned()
         .unwrap_or_else(|| raw.to_string())
+}
+
+fn run_async_for_web_host<F>(future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(future))
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("web host helper runtime should build")
+            .block_on(future)
+    }
+}
+
+fn upstream_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .user_agent("RsLiteyukiBot-WebHost/0.1")
+            .build()
+            .expect("upstream web host http client should build")
+    })
+}
+
+fn sanitize_repo_component(raw: Option<&String>, label: &str) -> Result<String, String> {
+    let value = raw
+        .map(String::as_str)
+        .unwrap_or_default()
+        .trim()
+        .trim_matches('/');
+    if value.is_empty() {
+        return Err(format!("missing github {label}"));
+    }
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains(':')
+    {
+        return Err(format!("invalid github {label}"));
+    }
+    Ok(value.trim_end_matches(".git").to_string())
+}
+
+fn summarize_upstream_error(status: reqwest::StatusCode, body: &str) -> String {
+    let message = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("message")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| body.trim().chars().take(160).collect::<String>());
+    format!("upstream returned {}: {}", status.as_u16(), message)
+}
+
+async fn fetch_upstream_json(
+    url: &str,
+    accept: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let mut request = upstream_http_client().get(url);
+    if let Some(accept) = accept {
+        request = request.header(reqwest::header::ACCEPT, accept);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|err| format!("failed to fetch upstream json: {err}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("failed to read upstream response: {err}"))?;
+    if !status.is_success() {
+        return Err(summarize_upstream_error(status, body.as_str()));
+    }
+    serde_json::from_str(body.as_str()).map_err(|err| format!("invalid upstream json: {err}"))
+}
+
+async fn fetch_upstream_text(url: &str, accept: Option<&str>) -> Result<String, String> {
+    let mut request = upstream_http_client().get(url);
+    if let Some(accept) = accept {
+        request = request.header(reqwest::header::ACCEPT, accept);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|err| format!("failed to fetch upstream text: {err}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("failed to read upstream response: {err}"))?;
+    if !status.is_success() {
+        return Err(summarize_upstream_error(status, body.as_str()));
+    }
+    Ok(body)
+}
+
+fn default_file_mirrors() -> Vec<String> {
+    [
+        "https://github.chenc.dev/",
+        "https://ghproxy.cfd/",
+        "https://ghproxy.cc/",
+    ]
+    .into_iter()
+    .map(ToString::to_string)
+    .collect()
+}
+
+fn default_raw_mirrors() -> Vec<String> {
+    [
+        "https://raw.githubusercontent.com",
+        "https://github.chenc.dev/https://raw.githubusercontent.com",
+        "https://ghproxy.cfd/https://raw.githubusercontent.com",
+    ]
+    .into_iter()
+    .map(ToString::to_string)
+    .collect()
+}
+
+#[derive(Debug, Clone)]
+struct MirrorTestResult {
+    mirror: String,
+    latency: u64,
+    success: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct PluginStoreItemDoc {
+    id: String,
+    name: String,
+    version: String,
+    description: String,
+    author: String,
+    homepage: Option<String>,
+    #[serde(rename = "downloadUrl")]
+    download_url: String,
+    tags: Vec<String>,
+    #[serde(rename = "minVersion")]
+    min_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct PluginStoreListDoc {
+    version: String,
+    #[serde(rename = "updateTime")]
+    update_time: String,
+    plugins: Vec<PluginStoreItemDoc>,
+}
+
+impl Default for PluginStoreListDoc {
+    fn default() -> Self {
+        Self {
+            version: "local.manifest.v1".to_string(),
+            update_time: Utc::now().to_rfc3339(),
+            plugins: Vec::new(),
+        }
+    }
+}
+
+fn mirrored_url(original_url: &str, mirror: &str) -> String {
+    let mirror = mirror.trim().trim_end_matches('/');
+    if mirror.is_empty() {
+        return original_url.to_string();
+    }
+    if original_url.starts_with("https://github.com/") {
+        if mirror.eq_ignore_ascii_case("https://github.com") {
+            return original_url.to_string();
+        }
+        let suffix = original_url.trim_start_matches("https://github.com/");
+        if mirror.ends_with("github.com") {
+            return format!("{mirror}/{suffix}");
+        }
+        return format!("{mirror}/{original_url}");
+    }
+    if original_url.starts_with("https://raw.githubusercontent.com/") {
+        if mirror.eq_ignore_ascii_case("https://raw.githubusercontent.com") {
+            return original_url.to_string();
+        }
+        let suffix = original_url.trim_start_matches("https://raw.githubusercontent.com/");
+        if mirror.ends_with("raw.githubusercontent.com") {
+            return format!("{mirror}/{suffix}");
+        }
+        return format!("{mirror}/{original_url}");
+    }
+    format!("{mirror}/{original_url}")
+}
+
+async fn test_mirror_candidate(
+    mirror_label: &str,
+    mirror_url: Option<&str>,
+    test_type: &str,
+    timeout_ms: u64,
+) -> MirrorTestResult {
+    let (original_url, accept) = if test_type.eq_ignore_ascii_case("raw") {
+        (
+            "https://raw.githubusercontent.com/LiteyukiStudio/RsLiteyukiBot/main/README.md",
+            Some("text/plain"),
+        )
+    } else {
+        ("https://github.com/LiteyukiStudio/RsLiteyukiBot", None)
+    };
+    let request_url = mirror_url
+        .map(|mirror| mirrored_url(original_url, mirror))
+        .unwrap_or_else(|| original_url.to_string());
+    let started_at = std::time::Instant::now();
+
+    let response = upstream_http_client()
+        .get(request_url.as_str())
+        .timeout(Duration::from_millis(timeout_ms.max(250)))
+        .header(
+            reqwest::header::ACCEPT,
+            accept.unwrap_or("text/html,application/xhtml+xml"),
+        )
+        .send()
+        .await;
+
+    match response {
+        Ok(response) => {
+            let status = response.status();
+            let _ = response.bytes().await;
+            if status.is_success() || status.is_redirection() {
+                MirrorTestResult {
+                    mirror: mirror_label.to_string(),
+                    latency: started_at.elapsed().as_millis() as u64,
+                    success: true,
+                    error: None,
+                }
+            } else {
+                MirrorTestResult {
+                    mirror: mirror_label.to_string(),
+                    latency: started_at.elapsed().as_millis() as u64,
+                    success: false,
+                    error: Some(format!("HTTP {}", status.as_u16())),
+                }
+            }
+        }
+        Err(err) => MirrorTestResult {
+            mirror: mirror_label.to_string(),
+            latency: started_at.elapsed().as_millis() as u64,
+            success: false,
+            error: Some(err.to_string()),
+        },
+    }
+}
+
+fn plugin_store_item_from_descriptor(descriptor: &crate::PluginDescriptor) -> PluginStoreItemDoc {
+    let extra = &descriptor.metadata.extra;
+    let extra_string = |key: &str| {
+        extra.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    };
+    let repository = extra_string("repository");
+    let homepage = if descriptor.metadata.homepage.trim().is_empty() {
+        repository.clone()
+    } else {
+        Some(descriptor.metadata.homepage.clone())
+    };
+    let mut tags = extra
+        .get("tags")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if tags.is_empty() {
+        tags.push("builtin".to_string());
+        tags.push(
+            match descriptor.runtime.kind {
+                crate::PluginRuntimeKind::Native => "native",
+                crate::PluginRuntimeKind::Python => "python",
+                crate::PluginRuntimeKind::Lua => "lua",
+                crate::PluginRuntimeKind::External => "external",
+            }
+            .to_string(),
+        );
+    }
+
+    PluginStoreItemDoc {
+        id: descriptor.metadata.id.clone(),
+        name: localized_text(descriptor.metadata.name.as_str()),
+        version: extra_string("version").unwrap_or_else(|| "builtin".to_string()),
+        description: localized_text(descriptor.metadata.description.as_str()),
+        author: descriptor.metadata.author.clone(),
+        homepage,
+        download_url: repository
+            .unwrap_or_else(|| descriptor.metadata.homepage.clone())
+            .trim()
+            .to_string(),
+        tags,
+        min_version: extra_string("minVersion"),
+    }
+}
+
+fn build_local_plugin_store_catalog(runtime_host: Option<&EmbeddedAppHost>) -> PluginStoreListDoc {
+    let mut plugins = runtime_host
+        .map(|host| {
+            run_async_for_web_host(host.plugin_catalog_snapshot())
+                .entries
+                .into_iter()
+                .map(|entry| plugin_store_item_from_descriptor(&entry.descriptor))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| {
+            let plugin_dirs = resolve_builtin_plugin_dirs();
+            PluginManifestLoader::discover_in_dirs(plugin_dirs.iter())
+                .map(|manifests| {
+                    manifests
+                        .into_iter()
+                        .map(|manifest| plugin_store_item_from_descriptor(&manifest.descriptor))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        });
+    plugins.sort_by(|left, right| left.id.cmp(&right.id));
+
+    PluginStoreListDoc {
+        version: "local.manifest.v1".to_string(),
+        update_time: Utc::now().to_rfc3339(),
+        plugins,
+    }
+}
+
+fn plugin_extra_string(extra: &Map<String, Value>, key: &str) -> Option<String> {
+    extra
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn plugin_can_read_config(descriptor: &crate::PluginDescriptor) -> bool {
+    descriptor
+        .permissions
+        .iter()
+        .any(|permission| permission == "config.read")
+}
+
+fn plugin_can_write_config(descriptor: &crate::PluginDescriptor) -> bool {
+    descriptor
+        .permissions
+        .iter()
+        .any(|permission| permission == "config.write")
+}
+
+fn plugin_declared_config_path(descriptor: &crate::PluginDescriptor) -> Option<&str> {
+    descriptor
+        .runtime
+        .options
+        .get("config_path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+}
+
+fn plugin_has_config(entry: &crate::PluginCatalogEntry) -> bool {
+    plugin_declared_config_path(&entry.descriptor).is_some()
+        && (plugin_can_read_config(&entry.descriptor) || plugin_can_write_config(&entry.descriptor))
+}
+
+fn plugin_extension_pages(entry: &crate::PluginCatalogEntry) -> Vec<Value> {
+    let pages = entry
+        .descriptor
+        .metadata
+        .extra
+        .get("pages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let plugin_name = localized_text(entry.descriptor.metadata.name.as_str());
+
+    pages
+        .into_iter()
+        .filter_map(|page| {
+            let object = page.as_object()?;
+            let path = object
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?
+                .to_string();
+            let title = object
+                .get("title")
+                .and_then(Value::as_str)
+                .map(localized_text)
+                .unwrap_or_else(|| path.clone());
+            let mut value = Map::new();
+            value.insert(
+                "pluginId".to_string(),
+                Value::String(entry.descriptor.metadata.id.clone()),
+            );
+            value.insert("pluginName".to_string(), Value::String(plugin_name.clone()));
+            value.insert("path".to_string(), Value::String(path));
+            value.insert("title".to_string(), Value::String(title));
+            if let Some(icon) = object
+                .get("icon")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|icon| !icon.is_empty())
+            {
+                value.insert("icon".to_string(), Value::String(icon.to_string()));
+            }
+            if let Some(description) = object
+                .get("description")
+                .and_then(Value::as_str)
+                .map(localized_text)
+            {
+                value.insert("description".to_string(), Value::String(description));
+            }
+            Some(Value::Object(value))
+        })
+        .collect()
+}
+
+fn plugin_declared_page_paths(descriptor: &crate::PluginDescriptor) -> Vec<String> {
+    descriptor
+        .metadata
+        .extra
+        .get("pages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|page| {
+            page.as_object()?
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        })
+        .collect()
+}
+
+fn infer_plugin_config_schema(config: &Map<String, Value>) -> Vec<Value> {
+    let mut fields = config
+        .iter()
+        .map(|(key, value)| {
+            let mut field = Map::new();
+            field.insert("key".to_string(), Value::String(key.clone()));
+            field.insert("label".to_string(), Value::String(key.clone()));
+            match value {
+                Value::Bool(current) => {
+                    field.insert("type".to_string(), Value::String("boolean".to_string()));
+                    field.insert("default".to_string(), Value::Bool(*current));
+                }
+                Value::Number(current) => {
+                    field.insert("type".to_string(), Value::String("number".to_string()));
+                    field.insert("default".to_string(), Value::Number(current.clone()));
+                }
+                Value::String(current) => {
+                    field.insert("type".to_string(), Value::String("string".to_string()));
+                    field.insert("default".to_string(), Value::String(current.clone()));
+                }
+                Value::Null => {
+                    field.insert("type".to_string(), Value::String("string".to_string()));
+                    field.insert("default".to_string(), Value::String(String::new()));
+                }
+                complex => {
+                    field.insert("type".to_string(), Value::String("text".to_string()));
+                    field.insert(
+                        "default".to_string(),
+                        Value::String(
+                            serde_json::to_string_pretty(complex)
+                                .unwrap_or_else(|_| complex.to_string()),
+                        ),
+                    );
+                    field.insert(
+                        "description".to_string(),
+                        Value::String(
+                            "Complex values are currently read-only in WebUI.".to_string(),
+                        ),
+                    );
+                }
+            }
+            Value::Object(field)
+        })
+        .collect::<Vec<_>>();
+    fields.sort_by(|left, right| {
+        left["key"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["key"].as_str().unwrap_or_default())
+    });
+    fields
+}
+
+fn discover_plugin_descriptor(plugin_id: &str) -> Option<crate::PluginDescriptor> {
+    let plugin_dirs = resolve_builtin_plugin_dirs();
+    let manifests = PluginManifestLoader::discover_in_dirs(plugin_dirs.iter()).ok()?;
+    manifests
+        .into_iter()
+        .find(|manifest| manifest.descriptor.metadata.id == plugin_id)
+        .map(|manifest| manifest.descriptor)
+}
+
+fn resolve_plugin_descriptor(
+    runtime_host: Option<&EmbeddedAppHost>,
+    plugin_id: &str,
+) -> Option<crate::PluginDescriptor> {
+    runtime_host
+        .and_then(|host| {
+            run_async_for_web_host(host.plugin_catalog_snapshot())
+                .entries
+                .into_iter()
+                .find(|entry| entry.descriptor.metadata.id == plugin_id)
+                .map(|entry| entry.descriptor)
+        })
+        .or_else(|| discover_plugin_descriptor(plugin_id))
+}
+
+fn build_runtime_plugin_payload(snapshot: AppHostPluginCatalogSnapshot) -> Value {
+    let disabled = snapshot
+        .disabled_plugin_ids
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let mut extension_pages = Vec::new();
+    let mut plugins = Vec::new();
+
+    for entry in snapshot.entries {
+        let metadata = &entry.descriptor.metadata;
+        let extra = Map::from_iter(
+            metadata
+                .extra
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        let pages = plugin_extension_pages(&entry);
+        let status = if disabled.contains(metadata.id.as_str()) {
+            "disabled"
+        } else if entry.loaded && entry.load_state != Some(PluginLoadState::Deferred) {
+            "active"
+        } else {
+            "stopped"
+        };
+        let mut plugin = Map::new();
+        plugin.insert(
+            "name".to_string(),
+            Value::String(localized_text(metadata.name.as_str())),
+        );
+        plugin.insert("id".to_string(), Value::String(metadata.id.clone()));
+        plugin.insert(
+            "version".to_string(),
+            Value::String(
+                plugin_extra_string(&extra, "version").unwrap_or_else(|| "builtin".to_string()),
+            ),
+        );
+        plugin.insert(
+            "description".to_string(),
+            Value::String(localized_text(metadata.description.as_str())),
+        );
+        plugin.insert("author".to_string(), Value::String(metadata.author.clone()));
+        plugin.insert("status".to_string(), Value::String(status.to_string()));
+        plugin.insert(
+            "hasConfig".to_string(),
+            Value::Bool(plugin_has_config(&entry)),
+        );
+        plugin.insert("hasPages".to_string(), Value::Bool(!pages.is_empty()));
+        if !metadata.homepage.trim().is_empty() {
+            plugin.insert(
+                "homepage".to_string(),
+                Value::String(metadata.homepage.clone()),
+            );
+        }
+        if let Some(repository) = plugin_extra_string(&extra, "repository") {
+            plugin.insert("repository".to_string(), Value::String(repository));
+        }
+        if let Some(icon) = plugin_extra_string(&extra, "icon") {
+            plugin.insert("icon".to_string(), Value::String(icon));
+        }
+        extension_pages.extend(pages);
+        plugins.push(Value::Object(plugin));
+    }
+
+    Value::Object(Map::from_iter([
+        ("plugins".to_string(), Value::Array(plugins)),
+        ("pluginManagerNotFound".to_string(), Value::Bool(false)),
+        ("extensionPages".to_string(), Value::Array(extension_pages)),
+    ]))
 }
 
 fn discover_plugins() -> Vec<Value> {
@@ -445,8 +1318,10 @@ pub struct WebHostService {
     browser_ip: IpAddr,
     dev_frontend: Option<WebHostDevServer>,
     snapshot_provider: WebHostSnapshotProvider,
+    runtime_host: Option<EmbeddedAppHost>,
     assets: Arc<WebHostAssets>,
     terminal_state: Arc<WebTerminalState>,
+    auth: WebUiAuthManager,
 }
 
 impl WebHostService {
@@ -455,6 +1330,29 @@ impl WebHostService {
         snapshot_provider: WebHostSnapshotProvider,
         assets: WebHostAssets,
     ) -> Result<(Self, TcpListener), String> {
+        let auth = WebUiAuthManager::load_or_init_default()?;
+        if auth.status().password_configured {
+            emit_console_log(
+                LogLevel::Info,
+                "web.host.auth",
+                format!(
+                    "webui password login enabled (store: {})",
+                    auth.storage_path()
+                        .unwrap_or_else(|| PathBuf::from("<memory>"))
+                        .display()
+                ),
+            );
+        } else {
+            emit_console_log(
+                LogLevel::Info,
+                "web.host.auth",
+                format!(
+                    "webui bootstrap login token: {} (valid until a password is configured)",
+                    auth.bootstrap_login_token()
+                ),
+            );
+        }
+
         let bind_addr = SocketAddr::new(config.bind_ip, config.port);
         let listener = StdTcpListener::bind(bind_addr)
             .map_err(|err| format!("failed to bind shared HTTP host on {bind_addr}: {err}"))?;
@@ -473,8 +1371,10 @@ impl WebHostService {
                 browser_ip: config.browser_ip,
                 dev_frontend: config.dev_frontend,
                 snapshot_provider,
+                runtime_host: None,
                 assets: Arc::new(assets),
                 terminal_state: Arc::new(WebTerminalState::default()),
+                auth,
             },
             listener,
         ))
@@ -485,6 +1385,11 @@ impl WebHostService {
         assets: WebHostAssets,
     ) -> Result<(Self, TcpListener), String> {
         Self::bind(WebHostConfig::default(), snapshot_provider, assets)
+    }
+
+    pub fn with_runtime_host(mut self, runtime_host: EmbeddedAppHost) -> Self {
+        self.runtime_host = Some(runtime_host);
+        self
     }
 
     pub fn bind_addr(&self) -> SocketAddr {
@@ -501,8 +1406,8 @@ impl WebHostService {
 
     /// Returns the local auto-login token that the Tauri shell can inject into
     /// the webview so the user never sees the login page in desktop mode.
-    pub fn local_token(&self) -> &str {
-        LOCAL_AUTO_TOKEN
+    pub fn local_token(&self) -> String {
+        self.auth.local_session_token()
     }
 
     pub fn health(&self) -> WebHostHealthPayload {
@@ -556,9 +1461,19 @@ impl WebHostService {
         if let Some((method, raw_path)) = parse_request_line(&String::from_utf8_lossy(&request)) {
             let path = raw_path.split('?').next().unwrap_or(raw_path);
             if method.eq_ignore_ascii_case("GET") && path == LOG_REALTIME_ROUTE {
+                if !self.is_request_authorized(request.as_slice()) {
+                    let response = unauthorized_response(false);
+                    socket.write_all(&response).await?;
+                    return socket.shutdown().await;
+                }
                 return self.stream_realtime_logs(socket).await;
             }
             if method.eq_ignore_ascii_case("GET") && path == SYSTEM_STATUS_REALTIME_ROUTE {
+                if !self.is_request_authorized(request.as_slice()) {
+                    let response = unauthorized_response(false);
+                    socket.write_all(&response).await?;
+                    return socket.shutdown().await;
+                }
                 return self.stream_system_status(socket).await;
             }
         }
@@ -583,7 +1498,12 @@ impl WebHostService {
             Ok(response)
         })
         .await
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("websocket upgrade failed: {err}")))?;
+        .map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("websocket upgrade failed: {err}"),
+            )
+        })?;
 
         let raw_path = request_path
             .lock()
@@ -596,7 +1516,7 @@ impl WebHostService {
         let Some(session) = self.terminal_state.get_session(session_id.as_str()) else {
             return serve_terminal_socket_with_error(ws_stream, "terminal session not found").await;
         };
-        if token != LOCAL_AUTO_TOKEN {
+        if !self.auth.is_session_token_valid(token.as_str()) {
             return serve_terminal_socket_with_error(ws_stream, "terminal token is invalid").await;
         }
         if let Err(err) = session
@@ -611,7 +1531,12 @@ impl WebHostService {
             ws_write
                 .send(terminal_ws_text(format!("{history}\r\n")))
                 .await
-                .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, format!("failed to replay terminal history: {err}")))?;
+                .map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        format!("failed to replay terminal history: {err}"),
+                    )
+                })?;
         }
         ws_write
             .send(terminal_ws_text(format!(
@@ -619,7 +1544,12 @@ impl WebHostService {
                 session.id, session.shell
             )))
             .await
-            .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, format!("failed to write terminal banner: {err}")))?;
+            .map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    format!("failed to write terminal banner: {err}"),
+                )
+            })?;
 
         let mut output_rx = session.subscribe();
         let writer = tokio::spawn(async move {
@@ -628,7 +1558,9 @@ impl WebHostService {
                     Ok(first_chunk) => {
                         let mut chunk = first_chunk;
                         loop {
-                            match tokio::time::timeout(TERMINAL_WS_BATCH_INTERVAL, output_rx.recv()).await {
+                            match tokio::time::timeout(TERMINAL_WS_BATCH_INTERVAL, output_rx.recv())
+                                .await
+                            {
                                 Ok(Ok(next_chunk)) => chunk.push_str(next_chunk.as_str()),
                                 Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
                                 Ok(Err(broadcast::error::RecvError::Closed)) => break,
@@ -650,7 +1582,9 @@ impl WebHostService {
             while let Some(message) = ws_read.next().await {
                 match message {
                     Ok(Message::Text(payload)) => {
-                        if let Err(err) = handle_terminal_client_message(&input_session, payload.as_ref()) {
+                        if let Err(err) =
+                            handle_terminal_client_message(&input_session, payload.as_ref())
+                        {
                             let _ = input_session.output_tx.send(format!(
                                 "\r\n\u{1b}[31m[terminal:{}] {}\u{1b}[0m\r\n",
                                 input_session.id, err
@@ -713,7 +1647,9 @@ impl WebHostService {
                 });
                 write_sse_event(
                     &mut socket,
-                    &serde_json::to_string(&payload).unwrap_or_else(|_| "{\"level\":\"info\",\"message\":\"log serialization error\"}".to_string()),
+                    &serde_json::to_string(&payload).unwrap_or_else(|_| {
+                        "{\"level\":\"info\",\"message\":\"log serialization error\"}".to_string()
+                    }),
                 )
                 .await?;
             }
@@ -761,6 +1697,11 @@ impl WebHostService {
             return build_response("200 OK", "application/json; charset=utf-8", &body, is_head);
         }
 
+        if path.starts_with("/api/") && !public_api_path(path) && !self.is_request_authorized(request)
+        {
+            return unauthorized_response(is_head);
+        }
+
         if path == LOGS_ROUTE {
             let body = serde_json::to_vec_pretty(&WebHostLogsPayload {
                 entries: recent_buffered_logs(LOGS_ROUTE_LIMIT),
@@ -777,11 +1718,21 @@ impl WebHostService {
 
         if path == "/files/theme.css" {
             let body = render_theme_css(&load_theme_config());
-            return build_response("200 OK", "text/css; charset=utf-8", body.as_bytes(), is_head);
+            return build_response(
+                "200 OK",
+                "text/css; charset=utf-8",
+                body.as_bytes(),
+                is_head,
+            );
         }
 
         if let Some(asset) = built_in_public_font(path) {
             return build_response("200 OK", asset.content_type(), asset.body(), is_head);
+        }
+
+        // ── Plugin extension pages ───────────────────────────────────────────
+        if path.starts_with("/plugin/") {
+            return self.route_plugin_page(path, is_head);
         }
 
         // ── Static assets (injected at startup) ───────────────────────────────
@@ -824,7 +1775,12 @@ impl WebHostService {
         // ── /files/theme.css ─────────────────────────────────────────────────
         if path == "/files/theme.css" {
             let body = render_theme_css(&load_theme_config());
-            return build_response("200 OK", "text/css; charset=utf-8", body.as_bytes(), is_head);
+            return build_response(
+                "200 OK",
+                "text/css; charset=utf-8",
+                body.as_bytes(),
+                is_head,
+            );
         }
 
         // Strip the /api prefix for matching
@@ -832,8 +1788,21 @@ impl WebHostService {
 
         // ── Auth ─────────────────────────────────────────────────────────────
         if api_path == "/auth/check" {
-            // Always report as logged-in (no real auth in this stub)
-            let body = napcat_ok(&true);
+            let token = bearer_token_from_request(request);
+            let body = if let Some(token) = token {
+                if self.auth.is_session_token_valid(token.as_str()) {
+                    napcat_ok(&true)
+                } else {
+                    napcat_err(401, "Unauthorized")
+                }
+            } else {
+                napcat_ok(&false)
+            };
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/auth/state" {
+            let body = napcat_ok(&self.auth.status());
             return napcat_response(body, is_head);
         }
 
@@ -845,8 +1814,9 @@ impl WebHostService {
                 struct LocalTokenResponse<'a> {
                     token: &'a str,
                 }
+                let local_token = self.auth.local_session_token();
                 let body = napcat_ok(&LocalTokenResponse {
-                    token: LOCAL_AUTO_TOKEN,
+                    token: local_token.as_str(),
                 });
                 return napcat_response(body, is_head);
             }
@@ -856,19 +1826,64 @@ impl WebHostService {
         }
 
         if api_path == "/auth/login" {
+            let body = parse_json_body(request);
+            let result = body
+                .get("hash")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "token hash is required".to_string())
+                .and_then(|hash| self.auth.login_with_bootstrap_hash(hash));
             #[derive(Serialize)]
             struct AuthResponse {
                 #[serde(rename = "Credential")]
                 credential: String,
             }
-            let body = napcat_ok(&AuthResponse {
-                credential: LOCAL_AUTO_TOKEN.to_string(),
-            });
+            let body = match result {
+                Ok(credential) => napcat_ok(&AuthResponse { credential }),
+                Err(err) => napcat_err(-1, err.as_str()),
+            };
             return napcat_response(body, is_head);
         }
 
-        if api_path == "/auth/update_token" {
-            let body = napcat_ok(&true);
+        if api_path == "/auth/login/password" {
+            let body = parse_json_body(request);
+            let result = body
+                .get("password")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "password is required".to_string())
+                .and_then(|password| self.auth.login_with_password(password));
+            #[derive(Serialize)]
+            struct AuthResponse {
+                #[serde(rename = "Credential")]
+                credential: String,
+            }
+            let body = match result {
+                Ok(credential) => napcat_ok(&AuthResponse { credential }),
+                Err(err) => napcat_err(-1, err.as_str()),
+            };
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/auth/update_token" || api_path == "/auth/update_password" {
+            let body = parse_json_body(request);
+            let current_session = bearer_token_from_request(request);
+            let old_password = body
+                .get("oldPassword")
+                .and_then(Value::as_str)
+                .or_else(|| body.get("oldToken").and_then(Value::as_str));
+            let new_password = body
+                .get("newPassword")
+                .and_then(Value::as_str)
+                .or_else(|| body.get("newToken").and_then(Value::as_str));
+            let body = match new_password {
+                Some(new_password) => match self
+                    .auth
+                    .update_password(current_session.as_deref(), old_password, new_password)
+                {
+                    Ok(()) => napcat_ok(&true),
+                    Err(err) => napcat_err(-1, err.as_str()),
+                },
+                None => napcat_err(-1, "new password is required"),
+            };
             return napcat_response(body, is_head);
         }
 
@@ -877,7 +1892,7 @@ impl WebHostService {
             || api_path == "/auth/passkey/generate-authentication-options"
             || api_path == "/auth/passkey/verify-authentication"
         {
-            let body = napcat_ok(&serde_json::Value::Null);
+            let body = napcat_err(-1, "Passkey auth is not supported by the current runtime");
             return napcat_response(body, is_head);
         }
 
@@ -964,6 +1979,86 @@ impl WebHostService {
             return napcat_response(body, is_head);
         }
 
+        if api_path == "/base/GetHitokoto" {
+            let body = match run_async_for_web_host(fetch_upstream_json(
+                "https://hitokoto.152710.xyz/",
+                None,
+            )) {
+                Ok(payload) => napcat_ok(&payload),
+                Err(err) => napcat_err(-1, err.as_str()),
+            };
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/base/GetGitHubRepoSnapshot" {
+            let query = parse_query_string(raw_path);
+            let owner = match sanitize_repo_component(query.get("owner"), "owner") {
+                Ok(owner) => owner,
+                Err(err) => {
+                    let body = napcat_err(-1, err.as_str());
+                    return napcat_response(body, is_head);
+                }
+            };
+            let repo = match sanitize_repo_component(query.get("repo"), "repo") {
+                Ok(repo) => repo,
+                Err(err) => {
+                    let body = napcat_err(-1, err.as_str());
+                    return napcat_response(body, is_head);
+                }
+            };
+
+            let body = match run_async_for_web_host(async {
+                let base = format!("https://api.github.com/repos/{owner}/{repo}");
+                let repo_url = base.clone();
+                let releases_url = format!("{base}/releases");
+                let pulls_url = format!("{base}/pulls");
+                let contributors_url = format!("{base}/contributors");
+                let (repo, releases, pulls, contributors) = tokio::join!(
+                    fetch_upstream_json(repo_url.as_str(), None),
+                    fetch_upstream_json(releases_url.as_str(), None),
+                    fetch_upstream_json(pulls_url.as_str(), None),
+                    fetch_upstream_json(contributors_url.as_str(), None)
+                );
+                Ok::<Value, String>(serde_json::json!({
+                    "repo": repo?,
+                    "releases": releases?,
+                    "pulls": pulls?,
+                    "contributors": contributors?
+                }))
+            }) {
+                Ok(payload) => napcat_ok(&payload),
+                Err(err) => napcat_err(-1, err.as_str()),
+            };
+            return napcat_response(body, is_head);
+        }
+
+        if api_path == "/base/GetGitHubReadme" {
+            let query = parse_query_string(raw_path);
+            let owner = match sanitize_repo_component(query.get("owner"), "owner") {
+                Ok(owner) => owner,
+                Err(err) => {
+                    let body = napcat_err(-1, err.as_str());
+                    return napcat_response(body, is_head);
+                }
+            };
+            let repo = match sanitize_repo_component(query.get("repo"), "repo") {
+                Ok(repo) => repo,
+                Err(err) => {
+                    let body = napcat_err(-1, err.as_str());
+                    return napcat_response(body, is_head);
+                }
+            };
+            let url = format!("https://api.github.com/repos/{owner}/{repo}/readme");
+            let body = match run_async_for_web_host(fetch_upstream_text(
+                url.as_str(),
+                Some("application/vnd.github.v3.raw"),
+            )) {
+                Ok(content) => napcat_ok(&serde_json::json!({ "content": content })),
+                Err(err) => napcat_err(-1, err.as_str()),
+            };
+            return napcat_response(body, is_head);
+        }
+
         if api_path == "/base/GetNapCatFileHash" {
             let body = napcat_ok(&serde_json::json!({
                 "hash": "",
@@ -988,9 +2083,8 @@ impl WebHostService {
         }
 
         if api_path == "/UpdateNapCat/update" {
-            let body = napcat_ok(
-                &serde_json::json!({ "message": "Update not supported in Liteyuki" }),
-            );
+            let body =
+                napcat_ok(&serde_json::json!({ "message": "Update not supported in Liteyuki" }));
             return napcat_response(body, is_head);
         }
 
@@ -1193,8 +2287,45 @@ impl WebHostService {
                 .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
                 .or_else(|| body.get("config").cloned())
                 .unwrap_or(Value::Null);
-            if let Ok(config) = serde_json::from_value::<OneBotConfig>(config_value) {
-                let _ = save_onebot_config(&config);
+            let config = match serde_json::from_value::<OneBotConfig>(config_value) {
+                Ok(config) => config,
+                Err(err) => {
+                    let body =
+                        napcat_err(-1, format!("invalid OB11 config payload: {err}").as_str());
+                    return napcat_response(body, is_head);
+                }
+            };
+            if let Some(runtime_host) = &self.runtime_host {
+                let next_adapters = match config.to_runtime_adapter_configs() {
+                    Ok(adapters) => adapters,
+                    Err(err) => {
+                        let body = napcat_err(-1, err.as_str());
+                        return napcat_response(body, is_head);
+                    }
+                };
+                let previous_config = load_onebot_config();
+                let previous_adapters = run_async_for_web_host(runtime_host.adapter_configs());
+                if let Err(err) = save_onebot_config(&config) {
+                    let body = napcat_err(-1, err.as_str());
+                    return napcat_response(body, is_head);
+                }
+                if let Err(err) =
+                    run_async_for_web_host(runtime_host.apply_adapter_configs(next_adapters))
+                {
+                    let _ = save_onebot_config(&previous_config);
+                    let rollback_result = run_async_for_web_host(
+                        runtime_host.apply_adapter_configs(previous_adapters),
+                    );
+                    let message = match rollback_result {
+                        Ok(()) => err,
+                        Err(rollback_err) => format!("{err}; rollback failed: {rollback_err}"),
+                    };
+                    let body = napcat_err(-1, message.as_str());
+                    return napcat_response(body, is_head);
+                }
+            } else if let Err(err) = save_onebot_config(&config) {
+                let body = napcat_err(-1, err.as_str());
+                return napcat_response(body, is_head);
             }
             let body = napcat_ok(&serde_json::Value::Null);
             return napcat_response(body, is_head);
@@ -1258,8 +2389,10 @@ impl WebHostService {
             if let Some(enabled) = body.get("enableXForwardedFor").and_then(Value::as_bool) {
                 config.enable_x_forwarded_for = enabled;
             }
-            let _ = save_webui_server_config(&config);
-            let body = napcat_ok(&true);
+            let body = match save_webui_server_config(&config) {
+                Ok(()) => napcat_ok(&true),
+                Err(err) => napcat_err(-1, err.as_str()),
+            };
             return napcat_response(body, is_head);
         }
 
@@ -1270,11 +2403,18 @@ impl WebHostService {
 
         if api_path == "/WebUIConfig/UpdateDisableWebUI" {
             let mut config = load_webui_server_config(self.bind_addr.port());
-            if let Some(disable) = parse_json_body(request).get("disable").and_then(Value::as_bool) {
+            let body = if let Some(disable) = parse_json_body(request)
+                .get("disable")
+                .and_then(Value::as_bool)
+            {
                 config.disable_webui = disable;
-                let _ = save_webui_server_config(&config);
-            }
-            let body = napcat_ok(&true);
+                match save_webui_server_config(&config) {
+                    Ok(()) => napcat_ok(&true),
+                    Err(err) => napcat_err(-1, err.as_str()),
+                }
+            } else {
+                napcat_err(-1, "missing disable flag")
+            };
             return napcat_response(body, is_head);
         }
 
@@ -1323,9 +2463,10 @@ impl WebHostService {
                             .map_err(|err| format!("failed to write key: {err}"))
                     })
             };
-            let body = napcat_ok(&serde_json::json!({
-                "message": result.map(|_| "SSL certificate saved".to_string()).unwrap_or_else(|err| err)
-            }));
+            let body = match result {
+                Ok(()) => napcat_ok(&serde_json::json!({ "message": "SSL certificate saved" })),
+                Err(err) => napcat_err(-1, err.as_str()),
+            };
             return napcat_response(body, is_head);
         }
 
@@ -1363,8 +2504,7 @@ impl WebHostService {
                 })
                 .to_string()
             } else {
-                serde_json::json!({ "level": "info", "message": "Liteyuki running" })
-                    .to_string()
+                serde_json::json!({ "level": "info", "message": "Liteyuki running" }).to_string()
             };
             return sse_response(&event_data, is_head);
         }
@@ -1416,12 +2556,18 @@ impl WebHostService {
 
         // ── Plugin ────────────────────────────────────────────────────────────
         if api_path == "/Plugin/List" {
-            let plugins = discover_plugins();
-            let body = napcat_ok(&serde_json::json!({
-                "plugins": plugins,
-                "pluginManagerNotFound": false,
-                "extensionPages": []
-            }));
+            let payload = if let Some(runtime_host) = &self.runtime_host {
+                build_runtime_plugin_payload(run_async_for_web_host(
+                    runtime_host.plugin_catalog_snapshot(),
+                ))
+            } else {
+                serde_json::json!({
+                    "plugins": discover_plugins(),
+                    "pluginManagerNotFound": false,
+                    "extensionPages": []
+                })
+            };
+            let body = napcat_ok(&payload);
             return napcat_response(body, is_head);
         }
 
@@ -1434,55 +2580,183 @@ impl WebHostService {
 
         if api_path == "/Plugin/SetStatus" {
             let body = parse_json_body(request);
-            if let (Some(id), Some(enable)) = (
+            let (id, enable) = match (
                 body.get("id").and_then(Value::as_str),
                 body.get("enable").and_then(Value::as_bool),
             ) {
-                let _ = update_disabled_plugins(id, enable);
+                (Some(id), Some(enable)) if !id.trim().is_empty() => (id.trim(), enable),
+                _ => {
+                    let body = napcat_err(-1, "missing plugin id or enable flag");
+                    return napcat_response(body, is_head);
+                }
+            };
+            if let Some(runtime_host) = &self.runtime_host {
+                let previous_disabled =
+                    run_async_for_web_host(runtime_host.plugin_catalog_snapshot())
+                        .disabled_plugin_ids;
+                let mut next_disabled = previous_disabled.clone();
+                if enable {
+                    next_disabled.retain(|entry| entry != id);
+                } else if !next_disabled.iter().any(|entry| entry == id) {
+                    next_disabled.push(id.to_string());
+                }
+                let Some(config_path) = resolve_app_config_path() else {
+                    let body = napcat_err(-1, "app config path not found");
+                    return napcat_response(body, is_head);
+                };
+                if let Err(err) = persist_disabled_plugins(config_path.as_path(), &next_disabled) {
+                    let body = napcat_err(-1, err.as_str());
+                    return napcat_response(body, is_head);
+                }
+                if let Err(err) =
+                    run_async_for_web_host(runtime_host.apply_disabled_plugins(next_disabled))
+                {
+                    let _ = persist_disabled_plugins(config_path.as_path(), &previous_disabled);
+                    let body = napcat_err(-1, err.as_str());
+                    return napcat_response(body, is_head);
+                }
+            } else if let Err(err) = update_disabled_plugins(id, enable) {
+                let body = napcat_err(-1, err.as_str());
+                return napcat_response(body, is_head);
             }
             let body = napcat_ok(&serde_json::Value::Null);
             return napcat_response(body, is_head);
         }
 
         if api_path == "/Plugin/Uninstall" {
-            let body = napcat_ok(&serde_json::Value::Null);
+            let body = napcat_err(-1, "Plugin uninstall is not supported by the current runtime");
             return napcat_response(body, is_head);
         }
 
         if api_path == "/Plugin/Import" {
-            let body = napcat_ok(&serde_json::json!({
-                "message": "Plugin import not supported",
-                "pluginId": "",
-                "installPath": ""
-            }));
+            let body = match install_local_plugin_archive(request, self.runtime_host.as_ref()) {
+                Ok(data) => napcat_ok(&data),
+                Err(err) => napcat_err(-1, err.as_str()),
+            };
             return napcat_response(body, is_head);
         }
 
         if api_path == "/Plugin/Store/List" {
-            let body = napcat_ok(&serde_json::json!({ "plugins": [] }));
+            let query = parse_query_string(raw_path);
+            let force_refresh = query
+                .get("forceRefresh")
+                .map(String::as_str)
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+            let _ = force_refresh;
+            let body = napcat_ok(&build_local_plugin_store_catalog(self.runtime_host.as_ref()));
             return napcat_response(body, is_head);
         }
 
         if api_path.starts_with("/Plugin/Store/Detail/") {
-            let body = napcat_err(-1, "Plugin not found");
+            let plugin_id = api_path
+                .trim_start_matches("/Plugin/Store/Detail/")
+                .trim();
+            if plugin_id.is_empty() {
+                let body = napcat_err(-1, "missing plugin id");
+                return napcat_response(body, is_head);
+            }
+            let catalog = build_local_plugin_store_catalog(self.runtime_host.as_ref());
+            let body = if let Some(plugin) = catalog.plugins.into_iter().find(|item| item.id == plugin_id)
+            {
+                napcat_ok(&plugin)
+            } else {
+                napcat_err(-1, "Plugin not found")
+            };
             return napcat_response(body, is_head);
         }
 
         if api_path == "/Plugin/Store/Install" {
-            let body = napcat_ok(&serde_json::Value::Null);
+            let body = napcat_err(-1, "Plugin store install is not supported by the current runtime");
             return napcat_response(body, is_head);
+        }
+
+        if api_path == "/Plugin/Store/Install/SSE" {
+            let event_data = serde_json::json!({
+                "error": "Plugin store install is not supported by the current runtime"
+            })
+            .to_string();
+            return sse_response(&event_data, is_head);
         }
 
         if api_path == "/Plugin/Config" {
             if method.eq_ignore_ascii_case("GET") {
+                let query = parse_query_string(raw_path);
+                let plugin_id = query
+                    .get("id")
+                    .map(String::as_str)
+                    .unwrap_or_default()
+                    .trim();
+                if plugin_id.is_empty() {
+                    let body = napcat_err(-1, "missing plugin id");
+                    return napcat_response(body, is_head);
+                }
+                let Some(descriptor) =
+                    resolve_plugin_descriptor(self.runtime_host.as_ref(), plugin_id)
+                else {
+                    let body = napcat_err(-1, "plugin not found");
+                    return napcat_response(body, is_head);
+                };
+                if !plugin_can_read_config(&descriptor)
+                    || plugin_declared_config_path(&descriptor).is_none()
+                {
+                    let body = napcat_err(-1, "plugin does not expose readable WebUI config");
+                    return napcat_response(body, is_head);
+                }
+                let config = match PluginSdk::default().read_explicit_config_document(&descriptor) {
+                    Ok(Value::Object(config)) => config,
+                    Ok(_) => {
+                        let body = napcat_err(-1, "plugin config root must be an object");
+                        return napcat_response(body, is_head);
+                    }
+                    Err(err) => {
+                        let message = err.to_string();
+                        let body = napcat_err(-1, message.as_str());
+                        return napcat_response(body, is_head);
+                    }
+                };
                 let body = napcat_ok(&serde_json::json!({
-                    "schema": [],
-                    "config": {},
+                    "schema": infer_plugin_config_schema(&config),
+                    "config": Value::Object(config),
                     "supportReactive": false
                 }));
                 return napcat_response(body, is_head);
             }
-            // POST: set config
+            let body = parse_json_body(request);
+            let plugin_id = body
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if plugin_id.is_empty() {
+                let body = napcat_err(-1, "missing plugin id");
+                return napcat_response(body, is_head);
+            }
+            let Some(descriptor) = resolve_plugin_descriptor(self.runtime_host.as_ref(), plugin_id)
+            else {
+                let body = napcat_err(-1, "plugin not found");
+                return napcat_response(body, is_head);
+            };
+            if !plugin_can_write_config(&descriptor)
+                || plugin_declared_config_path(&descriptor).is_none()
+            {
+                let body = napcat_err(-1, "plugin does not expose writable WebUI config");
+                return napcat_response(body, is_head);
+            }
+            let Some(config) = body.get("config") else {
+                let body = napcat_err(-1, "missing plugin config");
+                return napcat_response(body, is_head);
+            };
+            if !config.is_object() {
+                let body = napcat_err(-1, "plugin config must be a JSON object");
+                return napcat_response(body, is_head);
+            }
+            if let Err(err) =
+                PluginSdk::default().write_explicit_config_document(&descriptor, config)
+            {
+                let message = err.to_string();
+                let body = napcat_err(-1, message.as_str());
+                return napcat_response(body, is_head);
+            }
             let body = napcat_ok(&serde_json::Value::Null);
             return napcat_response(body, is_head);
         }
@@ -1500,41 +2774,184 @@ impl WebHostService {
 
         // ── Mirror ────────────────────────────────────────────────────────────
         if api_path == "/Mirror/List" {
-            let body = napcat_ok(&serde_json::json!({
-                "fileMirrors": [],
-                "rawMirrors": [],
-                "customMirror": null,
-                "timeout": 5000
-            }));
+            let body = napcat_ok(&load_mirror_config());
             return napcat_response(body, is_head);
         }
 
         if api_path == "/Mirror/SetCustom" {
-            let body = napcat_ok(&serde_json::Value::Null);
+            let payload = parse_json_body(request);
+            let mut config = load_mirror_config();
+            config.custom_mirror = payload
+                .get("mirror")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+            let body = match save_mirror_config(&config) {
+                Ok(()) => napcat_ok(&serde_json::Value::Null),
+                Err(err) => napcat_err(-1, err.as_str()),
+            };
             return napcat_response(body, is_head);
         }
 
         if api_path == "/Mirror/Test" {
+            let payload = parse_json_body(request);
+            let test_type = payload
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("file");
+            let mirror = payload
+                .get("mirror")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            let config = load_mirror_config();
+            let result = run_async_for_web_host(test_mirror_candidate(
+                if mirror.is_empty() { "自动选择" } else { mirror },
+                (!mirror.is_empty()).then_some(mirror),
+                test_type,
+                config.timeout,
+            ));
             let body = napcat_ok(&serde_json::json!({
-                "mirror": "",
-                "latency": 0,
-                "success": false,
-                "error": "Mirror testing not supported"
+                "mirror": result.mirror,
+                "latency": result.latency,
+                "success": result.success,
+                "error": result.error
             }));
             return napcat_response(body, is_head);
         }
 
         // SSE: mirror test
         if api_path == "/Mirror/Test/SSE" {
-            let event_data = serde_json::json!({
-                "type": "complete",
-                "results": [],
-                "failed": [],
-                "fastest": null,
-                "message": "Mirror testing not supported"
+            let query = parse_query_string(raw_path);
+            let test_type = query
+                .get("type")
+                .map(String::as_str)
+                .unwrap_or("file");
+            let config = load_mirror_config();
+            let mirrors = if test_type.eq_ignore_ascii_case("raw") {
+                config.raw_mirrors.clone()
+            } else {
+                config.file_mirrors.clone()
+            };
+
+            let total = mirrors.len() + 1;
+            let mut events = vec![serde_json::json!({
+                "type": "start",
+                "total": total,
+                "message": "开始测速镜像源"
             })
-            .to_string();
-            return sse_response(&event_data, is_head);
+            .to_string()];
+            let mut results = Vec::new();
+
+            let original_label = if test_type.eq_ignore_ascii_case("raw") {
+                "https://raw.githubusercontent.com"
+            } else {
+                "https://github.com"
+            };
+            events.push(
+                serde_json::json!({
+                    "type": "testing",
+                    "index": 0,
+                    "total": total,
+                    "mirror": original_label,
+                    "message": format!("测试 {}", original_label)
+                })
+                .to_string(),
+            );
+            let original_result = run_async_for_web_host(test_mirror_candidate(
+                original_label,
+                None,
+                test_type,
+                config.timeout,
+            ));
+            events.push(
+                serde_json::json!({
+                    "type": "result",
+                    "index": 0,
+                    "total": total,
+                    "result": {
+                        "mirror": original_result.mirror,
+                        "latency": original_result.latency,
+                        "success": original_result.success,
+                        "error": original_result.error
+                    }
+                })
+                .to_string(),
+            );
+            results.push(original_result);
+
+            for (index, mirror) in mirrors.iter().enumerate() {
+                events.push(
+                    serde_json::json!({
+                        "type": "testing",
+                        "index": index + 1,
+                        "total": total,
+                        "mirror": mirror,
+                        "message": format!("测试 {}", mirror)
+                    })
+                    .to_string(),
+                );
+                let result = run_async_for_web_host(test_mirror_candidate(
+                    mirror,
+                    Some(mirror.as_str()),
+                    test_type,
+                    config.timeout,
+                ));
+                events.push(
+                    serde_json::json!({
+                        "type": "result",
+                        "index": index + 1,
+                        "total": total,
+                        "result": {
+                            "mirror": result.mirror,
+                            "latency": result.latency,
+                            "success": result.success,
+                            "error": result.error
+                        }
+                    })
+                    .to_string(),
+                );
+                results.push(result);
+            }
+
+            let successful_results = results
+                .iter()
+                .filter(|result| result.success)
+                .cloned()
+                .collect::<Vec<_>>();
+            let failed_results = results
+                .iter()
+                .filter(|result| !result.success)
+                .cloned()
+                .collect::<Vec<_>>();
+            let fastest = successful_results.iter().min_by_key(|result| result.latency);
+            events.push(
+                serde_json::json!({
+                    "type": "complete",
+                    "results": successful_results.iter().map(|result| serde_json::json!({
+                        "mirror": result.mirror,
+                        "latency": result.latency,
+                        "success": result.success,
+                        "error": result.error
+                    })).collect::<Vec<_>>(),
+                    "failed": failed_results.iter().map(|result| serde_json::json!({
+                        "mirror": result.mirror,
+                        "latency": result.latency,
+                        "success": result.success,
+                        "error": result.error
+                    })).collect::<Vec<_>>(),
+                    "fastest": fastest.map(|result| serde_json::json!({
+                        "mirror": result.mirror,
+                        "latency": result.latency,
+                        "success": result.success,
+                        "error": result.error
+                    })),
+                    "message": "测速完成"
+                })
+                .to_string(),
+            );
+            return sse_batch_response(&events, is_head);
         }
 
         // ── Debug WebSocket (handled by proxy in dev; stub for prod) ──────────
@@ -1550,6 +2967,128 @@ impl WebHostService {
         // ── Fallthrough: unknown /api/* ────────────────────────────────────────
         let body = napcat_err(-1, "not found");
         napcat_response(body, is_head)
+    }
+
+    fn route_plugin_page(&self, path: &str, is_head: bool) -> Vec<u8> {
+        let Some(rest) = path.strip_prefix("/plugin/") else {
+            return build_response(
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"not found",
+                is_head,
+            );
+        };
+        let Some((plugin_id, page_path)) = rest.split_once("/page/") else {
+            return build_response(
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"not found",
+                is_head,
+            );
+        };
+        let plugin_id = plugin_id.trim();
+        if plugin_id.is_empty() {
+            return build_response(
+                "400 Bad Request",
+                "text/plain; charset=utf-8",
+                b"missing plugin id",
+                is_head,
+            );
+        }
+
+        let Some(descriptor) = resolve_plugin_descriptor(self.runtime_host.as_ref(), plugin_id)
+        else {
+            return build_response(
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"plugin not found",
+                is_head,
+            );
+        };
+        let Some(manifest_dir) = descriptor
+            .manifest_path
+            .as_ref()
+            .and_then(|path| path.parent())
+        else {
+            return build_response(
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"plugin page not found",
+                is_head,
+            );
+        };
+
+        let wants_index = page_path.ends_with('/')
+            || !page_path
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .contains('.');
+        if wants_index && !page_path.ends_with('/') {
+            let location = format!("{path}/");
+            return build_redirect_response("307 Temporary Redirect", location.as_str(), is_head);
+        }
+
+        let normalized_request = page_path.trim_matches('/');
+        if normalized_request.is_empty() {
+            return build_response(
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"plugin page not found",
+                is_head,
+            );
+        }
+
+        let Some(request_path) = sanitize_request_path(normalized_request) else {
+            return build_response(
+                "400 Bad Request",
+                "text/plain; charset=utf-8",
+                b"bad plugin path",
+                is_head,
+            );
+        };
+        let request_key = request_path
+            .iter()
+            .map(|segment| segment.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        let declared = plugin_declared_page_paths(&descriptor)
+            .into_iter()
+            .any(|declared| {
+                request_key == declared || request_key.starts_with(format!("{declared}/").as_str())
+            });
+        if !declared {
+            return build_response(
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"plugin page not declared",
+                is_head,
+            );
+        }
+
+        let webui_root = manifest_dir.join("webui");
+        let asset_path = if wants_index {
+            webui_root.join(&request_path).join("index.html")
+        } else {
+            webui_root.join(&request_path)
+        };
+        if !asset_path.starts_with(&webui_root) {
+            return build_response(
+                "400 Bad Request",
+                "text/plain; charset=utf-8",
+                b"bad plugin path",
+                is_head,
+            );
+        }
+        match read_asset_file(asset_path).map(maybe_inject_plugin_page_auth_bridge) {
+            Some(asset) => build_response("200 OK", asset.content_type(), asset.body(), is_head),
+            None => build_response(
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"plugin page not found",
+                is_head,
+            ),
+        }
     }
 
     /// Handle `/api/File/*` routes.
@@ -1570,23 +3109,22 @@ impl WebHostService {
                     .get("onlyDirectory")
                     .map(|value| value.eq_ignore_ascii_case("true"))
                     .unwrap_or(false);
-                let body = match resolve_workspace_path(target)
-                    .and_then(|path| {
-                        ensure_path_within_workspace(path.as_path())?;
-                        let mut items = fs::read_dir(path)
-                            .map_err(|err| format!("failed to read workspace directory: {err}"))?
-                            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-                            .filter_map(|entry| build_workspace_file_info(entry.as_path()).ok())
-                            .filter(|entry| !only_directory || entry.is_directory)
-                            .collect::<Vec<_>>();
-                        items.sort_by(|left, right| {
-                            left.is_directory
-                                .cmp(&right.is_directory)
-                                .reverse()
-                                .then_with(|| left.name.cmp(&right.name))
-                        });
-                        Ok(items)
-                    }) {
+                let body = match resolve_workspace_path(target).and_then(|path| {
+                    ensure_path_within_workspace(path.as_path())?;
+                    let mut items = fs::read_dir(path)
+                        .map_err(|err| format!("failed to read workspace directory: {err}"))?
+                        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                        .filter_map(|entry| build_workspace_file_info(entry.as_path()).ok())
+                        .filter(|entry| !only_directory || entry.is_directory)
+                        .collect::<Vec<_>>();
+                    items.sort_by(|left, right| {
+                        left.is_directory
+                            .cmp(&right.is_directory)
+                            .reverse()
+                            .then_with(|| left.name.cmp(&right.name))
+                    });
+                    Ok(items)
+                }) {
                     Ok(items) => napcat_ok(&items),
                     Err(err) => napcat_err(-1, err.as_str()),
                 };
@@ -1594,12 +3132,10 @@ impl WebHostService {
             }
             if api_path == "/File/read" {
                 let target = query.get("path").map(String::as_str).unwrap_or("/");
-                let body = match resolve_workspace_path(target)
-                    .and_then(|path| {
-                        ensure_path_within_workspace(path.as_path())?;
-                        fs::read_to_string(path)
-                            .map_err(|err| format!("failed to read file: {err}"))
-                    }) {
+                let body = match resolve_workspace_path(target).and_then(|path| {
+                    ensure_path_within_workspace(path.as_path())?;
+                    fs::read_to_string(path).map_err(|err| format!("failed to read file: {err}"))
+                }) {
                     Ok(content) => napcat_ok(&content),
                     Err(err) => napcat_err(-1, err.as_str()),
                 };
@@ -1611,12 +3147,10 @@ impl WebHostService {
             }
             if api_path.starts_with("/File/download") {
                 let target = query.get("path").map(String::as_str).unwrap_or("/");
-                if let Ok(path) = resolve_workspace_path(target)
-                    .and_then(|path| {
-                        ensure_path_within_workspace(path.as_path())?;
-                        Ok(path)
-                    })
-                    && let Ok(bytes) = fs::read(path)
+                if let Ok(path) = resolve_workspace_path(target).and_then(|path| {
+                    ensure_path_within_workspace(path.as_path())?;
+                    Ok(path)
+                }) && let Ok(bytes) = fs::read(path)
                 {
                     return build_response(
                         "200 OK",
@@ -1639,12 +3173,10 @@ impl WebHostService {
             let body = parse_json_body(_request);
             if api_path.starts_with("/File/download") {
                 let target = query.get("path").map(String::as_str).unwrap_or("/");
-                if let Ok(path) = resolve_workspace_path(target)
-                    .and_then(|path| {
-                        ensure_path_within_workspace(path.as_path())?;
-                        Ok(path)
-                    })
-                    && let Ok(bytes) = fs::read(path)
+                if let Ok(path) = resolve_workspace_path(target).and_then(|path| {
+                    ensure_path_within_workspace(path.as_path())?;
+                    Ok(path)
+                }) && let Ok(bytes) = fs::read(path)
                 {
                     return build_response(
                         "200 OK",
@@ -1770,7 +3302,10 @@ impl WebHostService {
                             if let Ok(metadata) = fs::metadata(&path) {
                                 if metadata.is_dir() {
                                     fs::remove_dir_all(&path).map_err(|err| {
-                                        format!("failed to remove directory {}: {err}", path.display())
+                                        format!(
+                                            "failed to remove directory {}: {err}",
+                                            path.display()
+                                        )
                                     })?;
                                 } else {
                                     fs::remove_file(&path).map_err(|err| {
@@ -1829,16 +3364,20 @@ impl WebHostService {
                     .ok_or_else(|| "items is required".to_string())
                     .and_then(|items| {
                         for item in items {
-                            let from = item.get("sourcePath").and_then(Value::as_str).ok_or_else(|| {
-                                "sourcePath is required".to_string()
-                            })?;
-                            let to = item.get("targetPath").and_then(Value::as_str).ok_or_else(|| {
-                                "targetPath is required".to_string()
-                            })?;
+                            let from = item
+                                .get("sourcePath")
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| "sourcePath is required".to_string())?;
+                            let to = item
+                                .get("targetPath")
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| "targetPath is required".to_string())?;
                             let from_path = resolve_workspace_path(from)?;
                             let to_path = resolve_workspace_path(to)?;
                             ensure_path_within_workspace(from_path.as_path())?;
-                            ensure_path_within_workspace(parent_or_self(to_path.as_path()).as_path())?;
+                            ensure_path_within_workspace(
+                                parent_or_self(to_path.as_path()).as_path(),
+                            )?;
                             if let Some(parent) = to_path.parent() {
                                 fs::create_dir_all(parent).map_err(|err| {
                                     format!("failed to create parent directory: {err}")
@@ -1978,6 +3517,41 @@ fn rewrite_host_port(host: &str, port: u16) -> String {
     }
 
     format!("{host}:{port}")
+}
+
+fn public_api_path(path: &str) -> bool {
+    matches!(
+        path,
+        HEALTH_ROUTE
+            | "/api/auth/check"
+            | "/api/auth/state"
+            | "/api/auth/local-token"
+            | "/api/auth/login"
+            | "/api/auth/login/password"
+    )
+}
+
+fn bearer_token_from_request(request: &[u8]) -> Option<String> {
+    let request = String::from_utf8_lossy(request);
+    let header = extract_header(&request, "Authorization")?;
+    let (scheme, token) = header.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+fn unauthorized_response(head_only: bool) -> Vec<u8> {
+    napcat_response(napcat_err(401, "Unauthorized"), head_only)
+}
+
+impl WebHostService {
+    fn is_request_authorized(&self, request: &[u8]) -> bool {
+        bearer_token_from_request(request)
+            .map(|token| self.auth.is_session_token_valid(token.as_str()))
+            .unwrap_or(false)
+    }
 }
 
 fn load_directory_index_asset(directory: &WebHostAssetDirectory) -> Option<WebHostAsset> {
@@ -2122,8 +3696,10 @@ mod tests {
             browser_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             dev_frontend: None,
             snapshot_provider: Arc::new(move || snapshot.clone()),
+            runtime_host: None,
             assets: Arc::new(test_assets()),
             terminal_state: Arc::new(WebTerminalState::default()),
+            auth: WebUiAuthManager::in_memory_for_tests(),
         }
     }
 
@@ -2150,6 +3726,17 @@ mod tests {
             (actual - expected).abs() < 0.001,
             "expected {expected}, got {actual}"
         );
+    }
+
+    fn local_auth_header(server: &WebHostService) -> String {
+        format!("Authorization: Bearer {}", server.auth.local_session_token())
+    }
+
+    fn bootstrap_login_hash(server: &WebHostService) -> String {
+        use sha2::{Digest, Sha256};
+
+        let digest = Sha256::digest(format!("{}.napcat", server.auth.bootstrap_login_token()));
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
     #[test]
@@ -2189,9 +3776,100 @@ mod tests {
     }
 
     #[test]
-    fn system_status_route_returns_frontend_compatible_shape() {
+    fn protected_api_requires_valid_bearer_token() {
         let response = test_server().route_http_request(
-            b"GET /api/base/GetSysStatusRealTime HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            b"GET /api/QQLogin/GetQQLoginInfo HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (headers, body) = split_response(response);
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("unauthorized body should be valid json");
+
+        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert_eq!(body["code"], 401);
+        assert_eq!(body["message"], "Unauthorized");
+    }
+
+    #[test]
+    fn auth_route_supports_bootstrap_then_password_login() {
+        let server = test_server();
+        let bootstrap_hash = bootstrap_login_hash(&server);
+        let bootstrap_body = format!("{{\"hash\":\"{bootstrap_hash}\"}}");
+        let login_response = server.route_http_request(
+            format!(
+                "POST /api/auth/login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                bootstrap_body.len(),
+                bootstrap_body
+            )
+            .as_bytes(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (_, login_body) = split_response(login_response);
+        let login_body: serde_json::Value =
+            serde_json::from_slice(&login_body).expect("bootstrap login body should be valid json");
+        let issued_session = login_body["data"]["Credential"]
+            .as_str()
+            .expect("bootstrap login should return a session token");
+
+        let update_body = r#"{"newPassword":"Pass1234"}"#;
+        let update_response = server.route_http_request(
+            format!(
+                "POST /api/auth/update_password HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {issued_session}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                update_body.len(),
+                update_body
+            )
+            .as_bytes(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (_, update_body) = split_response(update_response);
+        let update_body: serde_json::Value =
+            serde_json::from_slice(&update_body).expect("update password body should be valid json");
+        assert_eq!(update_body["code"], 0);
+        assert_eq!(update_body["data"], true);
+
+        let password_body = r#"{"password":"Pass1234"}"#;
+        let password_response = server.route_http_request(
+            format!(
+                "POST /api/auth/login/password HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                password_body.len(),
+                password_body
+            )
+            .as_bytes(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (_, password_body) = split_response(password_response);
+        let password_body: serde_json::Value =
+            serde_json::from_slice(&password_body).expect("password login body should be valid json");
+        assert!(
+            password_body["data"]["Credential"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+
+        let disabled_response = server.route_http_request(
+            format!(
+                "POST /api/auth/login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                bootstrap_body.len(),
+                bootstrap_body
+            )
+            .as_bytes(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (_, disabled_body) = split_response(disabled_response);
+        let disabled_body: serde_json::Value =
+            serde_json::from_slice(&disabled_body).expect("disabled bootstrap login body should be valid json");
+        assert_ne!(disabled_body["code"], 0);
+    }
+
+    #[test]
+    fn system_status_route_returns_frontend_compatible_shape() {
+        let server = test_server();
+        let response = server.route_http_request(
+            format!(
+                "GET /api/base/GetSysStatusRealTime HTTP/1.1\r\nHost: localhost\r\n{}\r\n\r\n",
+                local_auth_header(&server)
+            )
+            .as_bytes(),
             IpAddr::V4(Ipv4Addr::LOCALHOST),
         );
         let (headers, body) = split_response(response);
@@ -2227,8 +3905,13 @@ mod tests {
 
     #[test]
     fn qq_login_info_route_uses_runtime_identity() {
-        let response = test_server().route_http_request(
-            b"POST /api/QQLogin/GetQQLoginInfo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}",
+        let server = test_server();
+        let response = server.route_http_request(
+            format!(
+                "POST /api/QQLogin/GetQQLoginInfo HTTP/1.1\r\nHost: localhost\r\n{}\r\nContent-Length: 2\r\n\r\n{{}}",
+                local_auth_header(&server)
+            )
+            .as_bytes(),
             IpAddr::V4(Ipv4Addr::LOCALHOST),
         );
         let (headers, body) = split_response(response);
@@ -2273,6 +3956,7 @@ mod tests {
 
     #[test]
     fn logs_route_returns_recent_buffered_entries() {
+        let server = test_server();
         let unique = format!(
             "web-host-log-{}",
             SystemTime::now()
@@ -2282,8 +3966,12 @@ mod tests {
         );
         crate::emit_console_log(crate::LogLevel::Info, "web.host.test", unique.as_str());
 
-        let response = test_server().route_http_request(
-            b"GET /api/logs HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        let response = server.route_http_request(
+            format!(
+                "GET /api/logs HTTP/1.1\r\nHost: localhost\r\n{}\r\n\r\n",
+                local_auth_header(&server)
+            )
+            .as_bytes(),
             IpAddr::V4(Ipv4Addr::LOCALHOST),
         );
         let (headers, body) = split_response(response);
@@ -2304,12 +3992,11 @@ mod tests {
         let server = test_server();
 
         let create_response = server.route_http_request(
-            br#"POST /api/Log/terminal/create HTTP/1.1
-Host: localhost
-Content-Type: application/json
-Content-Length: 21
-
-{"cols":100,"rows":30}"#,
+            format!(
+                "POST /api/Log/terminal/create HTTP/1.1\r\nHost: localhost\r\n{}\r\nContent-Type: application/json\r\nContent-Length: 21\r\n\r\n{{\"cols\":100,\"rows\":30}}",
+                local_auth_header(&server)
+            )
+            .as_bytes(),
             IpAddr::V4(Ipv4Addr::LOCALHOST),
         );
         let (_, create_body) = split_response(create_response);
@@ -2322,7 +4009,11 @@ Content-Length: 21
         assert!(terminal_id.starts_with("term-"));
 
         let list_response = server.route_http_request(
-            b"GET /api/Log/terminal/list HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            format!(
+                "GET /api/Log/terminal/list HTTP/1.1\r\nHost: localhost\r\n{}\r\n\r\n",
+                local_auth_header(&server)
+            )
+            .as_bytes(),
             IpAddr::V4(Ipv4Addr::LOCALHOST),
         );
         let (_, list_body) = split_response(list_response);
@@ -2337,7 +4028,8 @@ Content-Length: 21
 
         let close_response = server.route_http_request(
             format!(
-                "POST /api/Log/terminal/{terminal_id}/close HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
+                "POST /api/Log/terminal/{terminal_id}/close HTTP/1.1\r\nHost: localhost\r\n{}\r\nContent-Length: 0\r\n\r\n",
+                local_auth_header(&server)
             )
             .as_bytes(),
             IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -2348,7 +4040,11 @@ Content-Length: 21
         assert_eq!(close_body["data"], true);
 
         let list_response = server.route_http_request(
-            b"GET /api/Log/terminal/list HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            format!(
+                "GET /api/Log/terminal/list HTTP/1.1\r\nHost: localhost\r\n{}\r\n\r\n",
+                local_auth_header(&server)
+            )
+            .as_bytes(),
             IpAddr::V4(Ipv4Addr::LOCALHOST),
         );
         let (_, list_body) = split_response(list_response);
@@ -2377,7 +4073,10 @@ Content-Length: 21
         let appended = appended_log_entries(previous.as_slice(), current.as_slice());
 
         assert_eq!(
-            appended.into_iter().map(|item| item.message).collect::<Vec<_>>(),
+            appended
+                .into_iter()
+                .map(|item| item.message)
+                .collect::<Vec<_>>(),
             vec!["d".to_string(), "e".to_string()]
         );
     }
@@ -2431,8 +4130,13 @@ Content-Length: 21
 
     #[test]
     fn ob11_config_route_returns_napcat_compatible_shape() {
-        let response = test_server().route_http_request(
-            b"GET /api/OB11Config/GetConfig HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        let server = test_server();
+        let response = server.route_http_request(
+            format!(
+                "GET /api/OB11Config/GetConfig HTTP/1.1\r\nHost: localhost\r\n{}\r\n\r\n",
+                local_auth_header(&server)
+            )
+            .as_bytes(),
             IpAddr::V4(Ipv4Addr::LOCALHOST),
         );
         let (headers, body) = split_response(response);
@@ -2467,8 +4171,13 @@ Content-Length: 21
 
     #[test]
     fn i18n_route_returns_current_catalog_snapshot() {
-        let response = test_server().route_http_request(
-            b"GET /api/i18n HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        let server = test_server();
+        let response = server.route_http_request(
+            format!(
+                "GET /api/i18n HTTP/1.1\r\nHost: localhost\r\n{}\r\n\r\n",
+                local_auth_header(&server)
+            )
+            .as_bytes(),
             IpAddr::V4(Ipv4Addr::LOCALHOST),
         );
         let (headers, body) = split_response(response);
@@ -2556,8 +4265,10 @@ Content-Length: 21
             browser_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             dev_frontend: None,
             snapshot_provider: Arc::new(AppHostSnapshot::default),
+            runtime_host: None,
             assets: Arc::new(assets),
             terminal_state: Arc::new(WebTerminalState::default()),
+            auth: WebUiAuthManager::in_memory_for_tests(),
         };
 
         let js_response = server.route_http_request(
@@ -2599,8 +4310,10 @@ Content-Length: 21
                 public_port: 1420,
             }),
             snapshot_provider: Arc::new(AppHostSnapshot::default),
+            runtime_host: None,
             assets: Arc::new(test_assets()),
             terminal_state: Arc::new(WebTerminalState::default()),
+            auth: WebUiAuthManager::in_memory_for_tests(),
         };
 
         let response = server.route_http_request(
@@ -2632,8 +4345,10 @@ Content-Length: 21
                 public_port: 1420,
             }),
             snapshot_provider: Arc::new(AppHostSnapshot::default),
+            runtime_host: None,
             assets: Arc::new(test_assets()),
             terminal_state: Arc::new(WebTerminalState::default()),
+            auth: WebUiAuthManager::in_memory_for_tests(),
         };
 
         let api_response = server.route_http_request(
@@ -2644,7 +4359,11 @@ Content-Length: 21
         assert!(api_headers.starts_with("HTTP/1.1 200 OK\r\n"));
 
         let i18n_response = server.route_http_request(
-            b"GET /api/i18n HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            format!(
+                "GET /api/i18n HTTP/1.1\r\nHost: localhost\r\n{}\r\n\r\n",
+                local_auth_header(&server)
+            )
+            .as_bytes(),
             IpAddr::V4(Ipv4Addr::LOCALHOST),
         );
         let (i18n_headers, _) = split_response(i18n_response);

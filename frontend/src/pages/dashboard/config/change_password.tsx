@@ -9,8 +9,10 @@ import key from '@/const/key';
 import SaveButtons from '@/components/button/save_buttons';
 
 import WebUIManager from '@/controllers/webui_manager';
+import { useEffect, useState } from 'react';
 
 const ChangePasswordCard = () => {
+  const [authState, setAuthState] = useState<WebUiAuthState | null>(null);
   const {
     control,
     handleSubmit: handleWebuiSubmit,
@@ -18,12 +20,12 @@ const ChangePasswordCard = () => {
     reset,
     watch,
   } = useForm<{
-    oldToken: string;
-    newToken: string;
+    oldPassword: string;
+    newPassword: string;
   }>({
     defaultValues: {
-      oldToken: '',
-      newToken: '',
+      oldPassword: '',
+      newPassword: '',
     },
   });
 
@@ -31,14 +33,19 @@ const ChangePasswordCard = () => {
   const [, setToken] = useLocalStorage(key.token, '');
 
   // 监听旧密码的值
-  const oldTokenValue = watch('oldToken');
+  const oldPasswordValue = watch('oldPassword');
+
+  useEffect(() => {
+    WebUIManager.getAuthState()
+      .then(setAuthState)
+      .catch(() => undefined);
+  }, []);
 
   const onSubmit = handleWebuiSubmit(async (data) => {
     try {
-      // 使用正常密码更新流程
-      await WebUIManager.changePassword(data.oldToken, data.newToken);
+      await WebUIManager.changePassword(data.oldPassword, data.newPassword);
 
-      toast.success('修改成功');
+      toast.success(authState?.passwordConfigured ? '修改成功' : '设置成功');
       setToken('');
       localStorage.removeItem(key.token);
       navigate('/web_login');
@@ -54,11 +61,10 @@ const ChangePasswordCard = () => {
 
       <Controller
         control={control}
-        name='oldToken'
+        name='oldPassword'
         rules={{
-          required: '旧密码不能为空',
           validate: (value) => {
-            if (!value || value.trim().length === 0) {
+            if (authState?.passwordConfigured && (!value || value.trim().length === 0)) {
               return '旧密码不能为空';
             }
             return true;
@@ -67,19 +73,19 @@ const ChangePasswordCard = () => {
         render={({ field }) => (
           <Input
             {...field}
-            label='旧密码'
-            placeholder='请输入旧密码'
+            label={authState?.passwordConfigured ? '旧密码' : '首次定密无需旧密码'}
+            placeholder={authState?.passwordConfigured ? '请输入旧密码' : '首次设置密码时可留空'}
             type='password'
-            isRequired
-            isInvalid={!!errors.oldToken}
-            errorMessage={errors.oldToken?.message}
+            isRequired={!!authState?.passwordConfigured}
+            isInvalid={!!errors.oldPassword}
+            errorMessage={errors.oldPassword?.message}
           />
         )}
       />
 
       <Controller
         control={control}
-        name='newToken'
+        name='newPassword'
         rules={{
           required: '新密码不能为空',
           minLength: {
@@ -93,14 +99,12 @@ const ChangePasswordCard = () => {
             if (value.trim().length !== value.length) {
               return '新密码不能包含前后空格';
             }
-            if (value === oldTokenValue) {
+            if (authState?.passwordConfigured && value === oldPasswordValue) {
               return '新密码不能与旧密码相同';
             }
-            // 检查是否包含字母
             if (!/[a-zA-Z]/.test(value)) {
               return '新密码必须包含字母';
             }
-            // 检查是否包含数字
             if (!/[0-9]/.test(value)) {
               return '新密码必须包含数字';
             }
@@ -114,8 +118,8 @@ const ChangePasswordCard = () => {
             placeholder='至少6位，包含字母和数字'
             type='password'
             isRequired
-            isInvalid={!!errors.newToken}
-            errorMessage={errors.newToken?.message}
+            isInvalid={!!errors.newPassword}
+            errorMessage={errors.newPassword?.message}
           />
         )}
       />

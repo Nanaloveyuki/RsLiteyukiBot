@@ -20,6 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let assets = build_default_web_host_assets();
     let (server, listener) =
         WebHostService::bind(build_default_web_host_config(), snapshot_provider, assets)
+            .map(|(server, listener)| (server.with_runtime_host(app_host.clone()), listener))
             .map_err(std::io::Error::other)?;
 
     emit_console_log(

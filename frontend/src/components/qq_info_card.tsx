@@ -2,7 +2,6 @@ import { Card, CardBody } from '@heroui/card';
 import { Image } from '@heroui/image';
 import { useLocalStorage } from '@uidotdev/usehooks';
 import clsx from 'clsx';
-import { BsTencentQq } from 'react-icons/bs';
 
 import logo from '@/assets/images/logo.png';
 import key from '@/const/key';
@@ -44,11 +43,6 @@ const QQInfoCard: React.FC<QQInfoCardProps> = ({ data, error, loading }) => {
         )
         : (
           <CardBody className='flex-row items-center gap-4 overflow-hidden relative p-4'>
-            {!hasBackground && (
-              <div className='absolute right-[-10px] bottom-[-10px] text-7xl text-default-400/10 rotate-12 pointer-events-none dark:hidden'>
-                <BsTencentQq />
-              </div>
-            )}
             <div className='relative flex-shrink-0 z-10'>
               <Image
                 src={avatarSrc}

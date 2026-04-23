@@ -247,6 +247,24 @@ pub(crate) fn resolve_password_config_path() -> PathBuf {
     PathBuf::from(PASSWORD_CONFIG_PATH)
 }
 
+pub(crate) fn resolve_user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+}
+
+pub(crate) fn resolve_local_plugin_dir() -> PathBuf {
+    resolve_user_home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".liteyuki")
+        .join("plugins")
+}
+
 pub(crate) fn resolve_builtin_plugin_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut seen = HashSet::new();
@@ -256,6 +274,8 @@ pub(crate) fn resolve_builtin_plugin_dirs() -> Vec<PathBuf> {
             push_explicit_plugin_dir_candidates(&mut dirs, &mut seen, path.as_path());
         }
     }
+
+    push_unique_plugin_path(&mut dirs, &mut seen, resolve_local_plugin_dir());
 
     if let Ok(current_dir) = std::env::current_dir() {
         push_runtime_plugin_dir_candidates(&mut dirs, &mut seen, current_dir.as_path(), true);

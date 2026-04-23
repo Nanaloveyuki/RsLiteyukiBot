@@ -25,7 +25,10 @@ use crate::runtime_support::{
     push_explicit_plugin_dir_candidates, push_runtime_plugin_dir_candidates,
 };
 use crate::superuser::SuperuserManager;
-use crate::{LiteyukiBot, LogLevel, RuntimeSettings, RuntimeTarget, emit_console_log};
+use crate::{
+    AdapterConfig, LiteyukiBot, LogLevel, PluginCatalogEntry, RuntimeSettings, RuntimeTarget,
+    emit_console_log,
+};
 #[cfg(test)]
 use std::collections::HashSet;
 #[cfg(test)]
@@ -34,6 +37,12 @@ use std::path::PathBuf;
 const APP_TITLE: &str = "Liteyuki";
 const RESOURCE_USAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_STATUS_NOTES: usize = 32;
+
+#[derive(Debug, Clone)]
+pub struct AppHostPluginCatalogSnapshot {
+    pub entries: Vec<PluginCatalogEntry>,
+    pub disabled_plugin_ids: Vec<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct AppHostExternalStats {
@@ -490,6 +499,58 @@ impl EmbeddedAppHost {
             .read()
             .expect("embedded app host state lock should not be poisoned")
             .snapshot()
+    }
+
+    pub async fn plugin_catalog_snapshot(&self) -> AppHostPluginCatalogSnapshot {
+        let bot = self.bot.lock().await;
+        AppHostPluginCatalogSnapshot {
+            entries: bot.plugin_manager().plugin_catalog(),
+            disabled_plugin_ids: bot.disabled_plugin_ids(),
+        }
+    }
+
+    pub async fn adapter_configs(&self) -> Vec<AdapterConfig> {
+        let bot = self.bot.lock().await;
+        bot.adapter_manager().list()
+    }
+
+    pub async fn apply_disabled_plugins(
+        &self,
+        disabled_plugin_ids: Vec<String>,
+    ) -> Result<(), String> {
+        let bot = self.bot.lock().await;
+        bot.reload_plugins(disabled_plugin_ids.clone())
+            .await
+            .map_err(|err| format!("failed to apply plugin reload: {err}"))?;
+        with_state_write(&self.state, |host| {
+            host.snapshot.disabled_plugins = disabled_plugin_ids.clone();
+            host.push_note(format!(
+                "web host applied plugin policy (disabled={})",
+                disabled_plugin_ids.len()
+            ));
+        });
+        Ok(())
+    }
+
+    pub async fn apply_adapter_configs(
+        &self,
+        adapter_configs: Vec<AdapterConfig>,
+    ) -> Result<(), String> {
+        let bot = self.bot.lock().await;
+        let autostart = !adapter_configs.is_empty();
+        bot.reload_adapters(adapter_configs.clone(), autostart)
+            .await
+            .map_err(|err| format!("failed to apply adapter reload: {err}"))?;
+        with_state_write(&self.state, |host| {
+            host.snapshot.adapter_count = adapter_configs.len();
+            host.snapshot.adapter_autostart = autostart;
+            host.push_note(format!(
+                "web host applied adapter config (count={}, autostart={})",
+                adapter_configs.len(),
+                autostart
+            ));
+        });
+        Ok(())
     }
 
     pub async fn shutdown(&self) -> Result<(), String> {
