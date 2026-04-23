@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use liteyukibot_core::{LogLevel, emit_console_log};
+
 pub fn persist_onebot_v11_whitelist(path: &Path, entries: &[String]) -> Result<(), String> {
     let content = std::fs::read_to_string(path)
         .map_err(|err| format!("failed to read config {}: {err}", path.display()))?;
@@ -13,15 +15,26 @@ pub fn persist_onebot_v11_whitelist(path: &Path, entries: &[String]) -> Result<(
         Some("yaml") | Some("yml") => update_yaml_document(&content, &normalized),
         Some("toml") => update_toml_document(&content, &normalized),
         _ => {
-            return Err(format!(
+            let err = format!(
                 "unsupported config extension for {} (expected .yaml/.yml/.toml)",
                 path.display()
-            ));
+            );
+            log_config_persist_failure(
+                "onebot-v11 whitelist",
+                path,
+                format!("entries={}", normalized.len()).as_str(),
+                err.as_str(),
+            );
+            return Err(err);
         }
     };
 
-    std::fs::write(path, updated)
-        .map_err(|err| format!("failed to write config {}: {err}", path.display()))?;
+    persist_rendered_config(
+        "onebot-v11 whitelist",
+        path,
+        format!("entries={}", normalized.len()).as_str(),
+        updated,
+    )?;
     Ok(())
 }
 
@@ -38,15 +51,26 @@ pub fn persist_disabled_commands(path: &Path, entries: &[String]) -> Result<(), 
         Some("yaml") | Some("yml") => update_yaml_commands_document(&content, &normalized),
         Some("toml") => update_toml_commands_document(&content, &normalized),
         _ => {
-            return Err(format!(
+            let err = format!(
                 "unsupported config extension for {} (expected .yaml/.yml/.toml)",
                 path.display()
-            ));
+            );
+            log_config_persist_failure(
+                "disabled commands",
+                path,
+                format!("entries={}", normalized.len()).as_str(),
+                err.as_str(),
+            );
+            return Err(err);
         }
     };
 
-    std::fs::write(path, updated)
-        .map_err(|err| format!("failed to write config {}: {err}", path.display()))?;
+    persist_rendered_config(
+        "disabled commands",
+        path,
+        format!("entries={}", normalized.len()).as_str(),
+        updated,
+    )?;
     Ok(())
 }
 
@@ -63,15 +87,26 @@ pub fn persist_disabled_plugins(path: &Path, entries: &[String]) -> Result<(), S
         Some("yaml") | Some("yml") => update_yaml_plugins_document(&content, &normalized),
         Some("toml") => update_toml_plugins_document(&content, &normalized),
         _ => {
-            return Err(format!(
+            let err = format!(
                 "unsupported config extension for {} (expected .yaml/.yml/.toml)",
                 path.display()
-            ));
+            );
+            log_config_persist_failure(
+                "disabled plugins",
+                path,
+                format!("entries={}", normalized.len()).as_str(),
+                err.as_str(),
+            );
+            return Err(err);
         }
     };
 
-    std::fs::write(path, updated)
-        .map_err(|err| format!("failed to write config {}: {err}", path.display()))?;
+    persist_rendered_config(
+        "disabled plugins",
+        path,
+        format!("entries={}", normalized.len()).as_str(),
+        updated,
+    )?;
     Ok(())
 }
 
@@ -98,16 +133,89 @@ pub fn persist_llm_config(path: &Path, patch: &LlmConfigPatch) -> Result<(), Str
         Some("yaml") | Some("yml") => update_yaml_llm_document(&content, &normalized_patch),
         Some("toml") => update_toml_llm_document(&content, &normalized_patch),
         _ => {
-            return Err(format!(
+            let err = format!(
                 "unsupported config extension for {} (expected .yaml/.yml/.toml)",
                 path.display()
-            ));
+            );
+            log_config_persist_failure(
+                "llm config",
+                path,
+                describe_llm_patch(&normalized_patch).as_str(),
+                err.as_str(),
+            );
+            return Err(err);
         }
     };
 
-    std::fs::write(path, updated)
-        .map_err(|err| format!("failed to write config {}: {err}", path.display()))?;
+    persist_rendered_config(
+        "llm config",
+        path,
+        describe_llm_patch(&normalized_patch).as_str(),
+        updated,
+    )?;
     Ok(())
+}
+
+fn persist_rendered_config(
+    config_kind: &str,
+    path: &Path,
+    detail: &str,
+    updated: String,
+) -> Result<(), String> {
+    match std::fs::write(path, updated) {
+        Ok(()) => {
+            emit_console_log(
+                LogLevel::Info,
+                "config.edit",
+                format!("persisted {config_kind} to {} ({detail})", path.display()),
+            );
+            Ok(())
+        }
+        Err(err) => {
+            let err = format!("failed to write config {}: {err}", path.display());
+            log_config_persist_failure(config_kind, path, detail, err.as_str());
+            Err(err)
+        }
+    }
+}
+
+fn log_config_persist_failure(config_kind: &str, path: &Path, detail: &str, err: &str) {
+    emit_console_log(
+        LogLevel::Error,
+        "config.edit",
+        format!(
+            "failed to persist {config_kind} at {} ({detail}): {err}",
+            path.display()
+        ),
+    );
+}
+
+fn describe_llm_patch(patch: &LlmConfigPatch) -> String {
+    let mut fields = Vec::new();
+    if let Some(enabled) = patch.enabled {
+        fields.push(format!("enabled={enabled}"));
+    }
+    if let Some(provider) = patch.provider.as_deref() {
+        fields.push(format!("provider={provider}"));
+    }
+    if let Some(base_url) = patch.base_url.as_deref() {
+        fields.push(format!("base_url={base_url}"));
+    }
+    if let Some(provider_urls) = patch.provider_urls.as_ref() {
+        fields.push(format!("provider_urls={}", provider_urls.len()));
+    }
+    if let Some(model) = patch.model.as_deref() {
+        fields.push(format!("model={model}"));
+    }
+    if let Some(api_keys) = patch.api_keys.as_ref() {
+        fields.push(format!("api_keys=<updated:{}>", api_keys.len()));
+    }
+
+    if fields.is_empty() {
+        "fields=none".to_string()
+    } else {
+        fields.join(", ")
+    }
 }
 
 fn normalize_entries(entries: &[String]) -> Vec<String> {
@@ -742,6 +850,17 @@ fn join_lines(lines: &[String], newline: &str, trailing_newline: bool) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use liteyukibot_core::recent_buffered_logs;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_config_path(name: &str, ext: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("rsliteyukibot-{name}-{unique}.{ext}"))
+    }
 
     #[test]
     fn update_yaml_keeps_section_and_rewrites_whitelist() {
@@ -875,5 +994,40 @@ mod tests {
         };
         let updated = update_yaml_llm_document(source, &patch);
         assert!(updated.contains("provider_urls: []"));
+    }
+
+    #[test]
+    fn describe_llm_patch_redacts_api_key_values() {
+        let patch = LlmConfigPatch {
+            provider: Some("openai".to_string()),
+            api_keys: Some(vec!["sk-secret-1".to_string(), "sk-secret-2".to_string()]),
+            ..Default::default()
+        };
+
+        let summary = describe_llm_patch(&patch);
+
+        assert!(summary.contains("provider=openai"));
+        assert!(summary.contains("api_keys=<updated:2>"));
+        assert!(!summary.contains("sk-secret-1"));
+        assert!(!summary.contains("sk-secret-2"));
+    }
+
+    #[test]
+    fn persist_disabled_commands_emits_buffered_log_entry() {
+        let path = temp_config_path("disabled-commands-log", "yaml");
+        fs::write(&path, "commands:\n  disabled: []\n").expect("test config should be written");
+
+        persist_disabled_commands(&path, &["tui /help".to_string()])
+            .expect("persist should succeed");
+
+        let path_display = path.display().to_string();
+        assert!(recent_buffered_logs(50).iter().any(|entry| {
+            entry.module == "config.edit"
+                && entry.message.contains("persisted disabled commands")
+                && entry.message.contains(path_display.as_str())
+                && entry.message.contains("entries=1")
+        }));
+
+        let _ = fs::remove_file(path);
     }
 }

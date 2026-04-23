@@ -12,6 +12,11 @@ use crate::app_config::{
     resolve_disabled_plugins, resolve_disabled_scope_commands, resolve_help_whitelist,
     resolve_llm_config, resolve_tui_config, validate_app_config,
 };
+use crate::config_paths::{
+    migrate_legacy_llm_config_to_user_dir, replace_config_file, resolve_default_llm_config_path,
+    resolve_existing_legacy_llm_config_path, resolve_existing_llm_config_path,
+    resolve_existing_user_llm_config_path, resolve_preferred_password_config_path,
+};
 use crate::i18n::{reload_catalog as reload_i18n_catalog, set_current_locale, trf};
 use crate::onebot_support::value_to_string;
 use crate::superuser::SuperuserManager;
@@ -20,9 +25,6 @@ use liteyukibot_core::{AdapterConfig, RuntimeSettings, RuntimeTarget};
 use liteyukibot_core::{BotRuntimeConfig, LogLevel, LogMode, TimeZone, TimestampFormat};
 
 pub(crate) const EXTERNAL_API_TIMEOUT: Duration = Duration::from_secs(12);
-pub(crate) const LLM_CONFIG_PATHS: [&str; 2] = ["llm-config.yaml", "llm-config.toml"];
-pub(crate) const LLM_PROMPT_STORE_PATH: &str = "llm-prompts.json";
-pub(crate) const PASSWORD_CONFIG_PATH: &str = "password.yaml";
 pub(crate) const BUILTIN_PLUGIN_DIRS: [&str; 2] = ["builtin_plugin", "resources/builtin_plugin"];
 pub(crate) const DEV_BUILTIN_PLUGIN_DIRS: [&str; 1] = ["src/builtin_plugin"];
 
@@ -374,23 +376,11 @@ where
 }
 
 pub(crate) fn resolve_password_config_path() -> PathBuf {
-    if let Ok(path) = std::env::var("LY_PASSWORD_PATH")
-        && !path.trim().is_empty()
-    {
-        return PathBuf::from(path);
-    }
-    PathBuf::from(PASSWORD_CONFIG_PATH)
+    resolve_preferred_password_config_path()
 }
 
 pub(crate) fn resolve_user_home_dir() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-        })
+    crate::config_paths::resolve_user_home_dir()
 }
 
 pub(crate) fn resolve_local_plugin_dir() -> PathBuf {
@@ -463,15 +453,19 @@ pub(crate) fn ensure_default_llm_config_file() -> Result<(), String> {
         return ensure_llm_config_file(std::path::Path::new(path.trim()));
     }
 
-    if LLM_CONFIG_PATHS
-        .iter()
-        .map(PathBuf::from)
-        .any(|path| path.exists())
-    {
+    if let Some(user_path) = resolve_existing_user_llm_config_path() {
+        replace_default_user_llm_config_with_legacy(user_path.as_path())?;
         return Ok(());
     }
 
-    ensure_llm_config_file(std::path::Path::new(LLM_CONFIG_PATHS[0]))
+    migrate_legacy_llm_config_to_user_dir()?;
+
+    if resolve_existing_user_llm_config_path().is_some() {
+        return Ok(());
+    }
+
+    let path = resolve_default_llm_config_path();
+    ensure_llm_config_file(path.as_path())
 }
 
 pub(crate) fn ensure_llm_config_file(path: &std::path::Path) -> Result<(), String> {
@@ -489,21 +483,47 @@ pub(crate) fn ensure_llm_config_file(path: &std::path::Path) -> Result<(), Strin
         })?;
     }
 
+    let template = llm_config_template(path);
+    std::fs::write(path, template)
+        .map_err(|err| format!("failed to write llm config {}: {err}", path.display()))?;
+    Ok(())
+}
+
+fn replace_default_user_llm_config_with_legacy(user_path: &std::path::Path) -> Result<(), String> {
+    let Some(legacy_path) = resolve_existing_legacy_llm_config_path() else {
+        return Ok(());
+    };
+    if legacy_path == user_path {
+        return Ok(());
+    }
+
+    let current = std::fs::read_to_string(user_path).map_err(|err| {
+        format!(
+            "failed to read user llm config {}: {err}",
+            user_path.display()
+        )
+    })?;
+    let template = llm_config_template(user_path);
+    if current.trim() != template.trim() {
+        return Ok(());
+    }
+
+    replace_config_file(legacy_path.as_path(), user_path)
+}
+
+fn llm_config_template(path: &std::path::Path) -> &'static str {
     let ext = path
         .extension()
         .and_then(|value| value.to_str())
         .map(|value| value.to_ascii_lowercase());
-    let template = match ext.as_deref() {
+    match ext.as_deref() {
         Some("toml") => {
             "[llm]\nenabled = false\nprovider = \"openai\"\nbase_url = \"https://tokenflux.dev/v1\"\nmodel = \"gpt-4.1-mini\"\ntimeout_seconds = 20\ncommand_prefix = \"/ask\"\napi_keys = []\n"
         }
         _ => {
             "llm:\n  enabled: false\n  provider: openai\n  base_url: https://tokenflux.dev/v1\n  model: gpt-4.1-mini\n  timeout_seconds: 20\n  command_prefix: /ask\n  api_keys: []\n"
         }
-    };
-    std::fs::write(path, template)
-        .map_err(|err| format!("failed to write llm config {}: {err}", path.display()))?;
-    Ok(())
+    }
 }
 
 pub(crate) fn load_app_config_with_llm_overlay() -> (AppConfigDoc, Vec<String>) {
@@ -544,6 +564,9 @@ pub(crate) fn merge_llm_config_sections(
     if overlay.enabled.is_some() {
         merged.enabled = overlay.enabled;
     }
+    if overlay.stream.is_some() {
+        merged.stream = overlay.stream;
+    }
     if overlay.provider.is_some() {
         merged.provider = overlay.provider;
     }
@@ -565,6 +588,18 @@ pub(crate) fn merge_llm_config_sections(
     if overlay.timeout_seconds.is_some() {
         merged.timeout_seconds = overlay.timeout_seconds;
     }
+    if overlay.temperature.is_some() {
+        merged.temperature = overlay.temperature;
+    }
+    if overlay.top_p.is_some() {
+        merged.top_p = overlay.top_p;
+    }
+    if overlay.top_k.is_some() {
+        merged.top_k = overlay.top_k;
+    }
+    if overlay.parallel_tool_calls.is_some() {
+        merged.parallel_tool_calls = overlay.parallel_tool_calls;
+    }
     if overlay.system_prompt.is_some() {
         merged.system_prompt = overlay.system_prompt;
     }
@@ -575,15 +610,7 @@ pub(crate) fn merge_llm_config_sections(
 }
 
 pub(crate) fn resolve_llm_config_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("LY_LLM_CONFIG_PATH")
-        && !path.trim().is_empty()
-    {
-        return Some(PathBuf::from(path));
-    }
-    LLM_CONFIG_PATHS
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| path.exists())
+    resolve_existing_llm_config_path()
 }
 
 pub(crate) fn apply_runtime_log_overrides_from_app_config(

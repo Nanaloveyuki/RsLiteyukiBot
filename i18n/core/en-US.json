@@ -240,6 +240,7 @@
   "config.warn.duplicate_adapter": "duplicated adapter id '{adapter}'",
   "config.warn.should_not_be_empty": "{field} should not be empty",
   "config.warn.should_be_positive": "{field} should be > 0",
+  "config.warn.invalid_range": "{field} should be within {range}",
   "config.warn.locale_supported": "{field} should be one of {choices}",
   "config.warn.empty_values": "{field} should not contain empty values",
   "config.warn.websocket_missing_url_or_port": "connect.websocket enabled but neither url nor port is set",

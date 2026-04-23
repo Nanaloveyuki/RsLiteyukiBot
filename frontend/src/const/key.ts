@@ -10,6 +10,7 @@ enum key {
   sideBarOpen = 'side-bar-open',
   httpDebugConfig = 'http-debug-config',
   wsDebugConfig = 'ws-debug-config',
+  llmChatConfig = 'llm-chat-config',
 }
 
 export default key;

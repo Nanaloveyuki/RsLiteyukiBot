@@ -20,6 +20,7 @@ mod app_config;
 mod command_registry;
 #[allow(dead_code)]
 mod config_edit;
+mod config_paths;
 mod external_commands;
 #[allow(dead_code)]
 mod i18n;
@@ -50,8 +51,9 @@ pub use core::{
     format_event_text, format_event_with,
 };
 pub use llm::{
-    LlmClientError, LlmPromptPreview, LlmPromptProfile, LlmPromptStore, OpenAiResponsesClient,
-    OpenAiRuntimeConfig, build_prompt_preview, compose_user_prompt,
+    LlmClientError, LlmCompletion, LlmEventSink, LlmExecutedToolCall, LlmFunctionTool,
+    LlmPromptPreview, LlmPromptProfile, LlmPromptStore, LlmStreamEvent, LlmToolOutput,
+    OpenAiResponsesClient, OpenAiRuntimeConfig, build_prompt_preview, compose_user_prompt,
 };
 pub use observability::{
     BufferedLogEntry, LogLevel, LogMode, Logger, LoggerConfig, TimeZone, TimestampFormat,

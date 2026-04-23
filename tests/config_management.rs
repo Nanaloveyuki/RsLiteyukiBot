@@ -78,6 +78,28 @@ impl Drop for TempFileGuard {
     }
 }
 
+struct TempDirGuard {
+    path: PathBuf,
+}
+
+impl TempDirGuard {
+    fn create(name: &str) -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("liteyuki-{name}-{nanos}"));
+        std::fs::create_dir_all(&path).expect("temp dir should be created");
+        Self { path }
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 #[test]
 fn runtime_settings_from_manager_uses_defaults() {
     let manager = ConfigManager::new();
@@ -240,4 +262,27 @@ fn config_manager_can_optionally_load_env() {
 
     let with_env = manager.with_env();
     assert_eq!(with_env.get("LY_WORKERS"), Some("14"));
+}
+
+#[test]
+fn config_manager_load_default_reads_user_configs_path() {
+    let _lock = env_lock().lock().expect("env lock must be available");
+    let home = TempDirGuard::create("config-home");
+    let config_dir = home.path.join(".liteyuki").join("configs");
+    std::fs::create_dir_all(&config_dir).expect("config dir should exist");
+    let config_path = config_dir.join("config.yaml");
+    std::fs::write(
+        &config_path,
+        "rust:\n  runtime:\n    worker_count: 6\n    ingress_queue: 1600\n    worker_queue: 260\n",
+    )
+    .expect("config file should be written");
+
+    let _config = EnvVarGuard::remove("LY_CONFIG_PATH");
+    let _userprofile = EnvVarGuard::set("USERPROFILE", home.path.to_str().expect("utf8 path"));
+    let _home = EnvVarGuard::remove("HOME");
+
+    let manager = ConfigManager::load_default().expect("config should load from user configs");
+    assert_eq!(manager.get("LY_WORKERS"), Some("6"));
+    assert_eq!(manager.get("LY_INGRESS_QUEUE"), Some("1600"));
+    assert_eq!(manager.get("LY_WORKER_QUEUE"), Some("260"));
 }

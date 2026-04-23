@@ -452,10 +452,26 @@ impl EmbeddedAppHost {
         &self,
         disabled_plugin_ids: Vec<String>,
     ) -> Result<(), String> {
+        emit_console_log(
+            LogLevel::Info,
+            "app.host.reload",
+            format!(
+                "applying plugin policy from web host (disabled={})",
+                disabled_plugin_ids.len()
+            ),
+        );
         let bot = self.bot.lock().await;
         bot.reload_plugins(disabled_plugin_ids.clone())
             .await
-            .map_err(|err| format!("failed to apply plugin reload: {err}"))?;
+            .map_err(|err| {
+                let message = format!("failed to apply plugin reload: {err}");
+                emit_console_log(
+                    LogLevel::Error,
+                    "app.host.reload",
+                    format!("plugin policy apply failed: {message}"),
+                );
+                message
+            })?;
         with_state_write(&self.state, |host| {
             host.snapshot.disabled_plugins = disabled_plugin_ids.clone();
             host.push_note(format!(
@@ -463,6 +479,14 @@ impl EmbeddedAppHost {
                 disabled_plugin_ids.len()
             ));
         });
+        emit_console_log(
+            LogLevel::Info,
+            "app.host.reload",
+            format!(
+                "applied plugin policy from web host (disabled={})",
+                disabled_plugin_ids.len()
+            ),
+        );
         Ok(())
     }
 
@@ -470,11 +494,28 @@ impl EmbeddedAppHost {
         &self,
         adapter_configs: Vec<AdapterConfig>,
     ) -> Result<(), String> {
-        let bot = self.bot.lock().await;
         let autostart = !adapter_configs.is_empty();
+        emit_console_log(
+            LogLevel::Info,
+            "app.host.reload",
+            format!(
+                "applying adapter config from web host (count={}, autostart={})",
+                adapter_configs.len(),
+                autostart
+            ),
+        );
+        let bot = self.bot.lock().await;
         bot.reload_adapters(adapter_configs.clone(), autostart)
             .await
-            .map_err(|err| format!("failed to apply adapter reload: {err}"))?;
+            .map_err(|err| {
+                let message = format!("failed to apply adapter reload: {err}");
+                emit_console_log(
+                    LogLevel::Error,
+                    "app.host.reload",
+                    format!("adapter config apply failed: {message}"),
+                );
+                message
+            })?;
         with_state_write(&self.state, |host| {
             host.snapshot.adapter_count = adapter_configs.len();
             host.snapshot.adapter_autostart = autostart;
@@ -484,6 +525,15 @@ impl EmbeddedAppHost {
                 autostart
             ));
         });
+        emit_console_log(
+            LogLevel::Info,
+            "app.host.reload",
+            format!(
+                "applied adapter config from web host (count={}, autostart={})",
+                adapter_configs.len(),
+                autostart
+            ),
+        );
         Ok(())
     }
 
@@ -748,20 +798,35 @@ mod tests {
     fn merge_llm_config_sections_prefers_overlay_values() {
         let merged = merge_llm_config_sections(
             Some(LlmConfigSection {
+                stream: Some(false),
                 provider: Some("openai".to_string()),
                 model: Some("gpt-4.1-mini".to_string()),
+                temperature: Some(0.6),
+                top_p: Some(0.9),
+                top_k: Some(16),
+                parallel_tool_calls: Some(true),
                 command_prefix: Some("/ask".to_string()),
                 ..Default::default()
             }),
             LlmConfigSection {
+                stream: Some(true),
                 model: Some("gpt-4.1".to_string()),
+                temperature: Some(0.2),
+                top_p: Some(0.8),
+                top_k: Some(32),
+                parallel_tool_calls: Some(false),
                 command_prefix: Some("/qa".to_string()),
                 ..Default::default()
             },
         );
 
+        assert_eq!(merged.stream, Some(true));
         assert_eq!(merged.provider.as_deref(), Some("openai"));
         assert_eq!(merged.model.as_deref(), Some("gpt-4.1"));
+        assert_eq!(merged.temperature, Some(0.2));
+        assert_eq!(merged.top_p, Some(0.8));
+        assert_eq!(merged.top_k, Some(32));
+        assert_eq!(merged.parallel_tool_calls, Some(false));
         assert_eq!(merged.command_prefix.as_deref(), Some("/qa"));
     }
 

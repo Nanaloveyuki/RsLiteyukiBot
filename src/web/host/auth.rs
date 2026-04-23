@@ -17,8 +17,8 @@ use sha2::{Digest, Sha256};
 use super::{
     HEALTH_ROUTE, extract_header, napcat_err, napcat_ok, napcat_response, parse_json_body,
 };
+use crate::config_paths::resolve_preferred_webui_password_path;
 
-const WEBUI_PASSWORD_FILENAME: &str = "password.json";
 const WEBUI_PASSWORD_VERSION: u8 = 1;
 const BOOTSTRAP_TOKEN_BYTES: usize = 24;
 const SESSION_TOKEN_BYTES: usize = 32;
@@ -232,22 +232,7 @@ fn default_password_doc_version() -> u8 {
 }
 
 fn resolve_webui_password_store_path() -> PathBuf {
-    if let Ok(path) = std::env::var("LY_WEBUI_PASSWORD_PATH")
-        && !path.trim().is_empty()
-    {
-        return PathBuf::from(path);
-    }
-
-    let user_home = std::env::var_os("USERPROFILE")
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os("HOME").filter(|value| !value.is_empty()));
-
-    match user_home {
-        Some(home) => PathBuf::from(home)
-            .join(".liteyuki")
-            .join(WEBUI_PASSWORD_FILENAME),
-        None => PathBuf::from(".liteyuki").join(WEBUI_PASSWORD_FILENAME),
-    }
+    resolve_preferred_webui_password_path()
 }
 
 fn ensure_webui_password_file(path: &Path) -> Result<(), String> {
@@ -483,6 +468,12 @@ fn login_response_payload(result: Result<String, String>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn temp_password_path(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -504,6 +495,43 @@ mod tests {
         assert!(doc.password_hash.is_none());
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn default_webui_password_store_uses_user_configs_dir() {
+        let _lock = env_lock().lock().expect("env lock should be available");
+        let base = temp_password_path("user-config-root");
+        let _ = fs::remove_file(&base);
+        fs::create_dir_all(&base).expect("test home should be created");
+
+        let previous_userprofile = std::env::var("USERPROFILE").ok();
+        let previous_home = std::env::var("HOME").ok();
+        let previous_password_path = std::env::var("LY_WEBUI_PASSWORD_PATH").ok();
+        unsafe {
+            std::env::set_var("USERPROFILE", &base);
+            std::env::remove_var("HOME");
+            std::env::remove_var("LY_WEBUI_PASSWORD_PATH");
+        }
+
+        let path = resolve_webui_password_store_path();
+        assert_eq!(
+            path,
+            base.join(".liteyuki").join("configs").join("password.json")
+        );
+
+        match previous_userprofile {
+            Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
+            None => unsafe { std::env::remove_var("USERPROFILE") },
+        }
+        match previous_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match previous_password_path {
+            Some(value) => unsafe { std::env::set_var("LY_WEBUI_PASSWORD_PATH", value) },
+            None => unsafe { std::env::remove_var("LY_WEBUI_PASSWORD_PATH") },
+        }
+        let _ = fs::remove_dir_all(base);
     }
 
     #[test]

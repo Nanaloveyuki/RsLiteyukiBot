@@ -1,240 +1,1160 @@
 import { Button } from '@heroui/button';
-import { Card, CardBody } from '@heroui/card';
-import { Input } from '@heroui/input';
+import { Chip } from '@heroui/chip';
+import { Input, Textarea } from '@heroui/input';
+import {
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+} from '@heroui/modal';
+import { Select, SelectItem } from '@heroui/select';
 import { useLocalStorage } from '@uidotdev/usehooks';
+import { useRequest } from 'ahooks';
 import clsx from 'clsx';
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
-import { IoFlash, IoFlashOff, IoRefresh } from 'react-icons/io5';
+import {
+  LuBot,
+  LuFile,
+  LuFileText,
+  LuImage,
+  LuPlus,
+  LuRefreshCw,
+  LuSend,
+  LuSettings2,
+  LuTrash2,
+  LuUser,
+  LuX,
+} from 'react-icons/lu';
 
 import key from '@/const/key';
 
-import OneBotMessageList from '@/components/onebot/message_list';
-import OneBotSendModal from '@/components/onebot/send_modal';
-import WSStatus from '@/components/onebot/ws_status';
+import LlmManager, {
+  type LlmAttachmentKind,
+  type LlmChatAttachment,
+  type LlmConversationMessage,
+  type LlmProviderCatalogItem,
+} from '@/controllers/llm_manager';
 
-import { useWebSocketDebug } from '@/hooks/use-websocket-debug';
-import { buildBearerAuthHeader, normalizeStoredStringValue, readStoredAuthToken } from '@/utils/auth';
-import { resolveApiUrl, resolveRuntimeWebSocketUrl } from '@/utils/runtime';
+interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  attachments?: LlmChatAttachment[];
+  meta?: string;
+}
 
-export default function WSDebug () {
-  const defaultWsUrl = resolveRuntimeWebSocketUrl('/api/Debug/ws');
-  const [socketConfig, setSocketConfig] = useLocalStorage(key.wsDebugConfig, {
-    url: defaultWsUrl,
-    token: readStoredAuthToken() ?? '',
+interface LlmChatPreferences {
+  baseUrl: string;
+  model: string;
+  temperature: string;
+  topP: string;
+  topK: string;
+  reasoningEffort: string;
+}
+
+const DEFAULT_PREFERENCES: LlmChatPreferences = {
+  baseUrl: '',
+  model: '',
+  temperature: '',
+  topP: '',
+  topK: '',
+  reasoningEffort: 'medium',
+};
+
+const DEFAULT_SUPPORTS = {
+  streaming: false,
+  temperature: true,
+  topP: true,
+  topK: true,
+  reasoningEffort: true,
+  imageInput: true,
+  textFileInput: true,
+  binaryFileInput: true,
+};
+
+const TEXT_FILE_EXTENSIONS = new Set([
+  'txt',
+  'md',
+  'markdown',
+  'json',
+  'yaml',
+  'yml',
+  'toml',
+  'ini',
+  'log',
+  'csv',
+  'tsv',
+  'xml',
+  'html',
+  'css',
+  'scss',
+  'js',
+  'jsx',
+  'ts',
+  'tsx',
+  'mjs',
+  'cjs',
+  'py',
+  'rs',
+  'go',
+  'java',
+  'kt',
+  'sql',
+  'sh',
+  'bat',
+  'ps1',
+]);
+
+const FILE_PICKER_ACCEPT = [
+  '.txt',
+  '.md',
+  '.markdown',
+  '.json',
+  '.yaml',
+  '.yml',
+  '.toml',
+  '.ini',
+  '.log',
+  '.csv',
+  '.tsv',
+  '.xml',
+  '.html',
+  '.css',
+  '.scss',
+  '.js',
+  '.jsx',
+  '.ts',
+  '.tsx',
+  '.mjs',
+  '.cjs',
+  '.py',
+  '.rs',
+  '.go',
+  '.java',
+  '.kt',
+  '.sql',
+  '.sh',
+  '.bat',
+  '.ps1',
+].join(',');
+
+function nextMessageId () {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function parseOptionalNumber (raw: string, parser: (value: string) => number) {
+  const value = raw.trim();
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = parser(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function isTextLikeFile (file: File) {
+  if (file.type.startsWith('text/')) {
+    return true;
+  }
+
+  if (
+    file.type.includes('json')
+    || file.type.includes('xml')
+    || file.type.includes('javascript')
+  ) {
+    return true;
+  }
+
+  const extension = file.name.split('.').pop()?.toLowerCase();
+  return extension ? TEXT_FILE_EXTENSIONS.has(extension) : false;
+}
+
+function readFileAsDataUrl (file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(new Error(`读取文件失败: ${file.name}`));
+    reader.readAsDataURL(file);
   });
-  const [inputUrl, setInputUrl] = useState(socketConfig.url);
-  const [inputToken, setInputToken] = useState(normalizeStoredStringValue(socketConfig.token) ?? '');
-  const [shouldConnect, setShouldConnect] = useState(false);
+}
+
+function readFileAsText (file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(new Error(`读取文本失败: ${file.name}`));
+    reader.readAsText(file, 'utf-8');
+  });
+}
+
+async function createAttachment (file: File): Promise<LlmChatAttachment> {
+  if (file.type.startsWith('image/')) {
+    return {
+      kind: 'image',
+      name: file.name,
+      mediaType: file.type || 'image/*',
+      size: file.size,
+      dataUrl: await readFileAsDataUrl(file),
+    };
+  }
+
+  if (isTextLikeFile(file)) {
+    return {
+      kind: 'text',
+      name: file.name,
+      mediaType: file.type || 'text/plain',
+      size: file.size,
+      text: await readFileAsText(file),
+    };
+  }
+
+  return {
+    kind: 'file',
+    name: file.name,
+    mediaType: file.type || 'application/octet-stream',
+    size: file.size,
+    dataUrl: await readFileAsDataUrl(file),
+  };
+}
+
+function detectProviderId (baseUrl: string) {
+  const normalized = baseUrl.trim().toLowerCase();
+  if (normalized.includes('api.openai.com')) {
+    return 'openai';
+  }
+  if (normalized.includes('openrouter.ai')) {
+    return 'openrouter';
+  }
+  if (normalized.includes('moonshot.ai')) {
+    return 'kimi';
+  }
+  if (normalized.includes('dashscope.aliyuncs.com')) {
+    return 'qwen';
+  }
+  if (normalized.includes('generativelanguage.googleapis.com')) {
+    return 'google-gemini';
+  }
+  if (normalized.includes('anthropic.com')) {
+    return 'anthropic';
+  }
+  return 'openai-compatible';
+}
+
+function reasoningOptionsForProvider (providerId: string, model: string) {
+  if (providerId !== 'openai') {
+    return [];
+  }
+
+  return model.trim().toLowerCase().startsWith('gpt-5')
+    ? ['minimal', 'low', 'medium', 'high', 'xhigh']
+    : [];
+}
+
+function supportsForProvider (
+  providerId: string,
+  baseUrl: string,
+  model: string
+) {
+  const reasoningOptions = reasoningOptionsForProvider(providerId, model);
+
+  switch (providerId) {
+    case 'openai':
+      return {
+        streaming: true,
+        temperature: true,
+        topP: true,
+        topK: false,
+        reasoningEffort: reasoningOptions.length > 0,
+        imageInput: true,
+        textFileInput: true,
+        binaryFileInput: false,
+      };
+    case 'anthropic':
+      return {
+        streaming: true,
+        temperature: true,
+        topP: true,
+        topK: true,
+        reasoningEffort: false,
+        imageInput: true,
+        textFileInput: true,
+        binaryFileInput: false,
+      };
+    case 'google-gemini':
+      return {
+        streaming: true,
+        temperature: true,
+        topP: true,
+        topK: true,
+        reasoningEffort: false,
+        imageInput: true,
+        textFileInput: true,
+        binaryFileInput: false,
+      };
+    case 'openrouter':
+      return {
+        streaming: true,
+        temperature: true,
+        topP: true,
+        topK: false,
+        reasoningEffort: false,
+        imageInput: true,
+        textFileInput: true,
+        binaryFileInput: false,
+      };
+    case 'kimi':
+    case 'qwen':
+      return {
+        streaming: true,
+        temperature: true,
+        topP: true,
+        topK: true,
+        reasoningEffort: false,
+        imageInput: false,
+        textFileInput: true,
+        binaryFileInput: false,
+      };
+    default:
+      return {
+        streaming: true,
+        temperature: true,
+        topP: true,
+        topK: !baseUrl.toLowerCase().includes('api.openai.com'),
+        reasoningEffort: reasoningOptions.length > 0,
+        imageInput: false,
+        textFileInput: true,
+        binaryFileInput: false,
+      };
+  }
+}
+
+function acceptedFileTypes (supports: typeof DEFAULT_SUPPORTS) {
+  const accepted: string[] = [];
+  if (supports.imageInput) {
+    accepted.push('image/*');
+  }
+  if (supports.textFileInput) {
+    accepted.push(FILE_PICKER_ACCEPT);
+  }
+  return accepted.join(',');
+}
+
+function modelOptionsForProvider (
+  providerId: string,
+  providerCatalog: LlmProviderCatalogItem[]
+) {
+  return providerCatalog.find((item) => item.id === providerId)?.sampleModels ?? [];
+}
+
+function compactBaseUrl (value: string) {
+  return value
+    .replace(/^https?:\/\//, '')
+    .replace(/\/v1\/?$/, '')
+    .replace(/\/$/, '');
+}
+
+function getAttachmentIcon (kind: LlmAttachmentKind) {
+  if (kind === 'image') {
+    return LuImage;
+  }
+
+  if (kind === 'text') {
+    return LuFileText;
+  }
+
+  return LuFile;
+}
+
+function AttachmentCard ({
+  attachment,
+  onRemove,
+}: {
+  attachment: LlmChatAttachment;
+  onRemove?: () => void;
+}) {
+  const Icon = getAttachmentIcon(attachment.kind);
+
+  return (
+    <div className='group relative overflow-hidden rounded-2xl border border-white/10 bg-white/70 p-2 dark:bg-white/5'>
+      {attachment.kind === 'image' && attachment.dataUrl
+        ? (
+          <div className='flex items-center gap-3'>
+            <img
+              src={attachment.dataUrl}
+              alt={attachment.name}
+              className='h-12 w-12 rounded-xl object-cover'
+            />
+            <div className='min-w-0'>
+              <div className='truncate text-sm font-medium text-default-700 dark:text-default-100'>
+                {attachment.name}
+              </div>
+              <div className='text-xs text-default-500'>图片附件</div>
+            </div>
+          </div>
+          )
+        : (
+          <div className='flex items-center gap-3'>
+            <div className='flex h-12 w-12 items-center justify-center rounded-xl bg-default-100/80 text-default-500 dark:bg-white/10 dark:text-default-300'>
+              <Icon className='text-lg' />
+            </div>
+            <div className='min-w-0'>
+              <div className='truncate text-sm font-medium text-default-700 dark:text-default-100'>
+                {attachment.name}
+              </div>
+              <div className='text-xs text-default-500'>
+                {attachment.kind === 'text' ? '文本附件' : '文件附件'}
+              </div>
+            </div>
+          </div>
+          )}
+
+      {onRemove && (
+        <button
+          type='button'
+          className='absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white opacity-0 transition group-hover:opacity-100'
+          onClick={onRemove}
+        >
+          <LuX className='text-sm' />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function MessageBubble ({
+  hasBackground,
+  message,
+}: {
+  hasBackground: boolean;
+  message: ChatMessage;
+}) {
+  const isUser = message.role === 'user';
+  const isAssistant = message.role === 'assistant';
+  const hasText = message.content.trim().length > 0;
+
+  return (
+    <div className='mx-auto w-full max-w-4xl'>
+      <div className={clsx('flex', isUser ? 'justify-end' : isAssistant ? 'justify-start' : 'justify-center')}>
+        <div
+          className={clsx(
+            'max-w-[92%] rounded-[26px] px-4 py-3 shadow-sm md:max-w-[78%]',
+            isUser && 'bg-primary text-primary-foreground',
+            isAssistant && (
+              hasBackground
+                ? 'border border-white/10 bg-white/12 text-white'
+                : 'border border-white/20 bg-white/85 text-default-700 dark:border-white/10 dark:bg-black/30 dark:text-default-100'
+            ),
+            message.role === 'system' && 'border border-danger/20 bg-danger/10 text-danger'
+          )}
+        >
+          <div className='mb-2 flex items-center gap-2 text-xs opacity-80'>
+            {isUser
+              ? <LuUser />
+              : isAssistant
+                ? <LuBot />
+                : <LuSettings2 />}
+            <span>{isUser ? '你' : isAssistant ? 'LiteyukiBot' : '系统'}</span>
+            {message.meta && <span className='truncate'>{message.meta}</span>}
+          </div>
+
+          {hasText && (
+            <div className='whitespace-pre-wrap break-words text-sm leading-7'>
+              {message.content}
+            </div>
+          )}
+
+          {!hasText && message.attachments?.length
+            ? (
+              <div className='text-sm opacity-80'>
+                已发送 {message.attachments.length} 个附件
+              </div>
+              )
+            : null}
+
+          {message.attachments?.length
+            ? (
+              <div className='mt-3 grid gap-2 sm:grid-cols-2'>
+                {message.attachments.map((attachment, index) => (
+                  <AttachmentCard
+                    key={`${attachment.name}-${index}`}
+                    attachment={attachment}
+                  />
+                ))}
+              </div>
+              )
+            : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function LlmChatPage () {
+  const [storedConfig, setStoredConfig] = useLocalStorage<LlmChatPreferences>(
+    key.llmChatConfig,
+    DEFAULT_PREFERENCES
+  );
+  const config = storedConfig ?? DEFAULT_PREFERENCES;
+  const [draft, setDraft] = useState('');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [attachments, setAttachments] = useState<LlmChatAttachment[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [backgroundImage] = useLocalStorage<string>(key.backgroundImage, '');
   const hasBackground = !!backgroundImage;
-
-  const { sendMessage, readyState, FilterMessagesType, filteredMessages, clearMessages } =
-    useWebSocketDebug(socketConfig.url, normalizeStoredStringValue(socketConfig.token) ?? '', shouldConnect);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const {
+    data: settings,
+    loading: settingsLoading,
+    error: settingsError,
+    refreshAsync: refreshSettings,
+  } = useRequest(LlmManager.getSettings);
 
   useEffect(() => {
-    const normalizedToken = normalizeStoredStringValue(socketConfig.token) ?? '';
-    if (normalizedToken !== socketConfig.token) {
-      setSocketConfig({ ...socketConfig, token: normalizedToken });
-    }
-  }, [setSocketConfig, socketConfig]);
-
-  // Auto fetch adapter and set URL
-  useEffect(() => {
-    // 检查是否应该覆盖 URL
-    const isDefaultUrl = socketConfig.url === defaultWsUrl || socketConfig.url === '';
-    const isWebDebugUrl = socketConfig.url && socketConfig.url.includes('/api/Debug/ws');
-
-    if (!isDefaultUrl && !isWebDebugUrl) {
-      setInputUrl(socketConfig.url);
-      setInputToken(normalizeStoredStringValue(socketConfig.token) ?? '');
-      return; // 已经有自定义/有效的配置，跳过自动创建
-    }
-
-    const initAdapter = async () => {
-      try {
-        const response = await fetch(resolveApiUrl('/Debug/create'), {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...buildBearerAuthHeader(),
-          },
-        });
-        const data = await response.json();
-        if (data.code === 0) {
-          // const adapterName = data.data.adapterName;
-          const token = data.data.token;
-
-          if (token) {
-            // URL 中不再包含 Token，Token 单独放入输入框
-            const wsUrl = resolveRuntimeWebSocketUrl('/api/Debug/ws');
-
-            setSocketConfig({
-              url: wsUrl,
-              token,
-            });
-            setInputUrl(wsUrl);
-            setInputToken(token);
-          }
-        }
-      } catch (error) {
-        console.error('Failed to create debug adapter:', error);
-      }
-    };
-
-    initAdapter();
-  }, []);
-
-  const handleConnect = useCallback(() => {
-    // 允许以 / 开头的相对路径（如代理情况），以及标准的 ws/wss
-    let finalUrl = inputUrl;
-    if (finalUrl.startsWith('/')) {
-      finalUrl = resolveRuntimeWebSocketUrl(finalUrl);
-    }
-
-    if (!finalUrl.startsWith('ws://') && !finalUrl.startsWith('wss://')) {
-      toast.error('WebSocket URL 不合法');
+    if (!settings) {
       return;
     }
 
-    setSocketConfig({
-      url: finalUrl,
-      token: inputToken,
+    setStoredConfig((current) => {
+      const base = current ?? DEFAULT_PREFERENCES;
+
+      return {
+        ...DEFAULT_PREFERENCES,
+        ...base,
+        baseUrl: base.baseUrl || settings.baseUrl,
+        model: base.model || settings.model,
+      };
     });
-    setShouldConnect(true);
-  }, [inputUrl, inputToken, setSocketConfig]);
+  }, [settings, setStoredConfig]);
 
-  const handleDisconnect = useCallback(() => {
-    setShouldConnect(false);
-  }, []);
+  useEffect(() => {
+    if (!settingsError) {
+      return;
+    }
 
-  const handleResetConfig = useCallback(() => {
-    setSocketConfig({ url: '', token: '' });
-    // 刷新页面以重新触发初始逻辑
-    window.location.reload();
-  }, [setSocketConfig]);
+    toast.error(`加载模型配置失败: ${(settingsError as Error).message}`);
+  }, [settingsError]);
+
+  useEffect(() => {
+    listRef.current?.scrollTo({
+      top: listRef.current.scrollHeight,
+      behavior: 'smooth',
+    });
+  }, [messages]);
+
+  const providerOptions = useMemo(
+    () => settings?.providerOptions ?? [],
+    [settings]
+  );
+  const providerCatalog = useMemo(
+    () => settings?.providerCatalog ?? [],
+    [settings]
+  );
+  const currentBaseUrl = config.baseUrl || settings?.baseUrl || '';
+  const currentModel = config.model || settings?.model || '';
+  const selectedProviderId = useMemo(
+    () => detectProviderId(currentBaseUrl),
+    [currentBaseUrl]
+  );
+  const selectedProviderCatalog = useMemo(
+    () => providerCatalog.find((item) => item.id === selectedProviderId),
+    [providerCatalog, selectedProviderId]
+  );
+  const modelOptions = useMemo(() => {
+    const catalogModels = modelOptionsForProvider(selectedProviderId, providerCatalog);
+    if (catalogModels.length > 0) {
+      return catalogModels;
+    }
+    return settings?.modelOptions ?? [];
+  }, [providerCatalog, selectedProviderId, settings]);
+  const reasoningOptions = useMemo(() => {
+    return reasoningOptionsForProvider(selectedProviderId, currentModel);
+  }, [currentModel, selectedProviderId]);
+  const supports = useMemo(
+    () => supportsForProvider(selectedProviderId, currentBaseUrl, currentModel),
+    [currentBaseUrl, currentModel, selectedProviderId]
+  );
+  const chatEnabled = settings?.enabled;
+  const chatReady = chatEnabled === true;
+  const statusTone = settingsLoading && !settings
+    ? 'default'
+    : chatReady
+      ? 'success'
+      : 'danger';
+  const statusText = settingsLoading && !settings
+    ? 'LLM Loading'
+    : chatReady
+      ? 'LLM Ready'
+      : 'LLM Disabled';
+  const currentProviderLabel = providerOptions.find(
+    (option) => option.baseUrl === currentBaseUrl
+  )?.label || settings?.provider || (currentBaseUrl ? compactBaseUrl(currentBaseUrl) : '未配置 Provider');
+  const acceptedAttachments = acceptedFileTypes(supports);
+  const providerNotes = selectedProviderCatalog?.parameterSupport.reasoning?.notes ?? [];
+  const canSend = chatReady && !submitting && (draft.trim().length > 0 || attachments.length > 0);
+
+  useEffect(() => {
+    if (!supports.reasoningEffort) {
+      if (config.reasoningEffort) {
+        setConfigField('reasoningEffort', '');
+      }
+      return;
+    }
+
+    if (reasoningOptions.length > 0 && !reasoningOptions.includes(config.reasoningEffort)) {
+      setConfigField('reasoningEffort', reasoningOptions[0]);
+    }
+  }, [config.reasoningEffort, reasoningOptions, supports.reasoningEffort]);
+
+  const setConfigField = <K extends keyof LlmChatPreferences> (
+    field: K,
+    value: LlmChatPreferences[K]
+  ) => {
+    setStoredConfig((current) => ({
+      ...(current ?? DEFAULT_PREFERENCES),
+      [field]: value,
+    }));
+  };
+
+  const handleResetConfig = () => {
+    if (!settings) {
+      return;
+    }
+
+    setStoredConfig({
+      ...DEFAULT_PREFERENCES,
+      baseUrl: settings.baseUrl,
+      model: settings.model,
+      reasoningEffort: 'medium',
+    });
+    toast.success('模型设置已重置');
+  };
+
+  const handleClearMessages = () => {
+    setMessages([]);
+    toast.success('会话已清空');
+  };
+
+  const appendFiles = async (fileList: File[]) => {
+    if (!fileList.length) {
+      return;
+    }
+
+    try {
+      const unsupported: string[] = [];
+      const accepted: File[] = [];
+
+      for (const file of fileList) {
+        if (file.type.startsWith('image/')) {
+          if (!supports.imageInput) {
+            unsupported.push(`${file.name}: 当前 Provider 不支持图片输入`);
+            continue;
+          }
+          accepted.push(file);
+          continue;
+        }
+
+        if (isTextLikeFile(file)) {
+          if (!supports.textFileInput) {
+            unsupported.push(`${file.name}: 当前 Provider 不支持文本附件`);
+            continue;
+          }
+          accepted.push(file);
+          continue;
+        }
+
+        unsupported.push(`${file.name}: 当前后端路由暂不支持普通二进制文件`);
+      }
+
+      if (unsupported.length > 0) {
+        toast.error(unsupported[0]);
+      }
+
+      if (accepted.length === 0) {
+        return;
+      }
+
+      const nextAttachments = await Promise.all(accepted.map(createAttachment));
+      setAttachments((current) => [...current, ...nextAttachments]);
+      toast.success(`已添加 ${nextAttachments.length} 个附件`);
+    } catch (error) {
+      toast.error((error as Error).message);
+    }
+  };
+
+  const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.clipboardData.items)
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => !!file);
+
+    if (!files.length) {
+      return;
+    }
+
+    event.preventDefault();
+    void appendFiles(files);
+  };
+
+  const handleSend = async () => {
+    const trimmedDraft = draft.trim();
+
+    if (!trimmedDraft && attachments.length === 0) {
+      toast.error('请输入消息或添加附件');
+      return;
+    }
+
+    const outgoingAttachments = attachments;
+    const userMessage: ChatMessage = {
+      id: nextMessageId(),
+      role: 'user',
+      content: trimmedDraft,
+      attachments: outgoingAttachments,
+    };
+    const history: LlmConversationMessage[] = [...messages, userMessage].map((message) => ({
+      role: message.role,
+      content: message.content,
+      attachments: message.attachments,
+    }));
+
+    setMessages((current) => [...current, userMessage]);
+    setDraft('');
+    setAttachments([]);
+    setSubmitting(true);
+
+    try {
+      const response = await LlmManager.chat({
+        message: trimmedDraft,
+        messages: history,
+        attachments: outgoingAttachments,
+        baseUrl: currentBaseUrl || undefined,
+        model: currentModel || undefined,
+        temperature: supports.temperature ? parseOptionalNumber(config.temperature, Number) : undefined,
+        topP: supports.topP ? parseOptionalNumber(config.topP, Number) : undefined,
+        topK: supports.topK ? parseOptionalNumber(config.topK, (value) => parseInt(value, 10)) : undefined,
+        reasoningEffort: supports.reasoningEffort ? config.reasoningEffort : undefined,
+      });
+
+      setMessages((current) => [
+        ...current,
+        {
+          id: nextMessageId(),
+          role: 'assistant',
+          content: response.message,
+          meta: `${response.model} · ${response.promptProfile}`,
+        },
+      ]);
+    } catch (error) {
+      const message = (error as Error).message;
+      toast.error(`请求失败: ${message}`);
+      setMessages((current) => [
+        ...current,
+        {
+          id: nextMessageId(),
+          role: 'system',
+          content: message,
+        },
+      ]);
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
     <>
-      <title>Websocket调试 - Liteyuki WebUI</title>
-      <div className='h-[calc(100vh-4rem)] overflow-hidden flex flex-col p-2 md:p-4 gap-2 md:gap-4'>
-        {/* Config Card */}
-        <Card className={clsx(
-          'flex-shrink-0 backdrop-blur-xl border shadow-sm',
-          hasBackground
-            ? 'bg-white/10 dark:bg-black/10 border-white/40 dark:border-white/10'
-            : 'bg-white/60 dark:bg-black/40 border-white/40 dark:border-white/10'
-        )}
-        >
-          <CardBody className='gap-3 p-3 md:p-4'>
-            {/* Connection Config */}
-            <div className='grid gap-3 items-end md:grid-cols-[1fr_1fr_auto]'>
-              <Input
-                label='WebSocket URL'
-                type='text'
-                value={inputUrl}
-                onChange={(e) => setInputUrl(e.target.value)}
-                placeholder='输入 WebSocket URL'
-                size='sm'
-                variant='bordered'
-                classNames={{
-                  inputWrapper: clsx(
-                    'backdrop-blur-sm border',
-                    hasBackground
-                      ? 'bg-white/10 border-white/20'
-                      : 'bg-default-100/50 border-default-200/50'
-                  ),
-                  label: hasBackground ? 'text-white/80' : '',
-                  input: hasBackground ? 'text-white placeholder:text-white/50' : '',
-                }}
-              />
-              <Input
-                label='Token'
-                type='text'
-                value={inputToken}
-                onChange={(e) => setInputToken(e.target.value)}
-                placeholder='输入 Token (可选)'
-                size='sm'
-                variant='bordered'
-                classNames={{
-                  inputWrapper: clsx(
-                    'backdrop-blur-sm border',
-                    hasBackground
-                      ? 'bg-white/10 border-white/20'
-                      : 'bg-default-100/50 border-default-200/50'
-                  ),
-                  label: hasBackground ? 'text-white/80' : '',
-                  input: hasBackground ? 'text-white placeholder:text-white/50' : '',
-                }}
-              />
-              <div className='flex gap-2'>
-                <Button
-                  isIconOnly
-                  size='md'
-                  radius='full'
-                  color='warning'
-                  variant='flat'
-                  onPress={handleResetConfig}
-                  title='重置配置'
-                >
-                  <IoRefresh className='text-xl' />
-                </Button>
-                <Button
-                  onPress={shouldConnect ? handleDisconnect : handleConnect}
-                  size='md'
-                  radius='full'
-                  color={shouldConnect ? 'danger' : 'primary'}
-                  className='font-bold shadow-lg min-w-[100px] flex-1'
-                  startContent={shouldConnect ? <IoFlashOff /> : <IoFlash />}
-                >
-                  {shouldConnect ? '断开' : '连接'}
-                </Button>
+      <title>模型对话 - Liteyuki WebUI</title>
+      <div className='flex h-[calc(100vh-4rem)] flex-col overflow-hidden p-2 md:p-4'>
+        <div className='mx-auto flex h-full w-full max-w-6xl min-h-0 flex-col gap-3'>
+          <div
+            className={clsx(
+              'flex flex-wrap items-center justify-between gap-3 rounded-[28px] border px-4 py-3 backdrop-blur-xl',
+              hasBackground
+                ? 'border-white/30 bg-white/10 text-white'
+                : 'border-white/40 bg-white/60 text-default-700 dark:border-white/10 dark:bg-black/30 dark:text-default-100'
+            )}
+          >
+            <div className='min-w-0'>
+              <div className='text-sm font-semibold'>模型对话</div>
+              <div className={clsx(
+                'text-xs',
+                hasBackground ? 'text-white/70' : 'text-default-500'
+              )}
+              >
+                Ask LiteyukiBot
+                {settings?.promptProfile ? ` · Prompt ${settings.promptProfile}` : ''}
               </div>
             </div>
 
-            {/* Status Bar */}
-            <div className={clsx(
-              'p-2.5 rounded-xl border transition-colors flex flex-col md:flex-row gap-3 md:items-center md:justify-between',
+            <div className='flex items-center gap-2'>
+              <Chip
+                size='sm'
+                variant='flat'
+                color={statusTone}
+                className='backdrop-blur-sm'
+              >
+                {statusText}
+              </Chip>
+              <Button
+                isIconOnly
+                radius='full'
+                variant='light'
+                onPress={() => refreshSettings()}
+                isLoading={settingsLoading}
+              >
+                <LuRefreshCw />
+              </Button>
+              <Button
+                isIconOnly
+                radius='full'
+                variant='light'
+                onPress={handleClearMessages}
+                isDisabled={messages.length === 0}
+              >
+                <LuTrash2 />
+              </Button>
+            </div>
+          </div>
+
+          <div
+            className={clsx(
+              'flex min-h-0 flex-1 flex-col overflow-hidden rounded-[32px] border backdrop-blur-xl',
               hasBackground
-                ? 'bg-white/10 border-white/20'
-                : 'bg-white/50 dark:bg-white/5 border-white/20'
+                ? 'border-white/30 bg-white/10'
+                : 'border-white/40 bg-white/60 dark:border-white/10 dark:bg-black/30'
+            )}
+          >
+            <div ref={listRef} className='flex-1 overflow-y-auto px-3 py-4 md:px-6 md:py-6'>
+              {messages.length === 0
+                ? (
+                  <div className='flex h-full items-center justify-center'>
+                    <div className='w-full max-w-2xl px-4 text-center'>
+                      <div className={clsx(
+                        'mb-4 text-3xl font-semibold tracking-tight md:text-4xl',
+                        hasBackground ? 'text-white' : 'text-default-700 dark:text-default-100'
+                      )}
+                      >
+                        Ask LiteyukiBot
+                      </div>
+                      <p className={clsx(
+                        'mx-auto max-w-xl text-sm leading-7 md:text-base',
+                        hasBackground ? 'text-white/70' : 'text-default-500'
+                      )}
+                      >
+                        从这里开始一轮新的对话。
+                      </p>
+                      <div className='mt-5 flex flex-wrap items-center justify-center gap-2'>
+                        <Chip size='sm' variant='flat' color='primary'>
+                          {currentProviderLabel}
+                        </Chip>
+                        <Chip size='sm' variant='flat' color='default'>
+                          {currentModel || '未选择模型'}
+                        </Chip>
+                        {supports.imageInput && (
+                          <Chip size='sm' variant='flat' color='secondary'>
+                            支持图片输入
+                          </Chip>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  )
+                : (
+                  <div className='space-y-4'>
+                    {messages.map((message) => (
+                      <MessageBubble
+                        key={message.id}
+                        hasBackground={hasBackground}
+                        message={message}
+                      />
+                    ))}
+                  </div>
+                  )}
+            </div>
+
+            <div className={clsx(
+              'border-t p-3 md:p-4',
+              hasBackground ? 'border-white/10 bg-white/5' : 'border-white/20 bg-white/40 dark:bg-white/5'
             )}
             >
-              <div className='flex items-center gap-3 w-full md:w-auto'>
-                <div className='flex-shrink-0'>
-                  <WSStatus state={readyState} />
+              <div className='mx-auto w-full max-w-4xl'>
+                {attachments.length > 0 && (
+                  <div className='mb-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3'>
+                    {attachments.map((attachment, index) => (
+                      <AttachmentCard
+                        key={`${attachment.name}-${index}`}
+                        attachment={attachment}
+                        onRemove={() => {
+                          setAttachments((current) => current.filter((_, currentIndex) => currentIndex !== index));
+                        }}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                <div className='mb-3 flex flex-wrap items-center gap-2'>
+                  <Chip size='sm' variant='flat' color='primary'>
+                    {currentProviderLabel}
+                  </Chip>
+                  <Chip size='sm' variant='flat' color='default'>
+                    {currentModel || '未选择模型'}
+                  </Chip>
+                  {supports.reasoningEffort && config.reasoningEffort && (
+                    <Chip size='sm' variant='flat' color='secondary'>
+                      推理 {config.reasoningEffort}
+                    </Chip>
+                  )}
                 </div>
-                <div className='flex-1 md:w-56 overflow-hidden'>
-                  {FilterMessagesType}
-                </div>
-              </div>
-              <div className='flex gap-2 justify-end w-full md:w-auto pt-1 md:pt-0 border-t border-white/5 md:border-t-0'>
-                <Button
-                  size='sm'
-                  color='danger'
-                  variant='flat'
-                  radius='full'
-                  className='font-medium'
-                  onPress={clearMessages}
+
+                <div className={clsx(
+                  'rounded-[30px] border p-2 shadow-sm',
+                  hasBackground
+                    ? 'border-white/15 bg-white/10'
+                    : 'border-default-200/60 bg-white/80 dark:border-white/10 dark:bg-black/25'
+                )}
                 >
-                  清空日志
-                </Button>
-                <OneBotSendModal sendMessage={sendMessage} />
+                  <Textarea
+                    minRows={1}
+                    maxRows={7}
+                    value={draft}
+                    onChange={(event) => setDraft(event.target.value)}
+                    onPaste={handlePaste}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                        event.preventDefault();
+                        if (canSend) {
+                          void handleSend();
+                        }
+                      }
+                    }}
+                    placeholder='Ask LiteyukiBot'
+                    variant='flat'
+                    classNames={{
+                      inputWrapper: 'border-none bg-transparent shadow-none px-2 py-1 data-[hover=true]:bg-transparent group-data-[focus=true]:bg-transparent',
+                      input: clsx(
+                        'resize-none text-sm md:text-base',
+                        hasBackground ? 'text-white placeholder:text-white/45' : 'text-default-700 placeholder:text-default-400 dark:text-default-100 dark:placeholder:text-default-500'
+                      ),
+                    }}
+                  />
+
+                  <div className='mt-2 flex items-center justify-between gap-2'>
+                    <div className='flex items-center gap-2'>
+                      <Button
+                        isIconOnly
+                        radius='full'
+                        variant='flat'
+                        onPress={() => fileInputRef.current?.click()}
+                      >
+                        <LuPlus />
+                      </Button>
+                      <Button
+                        isIconOnly
+                        radius='full'
+                        variant='light'
+                        onPress={() => setSettingsOpen(true)}
+                      >
+                        <LuSettings2 />
+                      </Button>
+                    </div>
+
+                    <Button
+                      color='primary'
+                      radius='full'
+                      className='min-w-[120px] font-semibold'
+                      onPress={() => void handleSend()}
+                      isLoading={submitting}
+                      isDisabled={!canSend}
+                      startContent={!submitting ? <LuSend /> : undefined}
+                    >
+                      发送
+                    </Button>
+                  </div>
+                </div>
               </div>
             </div>
-          </CardBody>
-        </Card>
-
-        {/* Message List */}
-        <div className={clsx(
-          'flex-1 overflow-hidden rounded-2xl border backdrop-blur-xl',
-          hasBackground
-            ? 'bg-white/10 dark:bg-black/10 border-white/40 dark:border-white/10'
-            : 'bg-white/60 dark:bg-black/40 border-white/40 dark:border-white/10'
-        )}
-        >
-          <OneBotMessageList messages={filteredMessages} />
+          </div>
         </div>
+
+        <input
+          ref={fileInputRef}
+          type='file'
+          hidden
+          multiple
+          accept={acceptedAttachments}
+          onChange={(event) => {
+            const files = Array.from(event.target.files ?? []);
+            void appendFiles(files);
+            event.target.value = '';
+          }}
+        />
+
+        <Modal
+          isOpen={settingsOpen}
+          onOpenChange={setSettingsOpen}
+          size='2xl'
+          backdrop='blur'
+          scrollBehavior='inside'
+        >
+          <ModalContent>
+            {(onClose) => (
+              <>
+                <ModalHeader className='flex flex-col gap-1'>
+                  <span>模型设置</span>
+                  <span className='text-xs font-normal text-default-400'>
+                    当前页面会按后端真实支持能力收缩可用参数
+                  </span>
+                </ModalHeader>
+                <ModalBody className='gap-4'>
+                  {providerOptions.length > 0
+                    ? (
+                      <Select
+                        label='供应商'
+                        selectedKeys={currentBaseUrl ? [currentBaseUrl] : []}
+                        onSelectionChange={(keys) => {
+                          const selected = Array.from(keys)[0];
+                          if (typeof selected === 'string') {
+                            setConfigField('baseUrl', selected);
+                            const nextProviderId = detectProviderId(selected);
+                            const nextModels = modelOptionsForProvider(nextProviderId, providerCatalog);
+                            if (nextModels.length > 0 && !nextModels.includes(currentModel)) {
+                              setConfigField('model', nextModels[0]);
+                            }
+                          }
+                        }}
+                        variant='bordered'
+                      >
+                        {providerOptions.map((option) => (
+                          <SelectItem key={option.baseUrl} textValue={option.label}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </Select>
+                      )
+                    : (
+                      <Input
+                        label='供应商地址'
+                        value={config.baseUrl}
+                        onChange={(event) => setConfigField('baseUrl', event.target.value)}
+                        placeholder='https://api.openai.com/v1'
+                        variant='bordered'
+                      />
+                      )}
+
+                  {modelOptions.length > 0
+                    ? (
+                      <Select
+                        label='模型'
+                        selectedKeys={currentModel ? [currentModel] : []}
+                        onSelectionChange={(keys) => {
+                          const selected = Array.from(keys)[0];
+                          if (typeof selected === 'string') {
+                            setConfigField('model', selected);
+                          }
+                        }}
+                        variant='bordered'
+                      >
+                        {modelOptions.map((option) => (
+                          <SelectItem key={option} textValue={option}>
+                            {option}
+                          </SelectItem>
+                        ))}
+                      </Select>
+                      )
+                    : (
+                      <Input
+                        label='模型'
+                        value={config.model}
+                        onChange={(event) => setConfigField('model', event.target.value)}
+                        placeholder='例如 gpt-4.1-mini / gpt-5-mini'
+                        variant='bordered'
+                      />
+                      )}
+
+                  {supports.reasoningEffort && reasoningOptions.length > 0 && (
+                    <Select
+                      label='推理强度'
+                      selectedKeys={config.reasoningEffort ? [config.reasoningEffort] : []}
+                      onSelectionChange={(keys) => {
+                        const selected = Array.from(keys)[0];
+                        if (typeof selected === 'string') {
+                          setConfigField('reasoningEffort', selected);
+                        }
+                      }}
+                      variant='bordered'
+                    >
+                      {reasoningOptions.map((option) => (
+                        <SelectItem key={option} textValue={option}>
+                          {option}
+                        </SelectItem>
+                      ))}
+                    </Select>
+                  )}
+
+                  <div className='grid gap-4 md:grid-cols-3'>
+                    {supports.temperature && (
+                      <Input
+                        label='Temperature'
+                        value={config.temperature}
+                        onChange={(event) => setConfigField('temperature', event.target.value)}
+                        placeholder='默认'
+                        variant='bordered'
+                      />
+                    )}
+                    {supports.topP && (
+                      <Input
+                        label='Top P'
+                        value={config.topP}
+                        onChange={(event) => setConfigField('topP', event.target.value)}
+                        placeholder='默认'
+                        variant='bordered'
+                      />
+                    )}
+                    {supports.topK && (
+                      <Input
+                        label='Top K'
+                        value={config.topK}
+                        onChange={(event) => setConfigField('topK', event.target.value)}
+                        placeholder='默认'
+                        variant='bordered'
+                      />
+                    )}
+                  </div>
+
+                  <div className='rounded-2xl border border-default-200/60 bg-default-50/70 px-4 py-3 text-sm text-default-500 dark:border-white/10 dark:bg-white/5'>
+                    当前 Prompt Profile: {settings?.promptProfile || 'default'}
+                    <br />
+                    附件支持:
+                    {' '}
+                    {supports.imageInput ? '图片' : '无图片'}
+                    {' / '}
+                    {supports.textFileInput ? '文本文件' : '无文本文件'}
+                    {' / '}
+                    {supports.binaryFileInput ? '普通文件' : '无普通文件'}
+                    {providerNotes.length > 0 && (
+                      <>
+                        <br />
+                        {providerNotes[0]}
+                      </>
+                    )}
+                  </div>
+                </ModalBody>
+                <ModalFooter>
+                  <Button variant='light' radius='full' onPress={handleResetConfig}>
+                    重置
+                  </Button>
+                  <Button variant='light' radius='full' onPress={() => refreshSettings()}>
+                    刷新配置
+                  </Button>
+                  <Button color='primary' radius='full' onPress={onClose}>
+                    完成
+                  </Button>
+                </ModalFooter>
+              </>
+            )}
+          </ModalContent>
+        </Modal>
       </div>
     </>
   );

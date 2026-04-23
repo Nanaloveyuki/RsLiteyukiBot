@@ -48,7 +48,7 @@ export const siteConfig = {
       href: '/debug/http',
     },
     {
-      label: '实时调试',
+      label: '模型对话',
       icon: <LuZap className='w-5 h-5' />,
       href: '/debug/ws',
     },

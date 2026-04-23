@@ -16,6 +16,7 @@ use serde_json::{Map, Value};
 
 use crate::adapter::{AdapterManager, AdapterPacket};
 use crate::comm::{ChannelMessage, ChannelRegistry, SharedStore};
+use crate::config_paths::{resolve_default_app_config_path, resolve_existing_app_config_path};
 use crate::core::{BotEvent, LifecycleContext};
 use crate::observability::Logger;
 use crate::session::SessionRouter;
@@ -35,14 +36,6 @@ const PYTHON_HEALTH_HANDLER_ATTRS: [&str; 3] =
     ["on_health_check", "health_check", "liteyuki_health_check"];
 const PYTHON_UNLOAD_HANDLER_ATTRS: [&str; 3] = ["on_unload", "unload", "liteyuki_unload"];
 const PYTHON_SHUTDOWN_HANDLER_ATTRS: [&str; 3] = ["on_shutdown", "shutdown", "liteyuki_shutdown"];
-const DEFAULT_PLUGIN_CONFIG_PATHS: [&str; 6] = [
-    "config.yaml",
-    "rust-config.yaml",
-    "rust-config.yml",
-    "rust-config.toml",
-    "config/rust-core.yaml",
-    "config/rust-core.toml",
-];
 static PLUGIN_CONFIG_RW_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 const HOST_PLUGIN_API_VERSION: &str = "0.1";
 const PERMISSION_KV_READ: &str = "kv.read";
@@ -2467,13 +2460,10 @@ fn resolve_plugin_config_path(config_path: Option<&Path>) -> PathBuf {
     {
         return PathBuf::from(path);
     }
-    for candidate in DEFAULT_PLUGIN_CONFIG_PATHS {
-        let candidate = PathBuf::from(candidate);
-        if candidate.exists() {
-            return candidate;
-        }
+    if let Some(path) = resolve_existing_app_config_path() {
+        return path;
     }
-    PathBuf::from("config.yaml")
+    resolve_default_app_config_path()
 }
 
 fn resolve_declared_plugin_config_path(

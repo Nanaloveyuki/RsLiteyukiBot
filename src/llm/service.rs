@@ -1,15 +1,34 @@
 use std::path::PathBuf;
 
 use crate::app_config::{AppConfigDoc, LlmRuntimeConfig, resolve_llm_config};
+use crate::config_paths::resolve_preferred_llm_prompt_store_path;
 use crate::i18n::{tr, trf};
 use crate::llm::{
-    LlmClientError, LlmPromptProfile, LlmPromptStore, OpenAiResponsesClient, compose_user_prompt,
+    LlmClientError, LlmCompletion, LlmEventSink, LlmFunctionTool, LlmPromptProfile, LlmPromptStore,
+    OpenAiResponsesClient, compose_user_prompt,
 };
-use crate::runtime_support::{
-    LLM_PROMPT_STORE_PATH, load_app_config_with_llm_overlay, next_llm_api_key_index,
-};
+use crate::runtime_support::{load_app_config_with_llm_overlay, next_llm_api_key_index};
 
 pub(crate) async fn generate_llm_reply(prompt: &str) -> Result<String, String> {
+    complete_llm_prompt(prompt, &[], None)
+        .await
+        .map(|completion| completion.text)
+}
+
+#[allow(dead_code)]
+pub(crate) async fn generate_llm_reply_with_events(
+    prompt: &str,
+    sink: &mut dyn LlmEventSink,
+) -> Result<LlmCompletion, String> {
+    complete_llm_prompt(prompt, &[], Some(sink)).await
+}
+
+#[allow(dead_code)]
+pub(crate) async fn complete_llm_prompt(
+    prompt: &str,
+    tools: &[LlmFunctionTool],
+    sink: Option<&mut dyn LlmEventSink>,
+) -> Result<LlmCompletion, String> {
     let llm_config = current_llm_runtime_config()?;
     if !llm_config.enabled {
         return Err(tr("main.llm.disabled"));
@@ -29,7 +48,7 @@ pub(crate) async fn generate_llm_reply(prompt: &str) -> Result<String, String> {
     let client = OpenAiResponsesClient::from_runtime_with_api_key(&llm_config, &api_key)
         .map_err(|err: LlmClientError| err.to_string())?;
     client
-        .generate(composed_prompt.as_str())
+        .complete(composed_prompt.as_str(), tools, sink)
         .await
         .map_err(|err| err.to_string())
 }
@@ -62,12 +81,7 @@ pub(crate) fn persist_llm_prompt_store(store: &LlmPromptStore) -> Result<PathBuf
 }
 
 pub(crate) fn resolve_llm_prompt_store_path() -> PathBuf {
-    if let Ok(path) = std::env::var("LY_LLM_PROMPT_STORE_PATH")
-        && !path.trim().is_empty()
-    {
-        return PathBuf::from(path);
-    }
-    PathBuf::from(LLM_PROMPT_STORE_PATH)
+    resolve_preferred_llm_prompt_store_path()
 }
 
 fn pick_next_api_key(llm_config: &LlmRuntimeConfig) -> Option<String> {

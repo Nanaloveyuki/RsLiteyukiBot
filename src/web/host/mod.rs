@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod file_api;
 mod http;
+mod llm_api;
 mod log_api;
 mod mirror_api;
 mod plugin_api;

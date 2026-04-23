@@ -141,6 +141,10 @@ pub(super) fn route_napcat_api(
         return response;
     }
 
+    if let Some(response) = llm_api::route_llm_api(service, method, api_path, request, is_head) {
+        return response;
+    }
+
     if let Some(response) = log_api::route_log_api(service, api_path, raw_path, request, is_head) {
         return response;
     }

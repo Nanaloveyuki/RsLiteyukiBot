@@ -5,18 +5,14 @@ use std::sync::{LazyLock, Mutex};
 use liteyukibot_core::AdapterConfig;
 use serde::Deserialize;
 
+use crate::config_paths::{
+    migrate_legacy_app_config_to_user_dir, replace_config_file, resolve_default_app_config_path,
+    resolve_existing_app_config_path, resolve_existing_legacy_app_config_path,
+    resolve_existing_user_app_config_path,
+};
 use crate::i18n::{AppLocale, tr, trf, trf_for};
 use crate::llm;
 use crate::tui;
-
-pub(crate) const APP_CONFIG_PATHS: [&str; 6] = [
-    "config.yaml",
-    "rust-config.yaml",
-    "rust-config.yml",
-    "rust-config.toml",
-    "config/rust-core.yaml",
-    "config/rust-core.toml",
-];
 
 static LAST_RELOAD_WARNING_STATE: LazyLock<Mutex<Option<ReloadWarningState>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -310,6 +306,8 @@ pub(crate) struct LlmConfigSection {
     #[serde(default)]
     pub(crate) enabled: Option<bool>,
     #[serde(default)]
+    pub(crate) stream: Option<bool>,
+    #[serde(default)]
     pub(crate) provider: Option<String>,
     #[serde(default)]
     pub(crate) base_url: Option<String>,
@@ -324,6 +322,14 @@ pub(crate) struct LlmConfigSection {
     #[serde(default)]
     pub(crate) timeout_seconds: Option<u64>,
     #[serde(default)]
+    pub(crate) temperature: Option<f32>,
+    #[serde(default)]
+    pub(crate) top_p: Option<f32>,
+    #[serde(default)]
+    pub(crate) top_k: Option<u32>,
+    #[serde(default)]
+    pub(crate) parallel_tool_calls: Option<bool>,
+    #[serde(default)]
     pub(crate) system_prompt: Option<String>,
     #[serde(default)]
     pub(crate) command_prefix: Option<String>,
@@ -332,11 +338,16 @@ pub(crate) struct LlmConfigSection {
 #[derive(Debug, Clone)]
 pub(crate) struct LlmRuntimeConfig {
     pub(crate) enabled: bool,
+    pub(crate) stream: bool,
     pub(crate) provider: String,
     pub(crate) base_url: String,
     pub(crate) api_keys: Vec<String>,
     pub(crate) model: String,
     pub(crate) timeout_ms: u64,
+    pub(crate) temperature: Option<f32>,
+    pub(crate) top_p: Option<f32>,
+    pub(crate) top_k: Option<u32>,
+    pub(crate) parallel_tool_calls: bool,
     pub(crate) system_prompt: Option<String>,
     pub(crate) command_prefix: String,
 }
@@ -352,6 +363,26 @@ impl llm::OpenAiRuntimeConfig for LlmRuntimeConfig {
 
     fn timeout_ms(&self) -> u64 {
         self.timeout_ms
+    }
+
+    fn stream(&self) -> bool {
+        self.stream
+    }
+
+    fn temperature(&self) -> Option<f32> {
+        self.temperature
+    }
+
+    fn top_p(&self) -> Option<f32> {
+        self.top_p
+    }
+
+    fn top_k(&self) -> Option<u32> {
+        self.top_k
+    }
+
+    fn parallel_tool_calls(&self) -> bool {
+        self.parallel_tool_calls
     }
 
     fn system_prompt(&self) -> Option<&str> {
@@ -421,25 +452,53 @@ pub(crate) fn load_app_config_with_warnings(emit_stderr: bool) -> (AppConfigDoc,
 }
 
 pub(crate) fn resolve_app_config_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("LY_CONFIG_PATH") {
-        return Some(PathBuf::from(path));
-    }
-
-    APP_CONFIG_PATHS
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| path.exists())
+    resolve_existing_app_config_path()
 }
 
 pub(crate) fn ensure_default_config_files() -> Result<(), Box<dyn std::error::Error>> {
-    write_default_config_if_missing(Path::new("config.yaml"))?;
-
     if let Ok(path) = std::env::var("LY_CONFIG_PATH") {
         let path = PathBuf::from(path);
+        write_default_config_if_missing(path.as_path())?;
+        return Ok(());
+    }
+
+    if let Some(user_path) = resolve_existing_user_app_config_path() {
+        replace_default_user_app_config_with_legacy(user_path.as_path())
+            .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+        return Ok(());
+    }
+
+    migrate_legacy_app_config_to_user_dir()
+        .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+
+    if resolve_existing_user_app_config_path().is_none() {
+        let path = resolve_default_app_config_path();
         write_default_config_if_missing(path.as_path())?;
     }
 
     Ok(())
+}
+
+fn replace_default_user_app_config_with_legacy(user_path: &Path) -> Result<(), String> {
+    let Some(legacy_path) = resolve_existing_legacy_app_config_path() else {
+        return Ok(());
+    };
+    if legacy_path == user_path {
+        return Ok(());
+    }
+
+    let current = std::fs::read_to_string(user_path)
+        .map_err(|err| format!("failed to read user config {}: {err}", user_path.display()))?;
+    let template = default_config_template(user_path);
+    if normalize_template_text(current.as_str()) != normalize_template_text(template.as_str()) {
+        return Ok(());
+    }
+
+    replace_config_file(legacy_path.as_path(), user_path)
+}
+
+fn normalize_template_text(raw: &str) -> &str {
+    raw.trim()
 }
 
 pub(crate) fn write_default_config_if_missing(
@@ -546,9 +605,14 @@ connect:
 
 llm:
   enabled: false
+  # stream: true
   provider: openai
   model: gpt-4.1-mini
   timeout_seconds: 20
+  # temperature: 0.7
+  # top_p: 1.0
+  # top_k: 40 # compatibility providers only; ignored for official OpenAI Responses
+  # parallel_tool_calls: true
   command_prefix: /ask
   # provider_urls:
   #   - https://api.openai.com
@@ -638,9 +702,14 @@ timeout_seconds = 30
 
 [llm]
 enabled = false
+# stream = true
 provider = "openai"
 model = "gpt-4.1-mini"
 timeout_seconds = 20
+# temperature = 0.7
+# top_p = 1.0
+# top_k = 40 # compatibility providers only; ignored for official OpenAI Responses
+# parallel_tool_calls = true
 command_prefix = "/ask"
 # provider_urls = ["https://api.openai.com"]
 # api_keys = ["sk-xxx"]
@@ -926,6 +995,12 @@ pub(crate) fn resolve_llm_config(app_config: &AppConfigDoc) -> LlmRuntimeConfig 
         .or_else(|| section.and_then(|cfg| cfg.enabled))
         .unwrap_or(false);
 
+    let stream = std::env::var("LY_LLM_STREAM")
+        .ok()
+        .and_then(|raw| parse_bool_env(raw.trim()))
+        .or_else(|| section.and_then(|cfg| cfg.stream))
+        .unwrap_or(false);
+
     let provider = std::env::var("LY_LLM_PROVIDER")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -994,6 +1069,30 @@ pub(crate) fn resolve_llm_config(app_config: &AppConfigDoc) -> LlmRuntimeConfig 
         .unwrap_or(DEFAULT_LLM_TIMEOUT_SECONDS);
     let timeout_ms = seconds_to_timeout_ms(Some(timeout_seconds));
 
+    let temperature = std::env::var("LY_LLM_TEMPERATURE")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f32>().ok())
+        .or_else(|| section.and_then(|cfg| cfg.temperature))
+        .filter(|value| value.is_finite() && (0.0..=2.0).contains(value));
+
+    let top_p = std::env::var("LY_LLM_TOP_P")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f32>().ok())
+        .or_else(|| section.and_then(|cfg| cfg.top_p))
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value));
+
+    let top_k = std::env::var("LY_LLM_TOP_K")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .or_else(|| section.and_then(|cfg| cfg.top_k))
+        .filter(|value| *value > 0);
+
+    let parallel_tool_calls = std::env::var("LY_LLM_PARALLEL_TOOL_CALLS")
+        .ok()
+        .and_then(|raw| parse_bool_env(raw.trim()))
+        .or_else(|| section.and_then(|cfg| cfg.parallel_tool_calls))
+        .unwrap_or(true);
+
     let system_prompt = std::env::var("LY_LLM_SYSTEM_PROMPT")
         .ok()
         .or_else(|| section.and_then(|cfg| cfg.system_prompt.clone()))
@@ -1013,11 +1112,16 @@ pub(crate) fn resolve_llm_config(app_config: &AppConfigDoc) -> LlmRuntimeConfig 
 
     LlmRuntimeConfig {
         enabled,
+        stream,
         provider,
         base_url,
         api_keys,
         model,
         timeout_ms,
+        temperature,
+        top_p,
+        top_k,
+        parallel_tool_calls,
         system_prompt,
         command_prefix,
     }
@@ -1627,6 +1731,33 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
                 locale,
                 "config.warn.should_be_positive",
                 &[("field", "llm.timeout_seconds")],
+            ));
+        }
+        if llm
+            .temperature
+            .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
+        {
+            warnings.push(trf_for(
+                locale,
+                "config.warn.invalid_range",
+                &[("field", "llm.temperature"), ("range", "0..=2")],
+            ));
+        }
+        if llm
+            .top_p
+            .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+        {
+            warnings.push(trf_for(
+                locale,
+                "config.warn.invalid_range",
+                &[("field", "llm.top_p"), ("range", "0..=1")],
+            ));
+        }
+        if llm.top_k.is_some_and(|value| value == 0) {
+            warnings.push(trf_for(
+                locale,
+                "config.warn.should_be_positive",
+                &[("field", "llm.top_k")],
             ));
         }
         if llm

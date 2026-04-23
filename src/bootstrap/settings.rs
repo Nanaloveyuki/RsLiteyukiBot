@@ -5,17 +5,9 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
+use crate::config_paths::resolve_existing_app_config_path;
 use crate::core::BotRuntimeConfig;
 use crate::observability::{LogLevel, LogMode, LoggerConfig, TimeZone, TimestampFormat};
-
-const DEFAULT_CONFIG_PATHS: [&str; 6] = [
-    "rust-config.yaml",
-    "rust-config.yml",
-    "rust-config.toml",
-    "config/rust-core.yaml",
-    "config/rust-core.toml",
-    "config.yaml",
-];
 
 static GLOBAL_SETTINGS: OnceLock<RuntimeSettings> = OnceLock::new();
 
@@ -140,12 +132,8 @@ impl ConfigManager {
         }
 
         let mut manager = Self::new();
-        for candidate in DEFAULT_CONFIG_PATHS {
-            let path = PathBuf::from(candidate);
-            if path.exists() {
-                manager.merge_file(&path)?;
-                break;
-            }
+        if let Some(path) = resolve_existing_app_config_path() {
+            manager.merge_file(&path)?;
         }
         Ok(manager)
     }

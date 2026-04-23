@@ -5,12 +5,14 @@ use std::time::Duration;
 pub(crate) use liteyukibot_core::{
     BotEvent, PluginManifestLoader, PluginSdk, SessionEvent, SessionScope,
 };
-use liteyukibot_core::{LiteyukiBot, RuntimeTarget};
+use liteyukibot_core::{LiteyukiBot, LogLevel, RuntimeTarget, emit_console_log};
 use tokio::sync::mpsc;
 
 mod app_config;
 mod command_registry;
 mod config_edit;
+#[allow(dead_code)]
+mod config_paths;
 mod external_commands;
 mod i18n;
 mod llm;
@@ -19,6 +21,7 @@ mod runtime_support;
 mod superuser;
 mod tui;
 
+use crate::config_paths::{resolve_default_app_config_path, resolve_default_llm_config_path};
 use crate::external_commands::{ExternalCommandObserver, install_external_event_handlers};
 #[cfg(test)]
 use crate::external_commands::{llm_usage_text, matches_external_ask_command};
@@ -29,9 +32,8 @@ use crate::llm::service::{
 };
 use crate::llm::{LlmPromptPreview, OpenAiResponsesClient, build_prompt_preview};
 use crate::runtime_support::{
-    EXTERNAL_API_TIMEOUT, ExternalGatewaySnapshot, LLM_CONFIG_PATHS, describe_runtime_config,
-    ensure_llm_config_file, load_app_config_with_llm_overlay, prepare_runtime_bootstrap,
-    resolve_llm_config_path,
+    EXTERNAL_API_TIMEOUT, ExternalGatewaySnapshot, describe_runtime_config, ensure_llm_config_file,
+    load_app_config_with_llm_overlay, prepare_runtime_bootstrap, resolve_llm_config_path,
 };
 #[cfg(test)]
 use crate::runtime_support::{
@@ -305,15 +307,39 @@ impl ExternalCommandObserver for TuiExternalCommandObserver {
 
 fn reload_from_config(bot: &LiteyukiBot) -> tui::ReloadFuture<'_> {
     Box::pin(async move {
+        emit_console_log(
+            LogLevel::Info,
+            "runtime.reload",
+            format!(
+                "starting reload (app_config={}, llm_config={})",
+                describe_optional_path_for_log(resolve_app_config_path()),
+                describe_optional_path_for_log(resolve_llm_config_path())
+            ),
+        );
         let (app_config, mut warnings) = load_app_config_with_llm_overlay();
         warnings.extend(collect_runtime_reload_warnings(&app_config));
-        let adapters = load_adapter_configs(&app_config)
-            .map_err(|err| format!("failed to load adapter configs: {err}"))?;
+        let adapters = load_adapter_configs(&app_config).map_err(|err| {
+            let message = format!("failed to load adapter configs: {err}");
+            emit_console_log(
+                LogLevel::Error,
+                "runtime.reload",
+                format!("reload failed during adapter config load: {message}"),
+            );
+            message
+        })?;
         let autostart = !adapters.is_empty();
         let locale = resolve_app_locale(&app_config);
         bot.reload_adapters(adapters.clone(), autostart)
             .await
-            .map_err(|err| format!("failed to apply adapter reload: {err}"))?;
+            .map_err(|err| {
+                let message = format!("failed to apply adapter reload: {err}");
+                emit_console_log(
+                    LogLevel::Error,
+                    "runtime.reload",
+                    format!("reload failed during adapter apply: {message}"),
+                );
+                message
+            })?;
         let tui_config = resolve_tui_config(&app_config);
         let llm_command_prefix = resolve_llm_config(&app_config).command_prefix;
         let disabled_commands = resolve_disabled_scope_commands(&app_config);
@@ -323,9 +349,32 @@ fn reload_from_config(bot: &LiteyukiBot) -> tui::ReloadFuture<'_> {
         help_whitelist.sort();
         bot.reload_plugins(disabled_plugins.clone())
             .await
-            .map_err(|err| format!("failed to apply plugin reload: {err}"))?;
+            .map_err(|err| {
+                let message = format!("failed to apply plugin reload: {err}");
+                emit_console_log(
+                    LogLevel::Error,
+                    "runtime.reload",
+                    format!("reload failed during plugin apply: {message}"),
+                );
+                message
+            })?;
         set_current_locale(locale);
         warnings.extend(reload_i18n_catalog(bot.plugin_dirs().iter()));
+        emit_console_log(
+            LogLevel::Info,
+            "runtime.reload",
+            format!(
+                "reload applied (adapters={}, autostart={}, locale={}, help_whitelist={}, llm_prefix={}, disabled_commands={}, disabled_plugins={}, warnings={})",
+                adapters.len(),
+                autostart,
+                locale.as_str(),
+                help_whitelist.len(),
+                llm_command_prefix,
+                disabled_commands.len(),
+                disabled_plugins.len(),
+                warnings.len()
+            ),
+        );
         Ok(tui::ReloadResult {
             adapters,
             adapter_autostart: autostart,
@@ -338,6 +387,11 @@ fn reload_from_config(bot: &LiteyukiBot) -> tui::ReloadFuture<'_> {
             warnings,
         })
     })
+}
+
+fn describe_optional_path_for_log(path: Option<PathBuf>) -> String {
+    path.map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<not found>".to_string())
 }
 
 fn apply_plugin_policy(
@@ -360,7 +414,7 @@ fn apply_plugin_policy(
 }
 
 fn persist_help_whitelist(entries: Vec<String>) -> Result<String, String> {
-    let path = resolve_app_config_path().unwrap_or_else(|| PathBuf::from("config.yaml"));
+    let path = resolve_app_config_path().unwrap_or_else(resolve_default_app_config_path);
     write_default_config_if_missing(path.as_path())
         .map_err(|err| format!("failed to ensure config exists: {err}"))?;
     config_edit::persist_onebot_v11_whitelist(path.as_path(), &entries)?;
@@ -374,7 +428,7 @@ fn persist_help_whitelist(entries: Vec<String>) -> Result<String, String> {
 }
 
 fn persist_disabled_commands_config(entries: Vec<String>) -> Result<String, String> {
-    let path = resolve_app_config_path().unwrap_or_else(|| PathBuf::from("config.yaml"));
+    let path = resolve_app_config_path().unwrap_or_else(resolve_default_app_config_path);
     write_default_config_if_missing(path.as_path())
         .map_err(|err| format!("failed to ensure config exists: {err}"))?;
     config_edit::persist_disabled_commands(path.as_path(), &entries)?;
@@ -388,7 +442,7 @@ fn persist_disabled_commands_config(entries: Vec<String>) -> Result<String, Stri
 }
 
 fn persist_disabled_plugins_config(entries: Vec<String>) -> Result<String, String> {
-    let path = resolve_app_config_path().unwrap_or_else(|| PathBuf::from("config.yaml"));
+    let path = resolve_app_config_path().unwrap_or_else(resolve_default_app_config_path);
     write_default_config_if_missing(path.as_path())
         .map_err(|err| format!("failed to ensure config exists: {err}"))?;
     config_edit::persist_disabled_plugins(path.as_path(), &entries)?;
@@ -675,7 +729,7 @@ fn resolve_llm_config_write_path() -> PathBuf {
     {
         return PathBuf::from(path);
     }
-    PathBuf::from(LLM_CONFIG_PATHS[0])
+    resolve_default_llm_config_path()
 }
 
 fn extract_llm_keys_from_doc(doc: &AppConfigDoc) -> Vec<String> {

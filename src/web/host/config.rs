@@ -65,7 +65,28 @@ fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     }
     let body = serde_json::to_string_pretty(value)
         .map_err(|err| format!("failed to serialize {}: {err}", path.display()))?;
-    fs::write(path, body).map_err(|err| format!("failed to write {}: {err}", path.display()))
+    match fs::write(path, body) {
+        Ok(()) => {
+            emit_console_log(
+                LogLevel::Info,
+                "web.config",
+                format!("persisted WebUI config {}", path.display()),
+            );
+            Ok(())
+        }
+        Err(err) => {
+            let message = format!("failed to write {}: {err}", path.display());
+            emit_console_log(
+                LogLevel::Error,
+                "web.config",
+                format!(
+                    "failed to persist WebUI config {}: {message}",
+                    path.display()
+                ),
+            );
+            Err(message)
+        }
+    }
 }
 
 pub(super) fn load_webui_server_config(port: u16) -> NapCatWebUIConfig {
