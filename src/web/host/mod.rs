@@ -1,4 +1,5 @@
 mod auth;
+mod capability_api;
 mod config;
 mod file_api;
 mod http;
@@ -1785,6 +1786,7 @@ fn is_expected_client_disconnect(err: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RuntimeTarget;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const TEST_HTML: &str = "<!doctype html><title>Shared Host</title>";
@@ -1912,6 +1914,190 @@ mod tests {
         }
     }
 
+    struct CapabilityRouteTestEnv {
+        root: PathBuf,
+        guards: Vec<EnvVarGuard>,
+    }
+
+    impl CapabilityRouteTestEnv {
+        fn new() -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("rsliteyuki-capability-route-{nanos}"));
+            fs::create_dir_all(root.as_path()).expect("temp capability dir should be created");
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"cap-test\"\nversion = \"0.0.0\"\n",
+            )
+            .expect("workspace marker should be written");
+            fs::create_dir_all(root.join("skills").join("demo"))
+                .expect("skill dir should be created");
+            fs::write(
+                root.join("skills").join("demo").join("SKILL.md"),
+                "---\ndescription: Demo route skill\n---\n# Demo",
+            )
+            .expect("skill file should be written");
+
+            let guards = vec![EnvVarGuard::set("LY_WORKSPACE_ROOT", root.as_path())];
+            Self { root, guards }
+        }
+
+        fn mcp_config_path(&self) -> PathBuf {
+            self.root.join("mcp-servers.json")
+        }
+    }
+
+    impl Drop for CapabilityRouteTestEnv {
+        fn drop(&mut self) {
+            self.guards.clear();
+            let _ = fs::remove_dir_all(self.root.as_path());
+        }
+    }
+
+    struct PluginCapabilityRouteTestEnv {
+        root: PathBuf,
+        guards: Vec<EnvVarGuard>,
+    }
+
+    impl PluginCapabilityRouteTestEnv {
+        fn new() -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos();
+            let root =
+                std::env::temp_dir().join(format!("rsliteyuki-plugin-capability-route-{nanos}"));
+            fs::create_dir_all(root.as_path()).expect("temp plugin capability dir should exist");
+
+            let config_path = root.join("config.yaml");
+            fs::write(config_path.as_path(), "core:\n  adapters: []\n")
+                .expect("route test config should be written");
+
+            let plugin_dir = root.join("plugins").join("capability_route_plugin");
+            fs::create_dir_all(plugin_dir.as_path()).expect("plugin dir should be created");
+            fs::write(
+                plugin_dir.join("capability_route_plugin.py"),
+                r#"from astrbot.api import FunctionTool, star
+from astrbot.api.event import filter
+from quart import jsonify, make_response, request
+
+
+class CapabilityRoutePlugin(star.Star):
+    async def initialize(self):
+        self.context.register_web_api("/cap-route", self.handle_api, ["POST"], "cap route api")
+        self.context.register_web_api("/cap-route", self.handle_multi_api, ["PATCH"], "cap route patch api")
+        self.context.register_web_api("/cap-multi", self.handle_multi_api, ["GET", "PUT", "PATCH", "DELETE"], "cap multi api")
+        self.context.register_web_api("/cap-quart", self.handle_quart_api, ["POST"], "cap quart api")
+        self.context.register_web_api("/cap-text", self.handle_text_api, ["GET"], "cap text api")
+        self.context.add_llm_tools(
+            FunctionTool(
+                name="manual_capability_route_tool",
+                description="manual route tool",
+                parameters={"type": "object", "properties": {}},
+                handler=self.manual_tool,
+            ),
+        )
+        await self.context.cron_manager.add_active_job(
+            name="capability-route-cron",
+            description="capability route cron",
+            cron_expression="*/5 * * * *",
+            payload={"mode": "route"},
+            enabled=True,
+        )
+        self.context.register_task("capability-route-task", "route task")
+
+    async def handle_api(self, request=None):
+        if request and request.get("query", {}).get("mode") == "fail":
+            raise RuntimeError("capability route web api failed")
+        return {
+            "status": 201,
+            "body": {
+                "method": request.get("method") if request else None,
+                "path": request.get("path") if request else None,
+                "query": request.get("query") if request else None,
+                "header": request.get("headers", {}).get("X-Test") if request else None,
+                "bodyJson": request.get("bodyJson") if request else None,
+                "bodyText": request.get("bodyText") if request else None,
+                "bodyBytesBase64": request.get("bodyBytesBase64") if request else None,
+                "peerIp": request.get("peerIp") if request else None,
+            },
+        }
+
+    async def handle_multi_api(self, request=None):
+        method = request.get("method") if request else None
+        return {
+            "status": 202,
+            "body": {
+                "method": method,
+                "query": request.get("query") if request else None,
+            },
+        }
+
+    async def handle_quart_api(self):
+        payload = await request.get_json()
+        return make_response(
+            jsonify(
+                {
+                    "method": request.method,
+                    "path": request.path,
+                    "page": request.args.get("page", 1, type=int),
+                    "header": request.headers.get("x-test"),
+                    "bodyValue": payload.get("value") if payload else None,
+                    "peerIp": request.remote_addr,
+                }
+            ),
+            207,
+        )
+
+    async def handle_text_api(self, request=None):
+        return "capability route text"
+
+    async def manual_tool(self, value: str = "ok", count: int = 1):
+        if value == "fail":
+            raise RuntimeError("capability route tool failed")
+        return {"value": value, "count": count}
+
+    @filter.llm_tool("decorated_capability_route_tool")
+    async def decorated_tool(self, query: str):
+        if query == "fail":
+            raise RuntimeError("decorated capability route tool failed")
+        return query
+"#,
+            )
+            .expect("plugin module should be written");
+            fs::write(
+                plugin_dir.join("plugin.json"),
+                r#"{
+  "id": "capability-route-plugin",
+  "name": "Capability Route Plugin",
+  "type": "service",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "capability_route_plugin"
+  }
+}"#,
+            )
+            .expect("plugin manifest should be written");
+
+            let guards = vec![
+                EnvVarGuard::set("LY_CONFIG_PATH", config_path.as_path()),
+                EnvVarGuard::set("LY_LLM_CONFIG_PATH", root.join("llm-config.yaml").as_path()),
+                EnvVarGuard::set("LY_PASSWORD_PATH", root.join("password.yaml").as_path()),
+                EnvVarGuard::set("LY_PLUGIN_DIRS", root.join("plugins").as_path()),
+            ];
+            Self { root, guards }
+        }
+    }
+
+    impl Drop for PluginCapabilityRouteTestEnv {
+        fn drop(&mut self) {
+            self.guards.clear();
+            let _ = fs::remove_dir_all(self.root.as_path());
+        }
+    }
+
     fn split_response(response: Vec<u8>) -> (String, Vec<u8>) {
         let Some(split_at) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
             panic!("response did not include header separator");
@@ -1968,6 +2154,342 @@ mod tests {
             "unexpected headers for {method} {path}: {headers}"
         );
         serde_json::from_slice(&body).expect("API response body should be valid json")
+    }
+
+    struct TestHttpRequest {
+        method: String,
+        path: String,
+        headers: HashMap<String, String>,
+        json: Value,
+    }
+
+    async fn spawn_mock_capability_mcp_server()
+    -> Result<(String, tokio::task::JoinHandle<()>), String> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|err| format!("bind failed: {err}"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|err| format!("addr failed: {err}"))?;
+        let handle = tokio::spawn(async move {
+            for _ in 0..6 {
+                let (mut socket, _) = listener.accept().await.expect("accept should succeed");
+                let request = read_test_http_request_json(&mut socket)
+                    .await
+                    .expect("request should parse");
+                let method = request
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .expect("method should exist");
+                match method {
+                    "initialize" => {
+                        write_test_json_response(
+                            &mut socket,
+                            200,
+                            Some("capability-session"),
+                            &serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": request["id"],
+                                "result": {
+                                    "protocolVersion": "2024-11-05",
+                                    "capabilities": {
+                                        "tools": {}
+                                    },
+                                    "serverInfo": {
+                                        "name": "mock",
+                                        "version": "1.0.0"
+                                    }
+                                }
+                            }),
+                        )
+                        .await
+                        .expect("initialize response should write");
+                    }
+                    "notifications/initialized" => {
+                        write_test_empty_response(&mut socket, 202)
+                            .await
+                            .expect("notification response should write");
+                    }
+                    "tools/list" => {
+                        write_test_json_response(
+                            &mut socket,
+                            200,
+                            None,
+                            &serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": request["id"],
+                                "result": {
+                                    "tools": [
+                                        {
+                                            "name": "lookup_weather",
+                                            "description": "Lookup weather by city",
+                                            "inputSchema": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "city": {
+                                                        "type": "string",
+                                                        "required": true
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ]
+                                }
+                            }),
+                        )
+                        .await
+                        .expect("tools/list response should write");
+                    }
+                    other => panic!("unexpected MCP method: {other}"),
+                }
+            }
+        });
+
+        Ok((format!("http://{address}/mcp"), handle))
+    }
+
+    async fn spawn_mock_anthropic_chat_server(
+        base_path: &str,
+    ) -> Result<(String, tokio::task::JoinHandle<()>), String> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|err| format!("bind failed: {err}"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|err| format!("addr failed: {err}"))?;
+        let base_path = format!("/{}", base_path.trim_matches('/'));
+        let expected_path = format!("{base_path}/v1/messages");
+        let response_base_url = format!("http://{address}{base_path}");
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept should succeed");
+            let request = read_test_http_request(&mut socket)
+                .await
+                .expect("request should parse");
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, expected_path);
+            assert_eq!(
+                request.headers.get("x-api-key").map(String::as_str),
+                Some("anthropic-test-key")
+            );
+            assert_eq!(
+                request.headers.get("anthropic-version").map(String::as_str),
+                Some("2023-06-01")
+            );
+            assert_eq!(request.json["model"], "claude-sonnet-4-20250514");
+            assert_eq!(
+                request.json["messages"][0]["content"][0]["text"],
+                "hello from custom gateway"
+            );
+            write_test_json_response(
+                &mut socket,
+                200,
+                None,
+                &serde_json::json!({
+                    "id": "msg_1",
+                    "model": "claude-sonnet-4-20250514",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "mock anthropic reply"
+                        }
+                    ]
+                }),
+            )
+            .await
+            .expect("anthropic response should write");
+        });
+
+        Ok((response_base_url, handle))
+    }
+
+    async fn spawn_mock_openai_plugin_tool_server(
+        tool_name: &'static str,
+    ) -> Result<(String, tokio::task::JoinHandle<()>), String> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|err| format!("bind failed: {err}"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|err| format!("addr failed: {err}"))?;
+        let response_base_url = format!("http://{address}");
+
+        let handle = tokio::spawn(async move {
+            let (mut first_socket, _) = listener.accept().await.expect("accept should succeed");
+            let first_request = read_test_http_request(&mut first_socket)
+                .await
+                .expect("first request should parse");
+            assert_eq!(first_request.method, "POST");
+            assert_eq!(first_request.path, "/v1/responses");
+            assert!(
+                first_request
+                    .json
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tools| tools.iter().any(|tool| {
+                        tool["name"].as_str() == Some(tool_name)
+                    })),
+                "first request should advertise plugin runtime tools: {}",
+                first_request.json
+            );
+            write_test_json_response(
+                &mut first_socket,
+                200,
+                None,
+                &serde_json::json!({
+                    "id": "resp_plugin_tool_1",
+                    "output": [
+                        {
+                            "id": "item_plugin_tool_1",
+                            "type": "function_call",
+                            "call_id": "call_plugin_tool_1",
+                            "name": tool_name,
+                            "arguments": "{\"value\":\"demo\",\"count\":2}"
+                        }
+                    ]
+                }),
+            )
+            .await
+            .expect("first response should write");
+
+            let (mut second_socket, _) = listener.accept().await.expect("accept should succeed");
+            let second_request = read_test_http_request(&mut second_socket)
+                .await
+                .expect("second request should parse");
+            assert_eq!(second_request.method, "POST");
+            assert_eq!(second_request.path, "/v1/responses");
+            assert_eq!(second_request.json["previous_response_id"], "resp_plugin_tool_1");
+            assert!(
+                second_request
+                    .json
+                    .get("input")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| items.iter().any(|item| {
+                        item["type"].as_str() == Some("function_call_output")
+                            && item["call_id"].as_str() == Some("call_plugin_tool_1")
+                            && item["output"].as_str().is_some_and(|output| {
+                                output.contains("\"value\":\"demo\"")
+                                    && output.contains("\"count\":2")
+                            })
+                    })),
+                "second request should include plugin tool output: {}",
+                second_request.json
+            );
+            write_test_json_response(
+                &mut second_socket,
+                200,
+                None,
+                &serde_json::json!({
+                    "id": "resp_plugin_tool_2",
+                    "output_text": "plugin tool loop complete"
+                }),
+            )
+            .await
+            .expect("second response should write");
+        });
+
+        Ok((response_base_url, handle))
+    }
+
+    async fn read_test_http_request(socket: &mut TcpStream) -> Result<TestHttpRequest, String> {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let read = socket
+                .read(&mut chunk)
+                .await
+                .map_err(|err| format!("read failed: {err}"))?;
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if let Some(headers_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                let headers_text = String::from_utf8_lossy(&buffer[..headers_end]).to_string();
+                let mut header_lines = headers_text.lines();
+                let request_line = header_lines
+                    .next()
+                    .ok_or_else(|| "request did not include a request line".to_string())?;
+                let mut request_parts = request_line.split_whitespace();
+                let method = request_parts
+                    .next()
+                    .ok_or_else(|| "request line missing method".to_string())?
+                    .to_string();
+                let path = request_parts
+                    .next()
+                    .ok_or_else(|| "request line missing path".to_string())?
+                    .to_string();
+                let headers = header_lines
+                    .filter_map(|line| {
+                        line.split_once(':').map(|(name, value)| {
+                            (name.trim().to_ascii_lowercase(), value.trim().to_string())
+                        })
+                    })
+                    .collect::<HashMap<_, _>>();
+                let content_length = headers
+                    .get("content-length")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let body_start = headers_end + 4;
+                if buffer.len() >= body_start + content_length {
+                    let body = &buffer[body_start..body_start + content_length];
+                    let json = serde_json::from_slice(body)
+                        .map_err(|err| format!("body decode failed: {err}"))?;
+                    return Ok(TestHttpRequest {
+                        method,
+                        path,
+                        headers,
+                        json,
+                    });
+                }
+            }
+        }
+
+        Err("request closed before full body was received".to_string())
+    }
+
+    async fn read_test_http_request_json(socket: &mut TcpStream) -> Result<Value, String> {
+        Ok(read_test_http_request(socket).await?.json)
+    }
+
+    async fn write_test_json_response(
+        socket: &mut TcpStream,
+        status: u16,
+        session_id: Option<&str>,
+        payload: &Value,
+    ) -> Result<(), String> {
+        let body = payload.to_string();
+        let status_text = match status {
+            200 => "OK",
+            202 => "Accepted",
+            _ => "OK",
+        };
+        let mut headers = format!(
+            "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        );
+        if let Some(session_id) = session_id {
+            headers.push_str(format!("mcp-session-id: {session_id}\r\n").as_str());
+        }
+        headers.push_str("\r\n");
+        socket
+            .write_all(format!("{headers}{body}").as_bytes())
+            .await
+            .map_err(|err| format!("write failed: {err}"))
+    }
+
+    async fn write_test_empty_response(socket: &mut TcpStream, status: u16) -> Result<(), String> {
+        let status_text = match status {
+            202 => "Accepted",
+            _ => "OK",
+        };
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 {status} {status_text}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .map_err(|err| format!("write failed: {err}"))
     }
 
     fn bootstrap_login_hash(server: &WebHostService) -> String {
@@ -2076,6 +2598,22 @@ mod tests {
         assert_eq!(save_response["data"]["activeProviderId"], "anthropic-main");
         assert_eq!(save_response["data"]["providers"][1]["active"], true);
 
+        let settings_response = route_json_api(&server, "GET", "/api/LLM/GetSettings", None);
+        assert_eq!(settings_response["code"], 0);
+        let provider_options = settings_response["data"]["providerOptions"]
+            .as_array()
+            .expect("providerOptions should be an array");
+        let openai_option = provider_options
+            .iter()
+            .find(|provider| provider["baseUrl"] == "http://127.0.0.1:9/v1")
+            .expect("openai provider option should be returned");
+        assert_eq!(openai_option["label"], "OpenAI");
+        let anthropic_option = provider_options
+            .iter()
+            .find(|provider| provider["baseUrl"] == "http://127.0.0.1:9")
+            .expect("anthropic provider option should be returned");
+        assert_eq!(anthropic_option["label"], "Anthropic");
+
         let state_response = route_json_api(&server, "GET", "/api/LLM/GetManagerState", None);
         assert_eq!(state_response["code"], 0);
         assert_eq!(state_response["data"]["activeProviderId"], "anthropic-main");
@@ -2170,6 +2708,578 @@ mod tests {
         assert!(llm_config.contains("model: 'claude-sonnet-4-20250514'"));
         assert!(llm_config.contains("api_key: 'openai-test-key'"));
         assert!(llm_config.contains("api_key: 'anthropic-test-key'"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capability_routes_list_tools_skills_and_mcp_servers() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let env = CapabilityRouteTestEnv::new();
+        let (url, server_task) = spawn_mock_capability_mcp_server()
+            .await
+            .expect("mock server should start");
+        fs::write(
+            env.mcp_config_path(),
+            serde_json::json!([
+                {
+                    "name": "mock",
+                    "url": url,
+                    "active": true,
+                    "transport": "streamable_http"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("mcp config should be written");
+        let _mcp_guard = EnvVarGuard::set("LY_MCP_CONFIG_PATH", env.mcp_config_path().as_path());
+
+        let server = test_server();
+
+        let tools_response = route_json_api(&server, "GET", "/api/tools", None);
+        assert_eq!(tools_response["code"], 0);
+        assert!(
+            tools_response["data"]["tools"]
+                .as_array()
+                .is_some_and(|tools| tools
+                    .iter()
+                    .any(|tool| tool["name"] == "workspace_read_file"))
+        );
+        assert!(
+            tools_response["data"]["tools"]
+                .as_array()
+                .is_some_and(|tools| tools
+                    .iter()
+                    .any(|tool| tool["name"] == "list_tool_categories"))
+        );
+
+        let skills_response = route_json_api(&server, "GET", "/api/skills", None);
+        assert_eq!(skills_response["code"], 0);
+        assert_eq!(skills_response["data"]["skills"][0]["name"], "demo");
+        assert_eq!(
+            skills_response["data"]["skills"][0]["description"],
+            "Demo route skill"
+        );
+
+        let mcp_response = route_json_api(&server, "GET", "/api/mcp/servers", None);
+        assert_eq!(mcp_response["code"], 0);
+        assert_eq!(mcp_response["data"]["servers"][0]["name"], "mock");
+        assert_eq!(mcp_response["data"]["servers"][0]["toolCount"], 1);
+        assert_eq!(
+            mcp_response["data"]["servers"][0]["toolNames"][0],
+            "lookup_weather"
+        );
+
+        server_task.await.expect("mock server should finish");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plugin_capability_routes_expose_runtime_snapshot_queries() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let env = PluginCapabilityRouteTestEnv::new();
+        let runtime_host = EmbeddedAppHost::start_for_target(RuntimeTarget::Tauri2)
+            .await
+            .expect("embedded host should start for capability route test");
+        let catalog = runtime_host.plugin_catalog_snapshot().await;
+        let catalog_entry = catalog
+            .entries
+            .iter()
+            .find(|entry| entry.descriptor.metadata.id == "capability-route-plugin")
+            .expect("plugin should be discovered in embedded host catalog");
+        assert!(
+            catalog_entry.loaded,
+            "plugin should be loaded before querying capability routes"
+        );
+        let direct_snapshot = runtime_host
+            .plugin_capability_snapshot("capability-route-plugin")
+            .await
+            .expect("direct capability snapshot query should succeed");
+        assert!(
+            direct_snapshot.is_some(),
+            "python capability snapshot should exist for embedded host route test"
+        );
+        let server = test_server().with_runtime_host(runtime_host.clone());
+
+        let capabilities_response = route_json_api(
+            &server,
+            "GET",
+            "/api/Plugin/Capabilities?id=capability-route-plugin",
+            None,
+        );
+        assert_eq!(capabilities_response["code"], 0);
+        assert_eq!(
+            capabilities_response["data"]["pluginId"],
+            "capability-route-plugin"
+        );
+        assert_eq!(capabilities_response["data"]["runtimeKind"], "python");
+        assert_eq!(
+            capabilities_response["data"]["support"]["tools"]["registered"],
+            true
+        );
+        assert_eq!(
+            capabilities_response["data"]["support"]["tools"]["executable"],
+            true
+        );
+        assert_eq!(
+            capabilities_response["data"]["support"]["tools"]["status"],
+            "active"
+        );
+        assert_eq!(
+            capabilities_response["data"]["snapshot"]["tools"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(2)
+        );
+        assert_eq!(
+            capabilities_response["data"]["snapshot"]["webApis"][0]["route"],
+            "/cap-route"
+        );
+        assert_eq!(
+            capabilities_response["data"]["snapshot"]["cronJobs"][0]["jobType"],
+            "active_agent"
+        );
+        assert_eq!(
+            capabilities_response["data"]["snapshot"]["tasks"][0]["taskId"],
+            "capability-route-task"
+        );
+
+        let tools_response = route_json_api(
+            &server,
+            "GET",
+            "/api/Plugin/Tools?id=capability-route-plugin",
+            None,
+        );
+        assert_eq!(tools_response["code"], 0);
+        assert_eq!(tools_response["data"]["support"]["registered"], true);
+        assert_eq!(tools_response["data"]["support"]["executable"], true);
+        assert_eq!(
+            tools_response["data"]["items"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(2)
+        );
+        assert!(
+            tools_response["data"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|tool| {
+                    tool["name"] == "decorated_capability_route_tool"
+                        && tool["source"] == "astrbot_decorator"
+                }))
+        );
+
+        let all_response = route_json_api(&server, "GET", "/api/Plugin/Capabilities/All", None);
+        assert_eq!(all_response["code"], 0);
+        assert!(
+            all_response["data"]
+                .as_array()
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|item| item["pluginId"] == "capability-route-plugin"))
+        );
+
+        runtime_host
+            .shutdown()
+            .await
+            .expect("embedded host should shutdown cleanly");
+        drop(env);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plugin_tool_execution_and_diagnostics_routes_reflect_runtime_state() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let env = PluginCapabilityRouteTestEnv::new();
+        let runtime_host = EmbeddedAppHost::start_for_target(RuntimeTarget::Tauri2)
+            .await
+            .expect("embedded host should start for plugin diagnostics route test");
+        let server = test_server().with_runtime_host(runtime_host.clone());
+
+        let runtime_state = route_json_api(
+            &server,
+            "GET",
+            "/api/Plugin/RuntimeState?id=capability-route-plugin",
+            None,
+        );
+        assert_eq!(runtime_state["code"], 0);
+        assert_eq!(runtime_state["data"]["loaded"], true);
+        assert_eq!(runtime_state["data"]["enabled"], true);
+        assert_eq!(runtime_state["data"]["active"], true);
+        assert_eq!(runtime_state["data"]["executableBindings"]["tools"], true);
+        assert_eq!(runtime_state["data"]["executableBindings"]["webApis"], true);
+        assert_eq!(runtime_state["data"]["schedulerStatus"], "unsupported");
+
+        let execute_response = route_json_api(
+            &server,
+            "POST",
+            "/api/Plugin/Tools/Execute",
+            Some(&serde_json::json!({
+                "id": "capability-route-plugin",
+                "name": "manual_capability_route_tool",
+                "arguments": {
+                    "value": "demo",
+                    "count": 2
+                }
+            })),
+        );
+        assert_eq!(execute_response["code"], 0);
+        assert_eq!(
+            execute_response["data"]["runtimeName"],
+            "plugin::capability-route-plugin::manual_capability_route_tool"
+        );
+        assert_eq!(execute_response["data"]["output"]["kind"], "json");
+        assert_eq!(execute_response["data"]["output"]["value"]["value"], "demo");
+        assert_eq!(execute_response["data"]["output"]["value"]["count"], 2);
+
+        let failing_tool_response = route_json_api(
+            &server,
+            "POST",
+            "/api/Plugin/Tools/Execute",
+            Some(&serde_json::json!({
+                "id": "capability-route-plugin",
+                "name": "manual_capability_route_tool",
+                "arguments": {
+                    "value": "fail"
+                }
+            })),
+        );
+        assert_eq!(failing_tool_response["code"], -1);
+        assert!(
+            failing_tool_response["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("capability route tool failed"))
+        );
+
+        let failing_web_api_request = format!(
+            "POST /api/Plugin/Runtime/WebApi/capability-route-plugin/cap-route?mode=fail HTTP/1.1\r\nHost: localhost\r\n{}\r\nContent-Length: 0\r\n\r\n",
+            local_auth_header(&server)
+        );
+        let failing_web_api_response = server.route_http_request(
+            failing_web_api_request.as_bytes(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (failing_headers, failing_body) = split_response(failing_web_api_response);
+        let failing_body = String::from_utf8(failing_body).expect("failure body should be utf8");
+        assert!(failing_headers.starts_with("HTTP/1.1 500 Internal Server Error\r\n"));
+        assert!(failing_body.contains("capability route web api failed"));
+
+        let diagnostics = route_json_api(
+            &server,
+            "GET",
+            "/api/Plugin/Diagnostics?id=capability-route-plugin",
+            None,
+        );
+        assert_eq!(diagnostics["code"], 0);
+        assert_eq!(diagnostics["data"]["loadState"], "loaded");
+        assert_eq!(diagnostics["data"]["executableBindings"]["tools"], true);
+        assert_eq!(diagnostics["data"]["executableBindings"]["webApis"], true);
+        assert!(
+            diagnostics["data"]["lastToolExecution"]["lastError"]
+                .as_str()
+                .is_some_and(|message| message.contains("capability route tool failed"))
+        );
+        assert!(
+            diagnostics["data"]["lastWebApiDispatch"]["lastError"]
+                .as_str()
+                .is_some_and(|message| message.contains("capability route web api failed"))
+        );
+        assert!(
+            diagnostics["data"]["lastToolExecution"]["lastSuccessAt"].is_string(),
+            "successful tool execution should record lastSuccessAt"
+        );
+
+        runtime_host
+            .shutdown()
+            .await
+            .expect("embedded host should shutdown cleanly");
+        drop(env);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn llm_chat_routes_include_plugin_runtime_tools() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let env = PluginCapabilityRouteTestEnv::new();
+        let runtime_host = EmbeddedAppHost::start_for_target(RuntimeTarget::Tauri2)
+            .await
+            .expect("embedded host should start for plugin tool llm chat test");
+        let server = test_server().with_runtime_host(runtime_host.clone());
+        let (base_url, upstream_task) = spawn_mock_openai_plugin_tool_server(
+            "plugin::capability-route-plugin::manual_capability_route_tool",
+        )
+        .await
+        .expect("mock openai plugin tool server should start");
+
+        let save_response = route_json_api(
+            &server,
+            "POST",
+            "/api/LLM/SaveManagerState",
+            Some(&serde_json::json!({
+                "activeProviderId": "plugin-tool-openai",
+                "providers": [
+                    {
+                        "id": "plugin-tool-openai",
+                        "label": "Plugin Tool OpenAI",
+                        "providerId": "openai-compatible",
+                        "baseUrl": base_url,
+                        "apiKey": "openai-test-key",
+                        "timeoutSeconds": 5,
+                        "models": [
+                            { "id": "gpt-test", "enabled": true }
+                        ]
+                    }
+                ]
+            })),
+        );
+        assert_eq!(save_response["code"], 0);
+
+        let chat_response = route_json_api(
+            &server,
+            "POST",
+            "/api/LLM/Chat",
+            Some(&serde_json::json!({
+                "message": "run the plugin tool",
+                "baseUrl": base_url,
+                "model": "gpt-test"
+            })),
+        );
+        assert_eq!(chat_response["code"], 0);
+        assert_eq!(chat_response["data"]["message"], "plugin tool loop complete");
+        assert_eq!(chat_response["data"]["baseUrl"], base_url);
+        assert_eq!(chat_response["data"]["model"], "gpt-test");
+
+        upstream_task
+            .await
+            .expect("mock openai plugin tool server should finish");
+        runtime_host
+            .shutdown()
+            .await
+            .expect("embedded host should shutdown cleanly");
+        drop(env);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plugin_runtime_web_api_routes_dispatch_registered_handlers() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let env = PluginCapabilityRouteTestEnv::new();
+        let runtime_host = EmbeddedAppHost::start_for_target(RuntimeTarget::Tauri2)
+            .await
+            .expect("embedded host should start for runtime web api route test");
+        let server = test_server().with_runtime_host(runtime_host.clone());
+
+        let request_body = serde_json::json!({
+            "mode": "echo",
+            "value": "demo"
+        })
+        .to_string();
+        let request = format!(
+            "POST /api/Plugin/Runtime/WebApi/capability-route-plugin/cap-route?foo=bar HTTP/1.1\r\nHost: localhost\r\n{}\r\nContent-Type: application/json\r\nX-Test: route-header\r\nContent-Length: {}\r\n\r\n{}",
+            local_auth_header(&server),
+            request_body.len(),
+            request_body
+        );
+        let response =
+            server.route_http_request(request.as_bytes(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let (headers, body) = split_response(response);
+        let body_text = String::from_utf8(body).expect("plugin runtime web api body should be utf8");
+        let payload: serde_json::Value = serde_json::from_str(body_text.as_str()).unwrap_or_else(|err| {
+            panic!("plugin runtime web api body should be json: {err}; headers={headers}; body={body_text}")
+        });
+
+        assert!(headers.starts_with("HTTP/1.1 201 Created\r\n"));
+        assert!(headers.contains("Content-Type: application/json; charset=utf-8\r\n"));
+        assert_eq!(payload["method"], "POST");
+        assert_eq!(payload["path"], "/cap-route");
+        assert_eq!(payload["query"]["foo"], "bar");
+        assert_eq!(payload["header"], "route-header");
+        assert_eq!(payload["bodyJson"]["value"], "demo");
+        assert_eq!(payload["peerIp"], "127.0.0.1");
+        assert!(
+            payload["bodyText"]
+                .as_str()
+                .is_some_and(|text| text.contains("\"mode\":\"echo\"")),
+            "bodyText should contain the serialized request payload: {payload}"
+        );
+        assert_eq!(payload["bodyBytesBase64"], "eyJtb2RlIjoiZWNobyIsInZhbHVlIjoiZGVtbyJ9");
+
+        let quart_request_body = serde_json::json!({
+            "value": "quart-demo"
+        })
+        .to_string();
+        let quart_request = format!(
+            "POST /api/Plugin/Runtime/WebApi/capability-route-plugin/cap-quart?page=7 HTTP/1.1\r\nHost: localhost\r\n{}\r\nContent-Type: application/json\r\nX-Test: quart-header\r\nContent-Length: {}\r\n\r\n{}",
+            local_auth_header(&server),
+            quart_request_body.len(),
+            quart_request_body
+        );
+        let quart_response =
+            server.route_http_request(quart_request.as_bytes(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let (quart_headers, quart_body) = split_response(quart_response);
+        let quart_body_text =
+            String::from_utf8(quart_body).expect("quart compat response body should be utf8");
+        let quart_payload: serde_json::Value =
+            serde_json::from_str(quart_body_text.as_str()).unwrap_or_else(|err| {
+                panic!(
+                    "quart compat response body should be json: {err}; headers={quart_headers}; body={quart_body_text}"
+                )
+            });
+
+        assert!(quart_headers.starts_with("HTTP/1.1 207 "));
+        assert!(quart_headers.contains("Content-Type: application/json; charset=utf-8\r\n"));
+        assert_eq!(quart_payload["method"], "POST");
+        assert_eq!(quart_payload["path"], "/cap-quart");
+        assert_eq!(quart_payload["page"], 7);
+        assert_eq!(quart_payload["header"], "quart-header");
+        assert_eq!(quart_payload["bodyValue"], "quart-demo");
+        assert_eq!(quart_payload["peerIp"], "127.0.0.1");
+
+        let text_request = format!(
+            "GET /api/Plugin/Runtime/WebApi/capability-route-plugin/cap-text HTTP/1.1\r\nHost: localhost\r\n{}\r\n\r\n",
+            local_auth_header(&server)
+        );
+        let text_response =
+            server.route_http_request(text_request.as_bytes(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let (text_headers, text_body) = split_response(text_response);
+        let text_body = String::from_utf8(text_body).expect("text response should be utf8");
+
+        assert!(text_headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(text_headers.contains("Content-Type: text/plain; charset=utf-8\r\n"));
+        assert_eq!(text_body, "capability route text");
+
+        runtime_host
+            .shutdown()
+            .await
+            .expect("embedded host should shutdown cleanly");
+        drop(env);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plugin_runtime_web_api_routes_enforce_methods_and_disable_cleanup() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let env = PluginCapabilityRouteTestEnv::new();
+        let runtime_host = EmbeddedAppHost::start_for_target(RuntimeTarget::Tauri2)
+            .await
+            .expect("embedded host should start for runtime web api cleanup test");
+        let server = test_server().with_runtime_host(runtime_host.clone());
+
+        let method_mismatch_request = format!(
+            "GET /api/Plugin/Runtime/WebApi/capability-route-plugin/cap-route HTTP/1.1\r\nHost: localhost\r\n{}\r\n\r\n",
+            local_auth_header(&server)
+        );
+        let method_mismatch_response = server.route_http_request(
+            method_mismatch_request.as_bytes(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (method_headers, method_body) = split_response(method_mismatch_response);
+        let method_body = String::from_utf8(method_body).expect("405 body should be utf8");
+        assert!(method_headers.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"));
+        assert_eq!(method_body, "method not allowed");
+
+        let patch_request = format!(
+            "PATCH /api/Plugin/Runtime/WebApi/capability-route-plugin/cap-route?kind=patch HTTP/1.1\r\nHost: localhost\r\n{}\r\nContent-Length: 0\r\n\r\n",
+            local_auth_header(&server)
+        );
+        let patch_response =
+            server.route_http_request(patch_request.as_bytes(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let (patch_headers, patch_body) = split_response(patch_response);
+        let patch_body_text = String::from_utf8(patch_body).expect("patch body should be utf8");
+        let patch_payload: serde_json::Value =
+            serde_json::from_str(patch_body_text.as_str()).unwrap_or_else(|err| {
+                panic!(
+                    "patch body should be json: {err}; headers={patch_headers}; body={patch_body_text}"
+                )
+            });
+        assert!(patch_headers.starts_with("HTTP/1.1 202 Accepted\r\n"));
+        assert_eq!(patch_payload["method"], "PATCH");
+        assert_eq!(patch_payload["query"]["kind"], "patch");
+
+        runtime_host
+            .apply_disabled_plugins(vec!["capability-route-plugin".to_string()])
+            .await
+            .expect("plugin should be disabled through runtime host");
+
+        let disabled_request = format!(
+            "POST /api/Plugin/Runtime/WebApi/capability-route-plugin/cap-route HTTP/1.1\r\nHost: localhost\r\n{}\r\nContent-Length: 0\r\n\r\n",
+            local_auth_header(&server)
+        );
+        let disabled_response = server.route_http_request(
+            disabled_request.as_bytes(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (disabled_headers, disabled_body) = split_response(disabled_response);
+        let disabled_body = String::from_utf8(disabled_body).expect("404 body should be utf8");
+        assert!(disabled_headers.starts_with("HTTP/1.1 404 Not Found\r\n"));
+        assert_eq!(disabled_body, "plugin runtime web api not found");
+
+        runtime_host
+            .shutdown()
+            .await
+            .expect("embedded host should shutdown cleanly");
+        drop(env);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn llm_settings_and_chat_keep_explicit_anthropic_provider_on_custom_gateway() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let env = LlmManagerRouteTestEnv::new();
+        let server = test_server();
+        let (base_url, upstream_task) = spawn_mock_anthropic_chat_server("company-gateway")
+            .await
+            .expect("mock anthropic server should start");
+
+        let save_response = route_json_api(
+            &server,
+            "POST",
+            "/api/LLM/SaveManagerState",
+            Some(&serde_json::json!({
+                "activeProviderId": "anthropic-gateway",
+                "providers": [
+                    {
+                        "id": "anthropic-gateway",
+                        "label": "Anthropic Gateway",
+                        "providerId": "anthropic",
+                        "baseUrl": base_url,
+                        "apiKey": "anthropic-test-key",
+                        "timeoutSeconds": 5,
+                        "models": [
+                            { "id": "claude-sonnet-4-20250514", "enabled": true }
+                        ]
+                    }
+                ]
+            })),
+        );
+        assert_eq!(save_response["code"], 0);
+
+        let settings_response = route_json_api(&server, "GET", "/api/LLM/GetSettings", None);
+        assert_eq!(settings_response["code"], 0);
+        assert_eq!(settings_response["data"]["provider"], "Anthropic");
+        assert_eq!(settings_response["data"]["baseUrl"], base_url);
+        assert_eq!(
+            settings_response["data"]["providerOptions"][0]["label"],
+            "Anthropic"
+        );
+        assert_eq!(
+            settings_response["data"]["providerOptions"][0]["baseUrl"],
+            base_url
+        );
+
+        let chat_response = route_json_api(
+            &server,
+            "POST",
+            "/api/LLM/Chat",
+            Some(&serde_json::json!({
+                "message": "hello from custom gateway",
+                "baseUrl": base_url
+            })),
+        );
+        assert_eq!(chat_response["code"], 0);
+        assert_eq!(chat_response["data"]["message"], "mock anthropic reply");
+        assert_eq!(chat_response["data"]["model"], "claude-sonnet-4-20250514");
+        assert_eq!(chat_response["data"]["baseUrl"], base_url);
+
+        let llm_config = fs::read_to_string(env.llm_config_path())
+            .expect("custom anthropic config should be persisted");
+        assert!(llm_config.contains("provider: 'anthropic'"));
+        assert!(llm_config.contains(base_url.as_str()));
+
+        upstream_task
+            .await
+            .expect("mock anthropic server should finish");
     }
 
     #[test]

@@ -1,6 +1,9 @@
 pub mod client;
+pub(crate) mod mcp;
 pub mod prompt;
 pub(crate) mod service;
+pub(crate) mod skills;
+pub(crate) mod tools;
 
 #[allow(unused_imports)]
 pub use client::{

@@ -30,7 +30,8 @@ use crate::llm::service::{
     load_current_app_config_doc, load_llm_prompt_store, persist_llm_prompt_store,
     resolve_llm_prompt_store_path,
 };
-use crate::llm::{LlmPromptPreview, OpenAiResponsesClient, build_prompt_preview};
+use crate::llm::service::{probe_llm_runtime_text, resolve_runtime_provider_id};
+use crate::llm::{LlmPromptPreview, build_prompt_preview};
 use crate::runtime_support::{
     EXTERNAL_API_TIMEOUT, ExternalGatewaySnapshot, describe_runtime_config, ensure_llm_config_file,
     load_app_config_with_llm_overlay, prepare_runtime_bootstrap, resolve_llm_config_path,
@@ -811,33 +812,22 @@ fn ensure_registered_provider_url(
 }
 
 async fn probe_llm_configuration(llm_config: &LlmRuntimeConfig) -> Result<String, String> {
-    if !llm_config.provider.eq_ignore_ascii_case("openai") {
-        return Err(trf(
-            "main.llm.provider.unsupported",
-            &[("provider", llm_config.provider.as_str())],
-        ));
-    }
     let Some(api_key) = llm_config.api_keys.first() else {
         return Ok(trf(
             "llm.tui.probe_skipped",
             &[
-                ("provider", llm_config.provider.as_str()),
+                ("provider", resolve_runtime_provider_id(llm_config).as_str()),
                 ("base_url", llm_config.base_url.as_str()),
             ],
         ));
     };
 
-    let client = OpenAiResponsesClient::from_runtime_with_api_key(llm_config, api_key)
-        .map_err(|err| err.to_string())?;
-    let output = client
-        .generate("Reply exactly with: OK")
-        .await
-        .map_err(|err| err.to_string())?;
+    let output = probe_llm_runtime_text(llm_config, api_key, "Reply exactly with: OK").await?;
     let preview = truncate_text_for_log(output.trim(), 80);
     Ok(trf(
         "llm.tui.probe_success",
         &[
-            ("provider", llm_config.provider.as_str()),
+            ("provider", resolve_runtime_provider_id(llm_config).as_str()),
             ("model", llm_config.model.as_str()),
             ("output", preview.as_str()),
         ],

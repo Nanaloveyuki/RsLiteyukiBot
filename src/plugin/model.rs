@@ -100,6 +100,146 @@ impl PluginDescriptor {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginCapabilitySource {
+    AstrbotDecorator,
+    AstrbotContext,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRegisteredTool {
+    #[serde(default)]
+    pub plugin_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub parameters: Value,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub source: PluginCapabilitySource,
+    #[serde(default)]
+    pub handler_module_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRegisteredWebApi {
+    #[serde(default)]
+    pub plugin_id: String,
+    pub route: String,
+    #[serde(default)]
+    pub methods: Vec<String>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub source: PluginCapabilitySource,
+    #[serde(default)]
+    pub runtime_kind: PluginRuntimeKind,
+    #[serde(default)]
+    pub handler_module_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRegisteredCronJob {
+    #[serde(default)]
+    pub plugin_id: String,
+    pub job_id: String,
+    #[serde(default)]
+    pub job_type: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub cron_expression: Option<String>,
+    #[serde(default)]
+    pub run_once: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub timezone: Option<String>,
+    #[serde(default)]
+    pub persistent: bool,
+    #[serde(default)]
+    pub payload: Value,
+    #[serde(default)]
+    pub next_run_time: Option<String>,
+    #[serde(default)]
+    pub last_run_time: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRegisteredTask {
+    #[serde(default)]
+    pub plugin_id: String,
+    pub task_id: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub task_kind: String,
+    #[serde(default)]
+    pub source: PluginCapabilitySource,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCapabilitySnapshot {
+    pub plugin_id: String,
+    #[serde(default)]
+    pub runtime_kind: PluginRuntimeKind,
+    #[serde(default)]
+    pub tools: Vec<PluginRegisteredTool>,
+    #[serde(default)]
+    pub web_apis: Vec<PluginRegisteredWebApi>,
+    #[serde(default)]
+    pub cron_jobs: Vec<PluginRegisteredCronJob>,
+    #[serde(default)]
+    pub tasks: Vec<PluginRegisteredTask>,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum PluginToolResult {
+    Text(String),
+    Json(Value),
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginExecutionRecord {
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_error_at: Option<String>,
+    #[serde(default)]
+    pub last_success_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRuntimeDiagnostics {
+    #[serde(default)]
+    pub plugin_id: String,
+    #[serde(default)]
+    pub last_web_api_dispatch: PluginExecutionRecord,
+    #[serde(default)]
+    pub last_tool_execution: PluginExecutionRecord,
+    #[serde(default)]
+    pub last_cron_execution: PluginExecutionRecord,
+}
+
 fn default_sdk_version() -> String {
     "0.1".to_string()
 }

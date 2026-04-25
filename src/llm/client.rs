@@ -313,6 +313,62 @@ impl OpenAiResponsesClient {
         }
     }
 
+    pub async fn generate_with_chat_completions(
+        &self,
+        prompt: &str,
+    ) -> Result<String, LlmClientError> {
+        let sink: Option<&mut dyn LlmEventSink> = None;
+        self.complete_with_chat_completions(prompt, &[], sink)
+            .await
+            .map(|completion| completion.text)
+    }
+
+    pub async fn complete_with_chat_completions(
+        &self,
+        prompt: &str,
+        tools: &[LlmFunctionTool],
+        sink: Option<&mut dyn LlmEventSink>,
+    ) -> Result<LlmCompletion, LlmClientError> {
+        let history = initial_chat_history(self.system_prompt.as_deref(), Some(prompt));
+        self.complete_with_chat_messages(history, tools, sink).await
+    }
+
+    pub async fn complete_with_chat_messages(
+        &self,
+        history: Vec<Value>,
+        tools: &[LlmFunctionTool],
+        sink: Option<&mut dyn LlmEventSink>,
+    ) -> Result<LlmCompletion, LlmClientError> {
+        let mut dispatcher = EventDispatcher::new(sink);
+        let stream = self.stream || dispatcher.has_sink();
+        let mut executed_tools = Vec::new();
+        let mut accumulated_text = String::new();
+        let mut session = ProviderSession::Chat {
+            history: history.clone(),
+        };
+        let mut turn = self
+            .send_chat_turn(history.as_slice(), tools, stream, &mut dispatcher)
+            .await?;
+
+        loop {
+            append_turn_text(&mut accumulated_text, turn.text.as_str());
+
+            if turn.tool_calls.is_empty() {
+                return Ok(LlmCompletion {
+                    text: accumulated_text,
+                    tool_calls: executed_tools,
+                });
+            }
+
+            let (outputs, executed) =
+                execute_tool_calls(&turn.tool_calls, tools, &mut dispatcher).await?;
+            executed_tools.extend(executed);
+            turn = session
+                .continue_with_tool_outputs(self, &turn, outputs, tools, stream, &mut dispatcher)
+                .await?;
+        }
+    }
+
     async fn start_session(
         &self,
         prompt_fallback: String,
@@ -823,6 +879,12 @@ impl OpenAiResponsesClient {
             .filter(|_| supports_compat_top_k(self.base_url.as_str()))
         {
             body.insert("top_k".to_string(), json!(top_k));
+        }
+        if let Some(reasoning_effort) = self.reasoning_effort.as_deref() {
+            body.insert(
+                "reasoning".to_string(),
+                json!({ "effort": reasoning_effort }),
+            );
         }
         if !tools.is_empty() {
             body.insert(
@@ -1676,6 +1738,152 @@ mod tests {
         assert!(captured[1].contains("\"type\":\"function_call_output\""));
         assert!(captured[1].contains("\"call_id\":\"call_1\""));
         assert!(captured[1].contains("\"output\":\"Sunny in Paris\""));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn complete_with_chat_completions_uses_chat_endpoint_and_returns_text() {
+        let response = json!({
+            "id": "chatcmpl_1",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "hello from chat completions"
+                    }
+                }
+            ]
+        });
+        let (addr, requests) = spawn_mock_http_server(vec![http_json_response(response)]);
+        let config = TestConfig {
+            base_url: format!("http://{addr}"),
+            stream: false,
+            temperature: Some(0.4),
+            top_p: Some(0.85),
+            top_k: Some(32),
+        };
+        let client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
+            .expect("client should build");
+
+        let completion = client
+            .complete_with_chat_completions("hello", &[], None)
+            .await
+            .expect("chat completions request should succeed");
+        assert_eq!(completion.text, "hello from chat completions");
+        assert!(completion.tool_calls.is_empty());
+
+        let captured = requests.lock().expect("request capture should lock");
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].contains("POST /v1/chat/completions HTTP/1.1"));
+        let body = request_body_json(&captured[0]);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], "system prompt");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["messages"][1]["content"], "hello");
+        assert!(
+            body.get("temperature")
+                .and_then(Value::as_f64)
+                .is_some_and(|value| (value - 0.4_f64).abs() < 1e-6)
+        );
+        assert!(
+            body.get("top_p")
+                .and_then(Value::as_f64)
+                .is_some_and(|value| (value - 0.85_f64).abs() < 1e-6)
+        );
+        assert_eq!(body.get("top_k").and_then(Value::as_u64), Some(32));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn complete_with_chat_messages_submits_tool_outputs() {
+        let initial_response = json!({
+            "id": "chatcmpl_1",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "lookup_weather",
+                                    "arguments": "{\"city\":\"Paris\"}"
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
+        let final_response = json!({
+            "id": "chatcmpl_2",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Sunny in Paris"
+                    }
+                }
+            ]
+        });
+        let (addr, requests) = spawn_mock_http_server(vec![
+            http_json_response(initial_response),
+            http_json_response(final_response),
+        ]);
+        let config = TestConfig {
+            base_url: format!("http://{addr}"),
+            stream: false,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+        };
+        let client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
+            .expect("client should build");
+        let tool = LlmFunctionTool::new(
+            "lookup_weather",
+            json!({
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string" }
+                },
+                "required": ["city"]
+            }),
+            |arguments| async move {
+                assert_eq!(arguments["city"], "Paris");
+                Ok(LlmToolOutput::Text("Sunny in Paris".to_string()))
+            },
+        )
+        .with_description("Look up the weather");
+
+        let completion = client
+            .complete_with_chat_messages(
+                vec![json!({
+                    "role": "user",
+                    "content": "weather"
+                })],
+                &[tool],
+                None,
+            )
+            .await
+            .expect("chat tool loop should succeed");
+
+        assert_eq!(completion.text, "Sunny in Paris");
+        assert_eq!(completion.tool_calls.len(), 1);
+        assert_eq!(completion.tool_calls[0].call_id, "call_1");
+
+        let captured = requests.lock().expect("request capture should lock");
+        assert_eq!(captured.len(), 2);
+        assert!(captured[0].contains("POST /v1/chat/completions HTTP/1.1"));
+        assert!(captured[1].contains("POST /v1/chat/completions HTTP/1.1"));
+        let first_body = request_body_json(&captured[0]);
+        let second_body = request_body_json(&captured[1]);
+        assert_eq!(first_body["messages"][0]["role"], "user");
+        assert_eq!(first_body["messages"][0]["content"], "weather");
+        assert_eq!(second_body["messages"][1]["role"], "assistant");
+        assert_eq!(second_body["messages"][1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(second_body["messages"][2]["role"], "tool");
+        assert_eq!(second_body["messages"][2]["tool_call_id"], "call_1");
+        assert_eq!(second_body["messages"][2]["content"], "Sunny in Paris");
     }
 
     #[tokio::test(flavor = "current_thread")]

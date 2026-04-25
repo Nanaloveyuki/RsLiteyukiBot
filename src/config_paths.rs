@@ -12,6 +12,7 @@ pub(crate) const LLM_CONFIG_FILENAMES: [&str; 2] = ["llm-config.yaml", "llm-conf
 pub(crate) const PASSWORD_CONFIG_FILENAME: &str = "password.yaml";
 pub(crate) const WEBUI_PASSWORD_FILENAME: &str = "password.json";
 pub(crate) const LLM_PROMPT_STORE_FILENAME: &str = "llm-prompts.json";
+pub(crate) const MCP_CONFIG_FILENAME: &str = "mcp-servers.json";
 const LEGACY_WEBUI_PASSWORD_RELATIVE_PATH: &str = ".liteyuki/password.json";
 const LEGACY_LLM_PROMPT_STORE_PATH: &str = "llm-prompts.json";
 
@@ -66,6 +67,10 @@ pub(crate) fn resolve_default_webui_password_path() -> PathBuf {
 
 pub(crate) fn resolve_default_llm_prompt_store_path() -> PathBuf {
     resolve_user_config_file(LLM_PROMPT_STORE_FILENAME)
+}
+
+pub(crate) fn resolve_default_mcp_config_path() -> PathBuf {
+    resolve_user_config_file(MCP_CONFIG_FILENAME)
 }
 
 pub(crate) fn resolve_existing_named_config_path(
@@ -292,6 +297,15 @@ pub(crate) fn resolve_preferred_llm_prompt_store_path() -> PathBuf {
         &[LLM_PROMPT_STORE_FILENAME],
         &[LEGACY_LLM_PROMPT_STORE_PATH],
         resolve_default_llm_prompt_store_path,
+    )
+}
+
+pub(crate) fn resolve_preferred_mcp_config_path() -> PathBuf {
+    resolve_preferred_named_config_path(
+        "LY_MCP_CONFIG_PATH",
+        &[MCP_CONFIG_FILENAME],
+        &[MCP_CONFIG_FILENAME],
+        resolve_default_mcp_config_path,
     )
 }
 

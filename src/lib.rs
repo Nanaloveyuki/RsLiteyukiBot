@@ -65,8 +65,11 @@ pub use plugin::{
     PluginDescriptor, PluginErrorCode, PluginFuture, PluginHandshakeRequest,
     PluginHandshakeResponse, PluginHostApi, PluginHostBridge, PluginLoadError, PluginLoadPlan,
     PluginLoadState, PluginManager, PluginManifest, PluginManifestError, PluginManifestLoader,
-    PluginMetadata, PluginRuntimeKind, PluginRuntimeSpec, PluginScopedCommand, PluginSdk,
-    PluginSdkError, PluginSdkFuture, PluginSdkSpec, PluginTuiCommand, PluginType,
+    PluginMetadata, PluginRegisteredCronJob, PluginRegisteredTask, PluginRegisteredTool,
+    PluginRegisteredWebApi, PluginRuntimeDiagnostics, PluginRuntimeKind, PluginRuntimeSpec,
+    PluginScopedCommand, PluginSdk, PluginSdkError, PluginSdkFuture, PluginSdkSpec,
+    PluginToolResult, PluginTuiCommand, PluginType, PluginWebApiRequest, PluginWebApiResponse,
+    PluginCapabilitySnapshot, PluginCapabilitySource, PluginExecutionRecord,
     PythonRuntimeAdapter, RuntimeAdapter, RuntimeAdapterRegistry,
 };
 pub use session::{

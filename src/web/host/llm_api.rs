@@ -13,8 +13,11 @@ use crate::config_edit::LlmConfigPatch;
 use crate::config_paths::resolve_default_llm_config_path;
 use crate::llm::client::extract_output_text;
 use crate::llm::service::{
-    current_active_prompt_profile, current_llm_runtime_config, load_current_app_config_doc,
+    LlmProviderApiFamily, current_active_prompt_profile, current_llm_runtime_config,
+    detect_provider_id_from_base_url, load_current_app_config_doc, provider_api_family,
+    resolve_provider_id,
 };
+use crate::llm::tools::{ToolManager, merge_system_prompt_sections};
 use crate::llm::{LlmClientError, OpenAiResponsesClient, OpenAiRuntimeConfig};
 use crate::runtime_support::{
     ensure_llm_config_file, next_llm_api_key_index, resolve_llm_config_path,
@@ -24,7 +27,7 @@ const DEFAULT_WEB_LLM_MAX_OUTPUT_TOKENS: u32 = 2048;
 const DEFAULT_ANTHROPIC_API_VERSION: &str = "2023-06-01";
 
 pub(super) fn route_llm_api(
-    _service: &WebHostService,
+    service: &WebHostService,
     method: &str,
     api_path: &str,
     request: &[u8],
@@ -44,7 +47,7 @@ pub(super) fn route_llm_api(
             return Some(napcat_response(body, is_head));
         }
 
-        let body = match llm_chat_payload(request) {
+        let body = match llm_chat_payload(service, request) {
             Ok(payload) => napcat_ok(&payload),
             Err(err) => napcat_err(-1, err.as_str()),
         };
@@ -123,7 +126,8 @@ fn llm_settings_payload() -> Result<Value, String> {
     let llm_config = current_llm_runtime_config()?;
     let prompt_profile = current_active_prompt_profile()?;
     let base_url = normalize_base_url(llm_config.base_url.as_str());
-    let provider_id = detect_provider_id(base_url.as_str());
+    let provider_id =
+        resolve_provider_id(Some(llm_config.provider.as_str()), Some(base_url.as_str()));
     let provider_options = configured_provider_options(base_url.as_str(), provider_id.as_str())?;
     let model_options = model_options_for_provider(provider_id.as_str());
     let reasoning_options =
@@ -310,7 +314,7 @@ fn llm_preview_request_payload(request: &[u8]) -> Result<Value, String> {
     }))
 }
 
-fn llm_chat_payload(request: &[u8]) -> Result<Value, String> {
+fn llm_chat_payload(service: &WebHostService, request: &[u8]) -> Result<Value, String> {
     let request_body = parse_json_body(request);
     let chat_request: WebLlmChatRequest = serde_json::from_value(request_body).map_err(|err| {
         let message = format!("invalid LLM chat payload: {err}");
@@ -360,7 +364,10 @@ fn llm_chat_payload(request: &[u8]) -> Result<Value, String> {
         .as_deref()
         .map(normalize_base_url)
         .unwrap_or_else(|| normalize_base_url(llm_config.base_url.as_str()));
-    let provider_id = detect_provider_id(effective_base_url.as_str());
+    let provider_id = resolve_provider_id(
+        Some(llm_config.provider.as_str()),
+        Some(effective_base_url.as_str()),
+    );
     let effective_model = chat_request
         .model
         .as_deref()
@@ -404,6 +411,7 @@ fn llm_chat_payload(request: &[u8]) -> Result<Value, String> {
     );
 
     let execution = run_async_for_web_host(execute_provider_chat(
+        service,
         &chat_request,
         &llm_config,
         &api_key,
@@ -474,6 +482,7 @@ fn summarize_frontend_chat_request(
 }
 
 async fn execute_provider_chat(
+    service: &WebHostService,
     request: &WebLlmChatRequest,
     llm_config: &crate::app_config::LlmRuntimeConfig,
     api_key: &str,
@@ -483,20 +492,8 @@ async fn execute_provider_chat(
     effective_model: &str,
     reasoning_effort: Option<&str>,
 ) -> Result<WebLlmChatExecution, String> {
-    match provider_id {
-        "openrouter" => {
-            send_openrouter_chat(
-                request,
-                llm_config,
-                api_key,
-                soul,
-                effective_base_url,
-                effective_model,
-                reasoning_effort,
-            )
-            .await
-        }
-        "anthropic" => {
+    match provider_api_family(provider_id) {
+        LlmProviderApiFamily::AnthropicMessages => {
             send_anthropic_chat(
                 request,
                 llm_config,
@@ -508,7 +505,7 @@ async fn execute_provider_chat(
             )
             .await
         }
-        "google-gemini" => {
+        LlmProviderApiFamily::GeminiGenerateContent => {
             send_gemini_chat(
                 request,
                 llm_config,
@@ -520,8 +517,22 @@ async fn execute_provider_chat(
             )
             .await
         }
-        _ => {
+        LlmProviderApiFamily::ChatCompletions => {
+            send_chat_completions_family_chat(
+                service,
+                request,
+                llm_config,
+                api_key,
+                soul,
+                effective_base_url,
+                effective_model,
+                reasoning_effort,
+            )
+            .await
+        }
+        LlmProviderApiFamily::Responses => {
             send_openai_compatible_chat(
+                service,
                 request,
                 llm_config,
                 api_key,
@@ -537,6 +548,7 @@ async fn execute_provider_chat(
 }
 
 async fn send_openai_compatible_chat(
+    service: &WebHostService,
     request: &WebLlmChatRequest,
     llm_config: &crate::app_config::LlmRuntimeConfig,
     api_key: &str,
@@ -548,11 +560,18 @@ async fn send_openai_compatible_chat(
 ) -> Result<WebLlmChatExecution, String> {
     let fallback_prompt = compose_chat_fallback_prompt(request, soul)?;
     let responses_input = build_responses_input(request, soul, provider_id)?;
+    let plugin_tools = runtime_plugin_tools(service)?;
+    let capability_bundle = ToolManager::for_current_workspace()?
+        .build_runtime_bundle(plugin_tools.as_slice())
+        .await?;
     let effective_config = WebLlmRuntimeConfig {
         base_url: effective_base_url.to_string(),
         model: effective_model.to_string(),
         timeout_ms: llm_config.timeout_ms,
-        system_prompt: llm_config.system_prompt.clone(),
+        system_prompt: merge_system_prompt_sections(
+            llm_config.system_prompt.as_deref(),
+            [capability_bundle.system_prompt.as_deref()],
+        ),
         stream: false,
         temperature: request.temperature.or(llm_config.temperature),
         top_p: request.top_p.or(llm_config.top_p),
@@ -565,7 +584,12 @@ async fn send_openai_compatible_chat(
     let client = OpenAiResponsesClient::from_runtime_with_api_key(&effective_config, api_key)
         .map_err(|err: LlmClientError| err.to_string())?;
     let completion = client
-        .complete_with_input(fallback_prompt.as_str(), responses_input, &[], None)
+        .complete_with_input(
+            fallback_prompt.as_str(),
+            responses_input,
+            capability_bundle.tools.as_slice(),
+            None,
+        )
         .await
         .map_err(|err| err.to_string())?;
 
@@ -576,7 +600,8 @@ async fn send_openai_compatible_chat(
     })
 }
 
-async fn send_openrouter_chat(
+async fn send_chat_completions_family_chat(
+    service: &WebHostService,
     request: &WebLlmChatRequest,
     llm_config: &crate::app_config::LlmRuntimeConfig,
     api_key: &str,
@@ -585,38 +610,47 @@ async fn send_openrouter_chat(
     effective_model: &str,
     reasoning_effort: Option<&str>,
 ) -> Result<WebLlmChatExecution, String> {
-    let endpoint = join_api_endpoint(effective_base_url, "chat/completions");
-    let payload = build_openrouter_request(
-        request,
+    let plugin_tools = runtime_plugin_tools(service)?;
+    let capability_bundle = ToolManager::for_current_workspace()?
+        .build_runtime_bundle(plugin_tools.as_slice())
+        .await?;
+    let merged_system_prompt = merge_system_prompt_sections(
         llm_config.system_prompt.as_deref(),
-        soul,
-        effective_model,
-        request.temperature.or(llm_config.temperature),
-        request.top_p.or(llm_config.top_p),
-        reasoning_effort,
-    )?;
-    let response = send_json_request(
-        llm_config.timeout_ms,
-        endpoint.as_str(),
-        api_key,
-        ProviderAuth::Bearer,
-        &collect_runtime_headers(&llm_config.headers, &[]),
-        &payload,
-    )
-    .await?;
-    let message = extract_output_text(&response)
-        .or_else(|| extract_openrouter_text(&response))
-        .ok_or_else(|| "OpenRouter response did not contain assistant text".to_string())?;
+        [capability_bundle.system_prompt.as_deref()],
+    );
+    let messages = build_chat_completions_messages(request, merged_system_prompt.as_deref(), soul)?;
+    let effective_config = WebLlmRuntimeConfig {
+        base_url: effective_base_url.to_string(),
+        model: effective_model.to_string(),
+        timeout_ms: llm_config.timeout_ms,
+        system_prompt: None,
+        stream: false,
+        temperature: request.temperature.or(llm_config.temperature),
+        top_p: request.top_p.or(llm_config.top_p),
+        top_k: request.top_k.or(llm_config.top_k),
+        parallel_tool_calls: llm_config.parallel_tool_calls,
+        reasoning_effort: reasoning_effort.map(ToString::to_string),
+        default_headers: llm_config.headers.clone(),
+    };
+    let client = OpenAiResponsesClient::from_runtime_with_api_key(&effective_config, api_key)
+        .map_err(|err: LlmClientError| err.to_string())?;
+    let completion = client
+        .complete_with_chat_messages(messages, capability_bundle.tools.as_slice(), None)
+        .await
+        .map_err(|err| err.to_string())?;
 
     Ok(WebLlmChatExecution {
-        message,
-        model: response
-            .pointer("/model")
-            .and_then(Value::as_str)
-            .unwrap_or(effective_model)
-            .to_string(),
+        message: completion.text,
+        model: effective_model.to_string(),
         base_url: effective_base_url.to_string(),
     })
+}
+
+fn runtime_plugin_tools(service: &WebHostService) -> Result<Vec<crate::LlmFunctionTool>, String> {
+    match service.runtime_host.as_ref() {
+        Some(runtime_host) => run_async_for_web_host(runtime_host.build_all_plugin_tool_bundle()),
+        None => Ok(Vec::new()),
+    }
 }
 
 async fn send_anthropic_chat(
@@ -855,6 +889,7 @@ fn build_provider_http_client(timeout_ms: u64) -> Result<Client, String> {
         .map_err(|err| format!("failed to build LLM http client: {err}"))
 }
 
+#[allow(dead_code)]
 fn build_openrouter_request(
     request: &WebLlmChatRequest,
     runtime_system_prompt: Option<&str>,
@@ -889,6 +924,14 @@ fn build_openrouter_request(
     }
 
     Ok(Value::Object(body))
+}
+
+fn build_chat_completions_messages(
+    request: &WebLlmChatRequest,
+    runtime_system_prompt: Option<&str>,
+    soul: &str,
+) -> Result<Vec<Value>, String> {
+    build_openrouter_messages(request, runtime_system_prompt, soul)
 }
 
 fn build_openrouter_messages(
@@ -949,7 +992,6 @@ fn build_openrouter_message_content(message: &WebLlmMessage) -> Result<Option<Va
                 parts.push(json!({
                     "type": "image_url",
                     "image_url": { "url": data_url },
-                    "imageUrl": { "url": data_url },
                 }));
             }
             "text" => {
@@ -1295,6 +1337,7 @@ fn compose_system_instruction(
     }
 }
 
+#[allow(dead_code)]
 fn extract_openrouter_text(payload: &Value) -> Option<String> {
     extract_output_text(payload)
 }
@@ -1796,9 +1839,19 @@ fn load_managed_providers_from_doc(
             0,
         )),
         label: Some(
-            provider_label(detect_provider_id(runtime.base_url.as_str()).as_str()).to_string(),
+            provider_label(
+                resolve_provider_id(
+                    Some(runtime.provider.as_str()),
+                    Some(runtime.base_url.as_str()),
+                )
+                .as_str(),
+            )
+            .to_string(),
         ),
-        provider: Some(detect_provider_id(runtime.base_url.as_str())),
+        provider: Some(resolve_provider_id(
+            Some(runtime.provider.as_str()),
+            Some(runtime.base_url.as_str()),
+        )),
         base_url: Some(normalize_base_url(runtime.base_url.as_str())),
         api_key: runtime.api_keys.first().cloned(),
         timeout_seconds: Some(runtime.timeout_ms.saturating_div(1000).max(1)),
@@ -1825,10 +1878,8 @@ fn enrich_saved_provider(
     let provider_id = provider
         .provider
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase())
-        .or_else(|| base_url.as_deref().map(detect_provider_id));
+        .or(base_url.as_deref())
+        .map(|_| resolve_provider_id(provider.provider.as_deref(), base_url.as_deref()));
     let id = Some(derive_provider_entry_id(
         provider.id.as_deref(),
         provider.label.as_deref(),
@@ -1918,10 +1969,8 @@ fn serialize_managed_provider(
     let provider_id = provider
         .provider
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .or_else(|| provider.base_url.as_deref().map(detect_provider_id))
+        .or(provider.base_url.as_deref())
+        .map(|_| resolve_provider_id(provider.provider.as_deref(), provider.base_url.as_deref()))
         .unwrap_or_else(|| "openai-compatible".to_string());
     let label = provider
         .label
@@ -1980,10 +2029,9 @@ fn normalize_single_provider_input(
     let provider_id = provider
         .provider_id
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase())
-        .unwrap_or_else(|| detect_provider_id(base_url.as_str()));
+        .or(Some(base_url.as_str()))
+        .map(|_| resolve_provider_id(provider.provider_id.as_deref(), Some(base_url.as_str())))
+        .unwrap_or_else(|| "openai-compatible".to_string());
     let id = derive_provider_entry_id(
         Some(provider.id.as_str()),
         Some(provider.label.as_str()),
@@ -2277,14 +2325,8 @@ fn prepare_provider_request(
     provider: &LlmManagedProviderConfig,
     model_id: &str,
 ) -> Result<PreparedProviderRequest, String> {
-    let provider_id = provider
-        .provider
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .or_else(|| provider.base_url.as_deref().map(detect_provider_id))
-        .unwrap_or_else(|| "openai-compatible".to_string());
+    let provider_id =
+        resolve_provider_id(provider.provider.as_deref(), provider.base_url.as_deref());
     let base_url = provider
         .base_url
         .as_deref()
@@ -2307,23 +2349,20 @@ fn prepare_provider_request(
         default_headers: provider.headers.clone().unwrap_or_default(),
     };
 
-    match provider_id.as_str() {
-        "openrouter" => Ok(PreparedProviderRequest {
+    match provider_api_family(provider_id.as_str()) {
+        LlmProviderApiFamily::ChatCompletions => Ok(PreparedProviderRequest {
             endpoint: join_api_endpoint(base_url.as_str(), "chat/completions"),
             auth: Some(ProviderAuth::Bearer),
             api_key: provider.api_key.clone(),
             extra_headers: collect_runtime_headers(&runtime.default_headers, &[]),
-            payload: build_openrouter_request(
+            payload: build_chat_completions_request(
                 &chat_request,
                 None,
                 prompt_profile.soul.as_str(),
-                model_id,
-                None,
-                None,
-                None,
+                &runtime,
             )?,
         }),
-        "anthropic" => Ok(PreparedProviderRequest {
+        LlmProviderApiFamily::AnthropicMessages => Ok(PreparedProviderRequest {
             endpoint: join_api_endpoint(base_url.as_str(), "v1/messages"),
             auth: Some(ProviderAuth::ApiKeyHeader("x-api-key".to_string())),
             api_key: provider.api_key.clone(),
@@ -2342,7 +2381,7 @@ fn prepare_provider_request(
                 None,
             )?,
         }),
-        "google-gemini" => Ok(PreparedProviderRequest {
+        LlmProviderApiFamily::GeminiGenerateContent => Ok(PreparedProviderRequest {
             endpoint: join_api_endpoint(
                 base_url.as_str(),
                 format!("models/{model_id}:generateContent").as_str(),
@@ -2361,7 +2400,7 @@ fn prepare_provider_request(
                 None,
             )?,
         }),
-        _ => Ok(PreparedProviderRequest {
+        LlmProviderApiFamily::Responses => Ok(PreparedProviderRequest {
             endpoint: join_api_endpoint(base_url.as_str(), "responses"),
             auth: Some(ProviderAuth::Bearer),
             api_key: provider.api_key.clone(),
@@ -2374,6 +2413,40 @@ fn prepare_provider_request(
             )?,
         }),
     }
+}
+
+fn build_chat_completions_request(
+    request: &WebLlmChatRequest,
+    runtime_system_prompt: Option<&str>,
+    soul: &str,
+    runtime: &WebLlmRuntimeConfig,
+) -> Result<Value, String> {
+    let mut body = Map::new();
+    body.insert("model".to_string(), Value::String(runtime.model.clone()));
+    body.insert(
+        "messages".to_string(),
+        Value::Array(build_chat_completions_messages(
+            request,
+            runtime_system_prompt,
+            soul,
+        )?),
+    );
+    if let Some(temperature) = runtime.temperature {
+        body.insert("temperature".to_string(), json!(temperature));
+    }
+    if let Some(top_p) = runtime.top_p {
+        body.insert("top_p".to_string(), json!(top_p));
+    }
+    if let Some(top_k) = runtime.top_k {
+        body.insert("top_k".to_string(), json!(top_k));
+    }
+    if let Some(reasoning_effort) = runtime.reasoning_effort.as_deref() {
+        body.insert(
+            "reasoning".to_string(),
+            json!({ "effort": reasoning_effort }),
+        );
+    }
+    Ok(Value::Object(body))
 }
 
 fn build_probe_chat_request() -> WebLlmChatRequest {
@@ -2640,22 +2713,7 @@ fn normalize_base_url(raw: &str) -> String {
 }
 
 fn detect_provider_id(base_url: &str) -> String {
-    let normalized = base_url.to_ascii_lowercase();
-    if normalized.contains("api.openai.com") {
-        "openai".to_string()
-    } else if normalized.contains("openrouter.ai") {
-        "openrouter".to_string()
-    } else if normalized.contains("moonshot.ai") {
-        "kimi".to_string()
-    } else if normalized.contains("dashscope.aliyuncs.com") {
-        "qwen".to_string()
-    } else if normalized.contains("generativelanguage.googleapis.com") {
-        "google-gemini".to_string()
-    } else if normalized.contains("anthropic.com") {
-        "anthropic".to_string()
-    } else {
-        "openai-compatible".to_string()
-    }
+    detect_provider_id_from_base_url(base_url)
 }
 
 fn provider_label(provider_id: &str) -> &'static str {
@@ -2675,6 +2733,8 @@ fn configured_provider_options(
     active_provider_id: &str,
 ) -> Result<Vec<Value>, String> {
     let doc = crate::llm::service::load_current_app_config_doc()?;
+    let runtime = current_llm_runtime_config()?;
+    let managed_providers = load_managed_providers_from_doc(&doc, &runtime);
     let mut urls = doc
         .llm
         .as_ref()
@@ -2692,17 +2752,20 @@ fn configured_provider_options(
         .into_iter()
         .enumerate()
         .map(|(index, url)| {
-            let detected_id = detect_provider_id(url.as_str());
-            let id = if detected_id == "openai-compatible"
-                && active_provider_id != "openai-compatible"
-            {
-                format!("{active_provider_id}-{index}")
+            let saved_provider_id = managed_providers
+                .iter()
+                .find(|provider| provider.base_url.as_deref() == Some(url.as_str()))
+                .and_then(|provider| provider.provider.as_deref());
+            let option_provider_id = if let Some(saved_provider_id) = saved_provider_id {
+                resolve_provider_id(Some(saved_provider_id), Some(url.as_str()))
+            } else if url == active_base_url {
+                resolve_provider_id(Some(active_provider_id), Some(url.as_str()))
             } else {
-                format!("{detected_id}-{index}")
+                resolve_provider_id(None, Some(url.as_str()))
             };
             json!({
-                "id": id,
-                "label": provider_label(detected_id.as_str()),
+                "id": format!("{option_provider_id}-{index}"),
+                "label": provider_label(option_provider_id.as_str()),
                 "baseUrl": url,
                 "active": url == active_base_url,
             })

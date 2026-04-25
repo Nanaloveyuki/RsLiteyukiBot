@@ -43,6 +43,25 @@ pub(super) fn extract_header<'a>(request: &'a str, name: &str) -> Option<&'a str
         .find_map(|line| parse_named_header(line, name))
 }
 
+pub(super) fn parse_request_headers(request: &[u8]) -> HashMap<String, String> {
+    let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return HashMap::new();
+    };
+    let header_text = String::from_utf8_lossy(&request[..pos]).to_string();
+    header_text
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some((name.to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
 #[allow(dead_code)]
 pub(super) fn extract_body(request: &[u8]) -> &[u8] {
     if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {

@@ -6,14 +6,17 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use liteyukibot_core::{
-    AdapterManager, ChannelRegistry, LifecycleContext, Plugin, PluginAbiMethod, PluginContext,
-    PluginHostBridge, PluginLoadError, PluginLoadState, PluginManager, PluginManifestLoader,
-    PluginMetadata, PluginRuntimeKind, PluginSdk, PluginType, RuntimeTarget, SessionRouter,
-    SharedStore,
+    AdapterConfig, AdapterEndpoint, AdapterManager, AdapterTransport, ChannelRegistry,
+    LifecycleContext, Plugin, PluginAbiMethod, PluginContext, PluginHostBridge, PluginLoadError,
+    PluginLoadState, PluginManager, PluginManifestLoader, PluginMetadata, PluginRuntimeKind,
+    PluginSdk, PluginType, RuntimeTarget, SessionRouter, SharedStore,
 };
 use liteyukibot_core::{BotEvent, Logger, LoggerConfig};
 use liteyukibot_core::{RuntimeCapabilities, RuntimeFlavor};
+use pyo3::prelude::*;
 use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::time::{Duration, timeout};
 
@@ -801,6 +804,174 @@ def bootstrap(sdk):
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn python_plan_load_does_not_import_module_before_runtime_activation() {
+    if !python_command_available() {
+        return;
+    }
+
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("py_plan_probe");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+    let marker_path = dir.path.join("plan-side-effect.txt");
+    let marker_literal = marker_path.to_string_lossy().replace('\\', "/");
+
+    std::fs::write(
+        plugin_dir.join("side_effect_plugin.py"),
+        format!(
+            r#"from pathlib import Path
+
+Path("{}").write_text("imported", encoding="utf-8")
+
+def bootstrap(sdk):
+    return None
+"#,
+            marker_literal
+        ),
+    )
+    .expect("python module should be written");
+
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "id": "python-plan-side-effect",
+  "name": "Python Plan Side Effect",
+  "type": "service",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "side_effect_plugin:bootstrap"
+  }
+}"#,
+    )
+    .expect("manifest should be written");
+
+    let manifest = PluginManifestLoader::load_manifest(plugin_dir.join("plugin.json").as_path())
+        .expect("manifest should load");
+    let context = plugin_context();
+
+    let plan = context
+        .sdk
+        .plan_load(&manifest.descriptor, &context.host)
+        .await
+        .expect("plan should succeed");
+    assert_eq!(plan.state, PluginLoadState::Ready);
+    assert!(
+        !marker_path.exists(),
+        "plan_load should not import python modules or trigger top-level side effects"
+    );
+
+    let activated = context
+        .sdk
+        .load_manifest_plugin(&manifest.descriptor, &context.host)
+        .expect("runtime activation should succeed");
+    assert!(activated, "python runtime should activate during load");
+    assert!(
+        marker_path.exists(),
+        "runtime activation should still import the module during actual load"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn python_unload_cleans_sys_modules_for_package_and_submodule() {
+    if !python_command_available() {
+        return;
+    }
+
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("py_unload_cleanup");
+    let package_dir = plugin_dir.join("reload_pkg");
+    std::fs::create_dir_all(&package_dir).expect("package dir should be created");
+
+    std::fs::write(
+        package_dir.join("__init__.py"),
+        r#"from . import helper
+
+def bootstrap(sdk):
+    return helper.VALUE
+"#,
+    )
+    .expect("package init should be written");
+    std::fs::write(package_dir.join("helper.py"), "VALUE = 1\n")
+        .expect("package helper should be written");
+
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "id": "python-unload-module-cleanup",
+  "name": "Python Unload Module Cleanup",
+  "type": "service",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "reload_pkg:bootstrap"
+  }
+}"#,
+    )
+    .expect("manifest should be written");
+
+    let manifest = PluginManifestLoader::load_manifest(plugin_dir.join("plugin.json").as_path())
+        .expect("manifest should load");
+    let context = plugin_context();
+
+    let activated = context
+        .sdk
+        .load_manifest_plugin(&manifest.descriptor, &context.host)
+        .expect("runtime activation should succeed");
+    assert!(activated, "python runtime should activate during load");
+
+    Python::with_gil(|py| {
+        let sys = py.import("sys").expect("sys should import");
+        let modules = sys
+            .getattr("modules")
+            .expect("sys.modules should exist")
+            .downcast_into::<pyo3::types::PyDict>()
+            .expect("sys.modules should be a dict");
+        let package_loaded = modules
+            .call_method1("__contains__", ("reload_pkg",))
+            .expect("dict contains should work")
+            .is_truthy()
+            .expect("truthy check should work");
+        let helper_loaded = modules
+            .call_method1("__contains__", ("reload_pkg.helper",))
+            .expect("dict contains should work")
+            .is_truthy()
+            .expect("truthy check should work");
+        assert!(package_loaded, "package module should be loaded");
+        assert!(helper_loaded, "submodule should be loaded");
+    });
+
+    context
+        .sdk
+        .unload_manifest_plugin(&manifest.descriptor)
+        .expect("unload should succeed");
+
+    Python::with_gil(|py| {
+        let sys = py.import("sys").expect("sys should import");
+        let modules = sys
+            .getattr("modules")
+            .expect("sys.modules should exist")
+            .downcast_into::<pyo3::types::PyDict>()
+            .expect("sys.modules should be a dict");
+        let package_loaded = modules
+            .call_method1("__contains__", ("reload_pkg",))
+            .expect("dict contains should work")
+            .is_truthy()
+            .expect("truthy check should work");
+        let helper_loaded = modules
+            .call_method1("__contains__", ("reload_pkg.helper",))
+            .expect("dict contains should work")
+            .is_truthy()
+            .expect("truthy check should work");
+        assert!(
+            !package_loaded,
+            "package module should be removed from sys.modules on unload"
+        );
+        assert!(
+            !helper_loaded,
+            "package submodule should be removed from sys.modules on unload"
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_manager_rejects_python_plugin_bootstrap_without_required_permission() {
     if !python_command_available() {
         return;
@@ -1327,6 +1498,660 @@ async def liteecho(event: MessageEvent):
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_manager_loads_astrbot_style_python_plugin_with_combined_filters() {
+    if !python_command_available() {
+        return;
+    }
+
+    let manager = PluginManager::new();
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("astrbot_style_echo");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+    let config_path = dir.path.join("astrbot-style-config.yaml");
+    std::fs::write(
+        &config_path,
+        "plugin:\n  loaded: false\n  group_hits: 0\n  private_hits: 0\n",
+    )
+    .expect("config file should be written");
+
+    std::fs::write(
+        plugin_dir.join("astr_echo_plugin.py"),
+        r#"from astrbot.api import logger, star
+from astrbot.api.event import AstrMessageEvent, filter
+
+
+class AstrCompatEcho(star.Star):
+    def __init__(self, context: star.Context, config=None):
+        super().__init__(context, config)
+        self.context = context
+        logger.info("AstrCompatEcho initialized")
+
+    @filter.on_astrbot_loaded()
+    async def on_ready(self):
+        self.context.config_set("plugin.loaded", True)
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    @filter.command("echo", alias={"astr-echo"})
+    async def handle_group_echo(self, event: AstrMessageEvent):
+        current = self.context.config_get("plugin.group_hits", 0)
+        if current is None:
+            current = 0
+        self.context.config_set("plugin.group_hits", int(current) + 1)
+        self.context.config_set("plugin.last_group_message", event.get_message_str())
+        event.stop_event()
+
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
+    @filter.command("echo")
+    async def handle_private_echo(self, event: AstrMessageEvent):
+        current = self.context.config_get("plugin.private_hits", 0)
+        if current is None:
+            current = 0
+        self.context.config_set("plugin.private_hits", int(current) + 1)
+"#,
+    )
+    .expect("python module should be written");
+
+    let config_path_json = config_path.to_string_lossy().replace('\\', "/");
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        format!(
+            r#"{{
+  "id": "astrbot-style-echo",
+  "name": "AstrBot Style Echo",
+  "type": "service",
+  "permissions": ["config.read", "config.write"],
+  "commands": [
+    {{
+      "name": "/echo",
+      "description": "astrbot echo command",
+      "scopes": ["adapter:onebot11"]
+    }}
+  ],
+  "runtime": {{
+    "kind": "python",
+    "entrypoint": "astr_echo_plugin",
+    "options": {{
+      "config_path": "{}"
+    }}
+  }}
+}}"#,
+            config_path_json
+        ),
+    )
+    .expect("manifest should be written");
+
+    let context = plugin_context();
+    let discovered = manager
+        .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+        .expect("manifest discovery should succeed");
+    assert_eq!(discovered, vec!["astrbot-style-echo".to_string()]);
+
+    manager
+        .load_plugins(discovered, context.clone())
+        .await
+        .expect("astrbot style plugin should load");
+
+    let loaded = manager.loaded_plugins();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].descriptor.metadata.id, "astrbot-style-echo");
+    assert_eq!(loaded[0].load_plan.runtime_kind, PluginRuntimeKind::Python);
+    assert_eq!(loaded[0].load_plan.state, PluginLoadState::Ready);
+
+    manager
+        .start_loaded_plugins(context.clone())
+        .await
+        .expect("astrbot style start hooks should run");
+
+    context.sdk.dispatch_event(
+        &BotEvent::new(
+            201,
+            "adapter.inbound",
+            json!({
+                "_adapter_id": "missing-adapter",
+                "_adapter_protocol": "onebot.v11",
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": "10001",
+                "user_id": "20001",
+                "raw_message": "/echo grouped"
+            }),
+        ),
+        &context.logger,
+    );
+    context.sdk.dispatch_event(
+        &BotEvent::new(
+            202,
+            "adapter.inbound",
+            json!({
+                "_adapter_id": "missing-adapter",
+                "_adapter_protocol": "onebot.v11",
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": "20001",
+                "raw_message": "/echo private"
+            }),
+        ),
+        &context.logger,
+    );
+
+    let updated_config =
+        std::fs::read_to_string(config_path).expect("updated config should stay readable");
+    assert!(
+        updated_config.contains("loaded: true"),
+        "astrbot on_astrbot_loaded hook should update config"
+    );
+    assert!(
+        updated_config.contains("group_hits: 1"),
+        "group command handler should run exactly once"
+    );
+    assert!(
+        updated_config.contains("private_hits: 1"),
+        "private command handler should run exactly once"
+    );
+    assert!(
+        updated_config.contains("last_group_message: /echo grouped"),
+        "group handler should see the original message text"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_manager_astrbot_message_event_result_replies_and_injects_command_args() {
+    if !python_command_available() {
+        return;
+    }
+
+    let (endpoint_url, capture_task) = start_http_capture_server().await;
+
+    let manager = PluginManager::new();
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("astrbot_result_echo");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+
+    std::fs::write(
+        plugin_dir.join("astr_result_plugin.py"),
+        r#"from astrbot.api import star
+from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
+
+
+class AstrCompatResult(star.Star):
+    @filter.command("sum")
+    async def handle_sum(self, event: AstrMessageEvent, left, right):
+        return MessageEventResult().message(f"{left}+{right}")
+"#,
+    )
+    .expect("python module should be written");
+
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "id": "astrbot-result-echo",
+  "name": "AstrBot Result Echo",
+  "type": "service",
+  "permissions": ["adapter.reply"],
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "astr_result_plugin"
+  }
+}"#,
+    )
+    .expect("manifest should be written");
+
+    let context = plugin_context();
+    context
+        .host
+        .adapter_manager()
+        .register(AdapterConfig {
+            id: "reply-adapter".to_string(),
+            enabled: true,
+            transport: AdapterTransport::Http,
+            endpoint: AdapterEndpoint {
+                url: endpoint_url,
+                headers: HashMap::new(),
+                token: None,
+                timeout_ms: 5_000,
+            },
+            ..AdapterConfig::default()
+        })
+        .expect("reply adapter should register");
+
+    let discovered = manager
+        .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+        .expect("manifest discovery should succeed");
+    assert_eq!(discovered, vec!["astrbot-result-echo".to_string()]);
+
+    manager
+        .load_plugins(discovered, context.clone())
+        .await
+        .expect("astrbot result plugin should load");
+
+    context.sdk.dispatch_event(
+        &BotEvent::new(
+            301,
+            "adapter.inbound",
+            json!({
+                "_adapter_id": "reply-adapter",
+                "_adapter_protocol": "onebot.v11",
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": "20001",
+                "raw_message": "/sum alpha beta"
+            }),
+        ),
+        &context.logger,
+    );
+
+    let request = timeout(Duration::from_secs(3), capture_task)
+        .await
+        .expect("reply capture should complete")
+        .expect("reply capture task should join");
+    assert!(
+        request.contains("\"message\":\"alpha+beta\""),
+        "MessageEventResult reply should include parsed command args: {request}"
+    );
+    assert!(
+        request.contains("\"action\":\"send_msg\""),
+        "reply path should produce a onebot send_msg payload: {request}"
+    );
+}
+
+#[test]
+fn plugin_manager_astrbot_context_exposes_tool_and_schedule_metadata() {
+    if !python_command_available() {
+        return;
+    }
+
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("astrbot_context_tools");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+    let config_path = dir.path.join("astrbot-context-tools.yaml");
+    std::fs::write(&config_path, "plugin: {}\n").expect("config file should be written");
+
+    std::fs::write(
+        plugin_dir.join("astr_context_tools.py"),
+        r#"import liteyuki
+from astrbot.api import FunctionTool, star
+from astrbot.api.event import filter
+
+
+class ManualTool(FunctionTool):
+    def __init__(self):
+        super().__init__(
+            name="manual_tool_for_context_test",
+            description="manual tool",
+            parameters={"type": "object", "properties": {}},
+            handler=self.run,
+        )
+
+    async def run(self):
+        return "ok"
+
+
+class AstrCompatContextTools(star.Star):
+    async def initialize(self):
+        manager = self.context.get_llm_tool_manager()
+        runtime = liteyuki._get_astrbot_plugin_runtime(__name__)
+        self.context.register_web_api("/compat-tools", self.handle_api, ["POST"], "compat tools api")
+        self.context.add_llm_tools(
+            FunctionTool(
+                name="context_tool_for_context_test",
+                description="context tool",
+                parameters={
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                },
+                handler=self.context_tool,
+            ),
+            ManualTool(),
+        )
+        await self.context.cron_manager.add_active_job(
+            name="compat-cron-job",
+            description="compat cron",
+            cron_expression="0 0 * * *",
+            payload={"note": "compat"},
+            enabled=True,
+        )
+        self.context.register_task("legacy-task-token", "legacy task")
+
+        self.context.deactivate_llm_tool("decorated_tool_for_context_test")
+        inactive = manager.get_func("decorated_tool_for_context_test").active
+        self.context.activate_llm_tool("decorated_tool_for_context_test")
+        active = manager.get_func("decorated_tool_for_context_test").active
+        jobs = await self.context.cron_manager.list_jobs()
+        decorated = manager.get_func("decorated_tool_for_context_test")
+
+        self.context.config_set(
+            "plugin.tool_names",
+            [tool.name for tool in runtime["llm_tools"]],
+        )
+        self.context.config_set(
+            "plugin.decorated_query_type",
+            decorated.parameters["properties"]["query"]["type"],
+        )
+        self.context.config_set(
+            "plugin.decorated_required",
+            decorated.parameters.get("required", []),
+        )
+        self.context.config_set(
+            "plugin.decorated_handler_module_path",
+            decorated.handler_module_path,
+        )
+        self.context.config_set("plugin.decorated_inactive", inactive)
+        self.context.config_set("plugin.decorated_active", active)
+        self.context.config_set(
+            "plugin.web_api_route",
+            self.context.registered_web_apis[0][0],
+        )
+        self.context.config_set(
+            "plugin.web_api_methods",
+            self.context.registered_web_apis[0][2],
+        )
+        self.context.config_set("plugin.cron_job_type", jobs[0].job_type)
+        self.context.config_set("plugin.cron_expression", jobs[0].cron_expression)
+        self.context.config_set(
+            "plugin.task_desc",
+            self.context._register_tasks[0]["desc"],
+        )
+
+    async def handle_api(self):
+        return {"ok": True}
+
+    async def context_tool(self, value: str):
+        return value
+
+    @filter.llm_tool("decorated_tool_for_context_test")
+    async def decorated_tool(self, query: str, count: int = 1):
+        return f"{query}:{count}"
+"#,
+    )
+    .expect("python module should be written");
+    let config_path_json = config_path.to_string_lossy().replace('\\', "/");
+
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        format!(
+            r#"{{
+  "id": "astrbot-context-tools",
+  "name": "AstrBot Context Tools",
+  "type": "service",
+  "permissions": ["config.write"],
+  "runtime": {{
+    "kind": "python",
+    "entrypoint": "astr_context_tools",
+    "options": {{
+      "config_path": "{}"
+    }}
+  }}
+}}"#,
+            config_path_json
+        ),
+    )
+    .expect("manifest should be written");
+
+    let manifest = PluginManifestLoader::load_manifest(plugin_dir.join("plugin.json").as_path())
+        .expect("manifest should load");
+    let context = plugin_context();
+
+    let activated = context
+        .sdk
+        .load_manifest_plugin(&manifest.descriptor, &context.host)
+        .expect("python runtime should load");
+    assert!(activated, "python runtime should activate during direct load");
+    context
+        .sdk
+        .start_manifest_plugin(&manifest.descriptor)
+        .expect("astrbot initialize hook should run");
+
+    let snapshot = context
+        .sdk
+        .get_plugin_capabilities("astrbot-context-tools")
+        .expect("capability snapshot query should succeed")
+        .expect("python capability snapshot should exist");
+    assert_eq!(snapshot.plugin_id, "astrbot-context-tools");
+    assert_eq!(snapshot.runtime_kind, PluginRuntimeKind::Python);
+    assert_eq!(snapshot.tools.len(), 3);
+    assert_eq!(snapshot.web_apis.len(), 1);
+    assert_eq!(snapshot.cron_jobs.len(), 1);
+    assert_eq!(snapshot.tasks.len(), 1);
+    assert!(
+        snapshot
+            .tools
+            .iter()
+            .any(|tool| tool.name == "decorated_tool_for_context_test"
+                && tool.source == liteyukibot_core::PluginCapabilitySource::AstrbotDecorator)
+    );
+    assert!(
+        snapshot
+            .tools
+            .iter()
+            .any(|tool| tool.name == "context_tool_for_context_test"
+                && tool.source == liteyukibot_core::PluginCapabilitySource::AstrbotContext)
+    );
+    assert_eq!(snapshot.web_apis[0].route, "/compat-tools");
+    assert_eq!(snapshot.web_apis[0].source, liteyukibot_core::PluginCapabilitySource::AstrbotContext);
+    assert_eq!(snapshot.cron_jobs[0].job_type, "active_agent");
+    assert_eq!(snapshot.tasks[0].task_id, "legacy-task-token");
+
+    let updated = context
+        .sdk
+        .read_explicit_config_document(&manifest.descriptor)
+        .expect("config should stay readable");
+    let plugin = &updated["plugin"];
+    assert_eq!(
+        plugin["tool_names"],
+        json!([
+            "decorated_tool_for_context_test",
+            "context_tool_for_context_test",
+            "manual_tool_for_context_test"
+        ])
+    );
+    assert_eq!(plugin["decorated_query_type"], json!("string"));
+    assert_eq!(plugin["decorated_required"], json!(["query"]));
+    assert_eq!(plugin["decorated_handler_module_path"], json!("astr_context_tools"));
+    assert_eq!(plugin["decorated_inactive"], json!(false));
+    assert_eq!(plugin["decorated_active"], json!(true));
+    assert_eq!(plugin["web_api_route"], json!("/compat-tools"));
+    assert_eq!(plugin["web_api_methods"], json!(["POST"]));
+    assert_eq!(plugin["cron_job_type"], json!("active_agent"));
+    assert_eq!(plugin["cron_expression"], json!("0 0 * * *"));
+    assert_eq!(plugin["task_desc"], json!("legacy task"));
+}
+
+#[test]
+fn plugin_manager_astrbot_command_group_aliases_reach_nested_subcommands() {
+    if !python_command_available() {
+        return;
+    }
+
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("astrbot_group_aliases");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+    let config_path = dir.path.join("astrbot-group-aliases.yaml");
+    std::fs::write(&config_path, "plugin:\n  last_message: \"\"\n")
+        .expect("config file should be written");
+
+    std::fs::write(
+        plugin_dir.join("astr_group_aliases.py"),
+        r#"from astrbot.api import star
+from astrbot.api.event import AstrMessageEvent, filter
+
+root = filter.command_group("admin", alias={"a"})(object)
+tools = root.group("tools", alias={"t"})(object)
+
+
+class AstrCompatGroupAliases(star.Star):
+    @tools.command("ping", alias={"p"})
+    async def handle_ping(self, event: AstrMessageEvent):
+        self.context.config_set("plugin.last_message", event.get_message_str())
+"#,
+    )
+    .expect("python module should be written");
+    let config_path_json = config_path.to_string_lossy().replace('\\', "/");
+
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        format!(
+            r#"{{
+  "id": "astrbot-group-aliases",
+  "name": "AstrBot Group Aliases",
+  "type": "service",
+  "permissions": ["config.write"],
+  "runtime": {{
+    "kind": "python",
+    "entrypoint": "astr_group_aliases",
+    "options": {{
+      "config_path": "{}"
+    }}
+  }}
+}}"#,
+            config_path_json
+        ),
+    )
+    .expect("manifest should be written");
+
+    let manifest = PluginManifestLoader::load_manifest(plugin_dir.join("plugin.json").as_path())
+        .expect("manifest should load");
+    let context = plugin_context();
+
+    let activated = context
+        .sdk
+        .load_manifest_plugin(&manifest.descriptor, &context.host)
+        .expect("python runtime should load");
+    assert!(activated, "python runtime should activate during direct load");
+
+    context.sdk.dispatch_event(
+        &BotEvent::new(
+            401,
+            "adapter.inbound",
+            json!({
+                "_adapter_id": "missing-adapter",
+                "_adapter_protocol": "onebot.v11",
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": "20001",
+                "raw_message": "/a t p nested alias"
+            }),
+        ),
+        &context.logger,
+    );
+
+    let updated = context
+        .sdk
+        .read_explicit_config_document(&manifest.descriptor)
+        .expect("config should stay readable");
+    assert_eq!(
+        updated["plugin"]["last_message"],
+        json!("/a t p nested alias")
+    );
+}
+
+#[test]
+fn plugin_sdk_reuses_single_async_loop_and_cleans_background_tasks() {
+    if !python_command_available() {
+        return;
+    }
+
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("py_async_loop_consistency");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+    let config_path = dir.path.join("py-async-loop-consistency.yaml");
+    std::fs::write(
+        &config_path,
+        "plugin:\n  same_loop: false\n  pending_tasks: 1\n",
+    )
+    .expect("config file should be written");
+
+    std::fs::write(
+        plugin_dir.join("async_loop_plugin.py"),
+        r#"import asyncio
+
+_start_loop_id = None
+
+
+async def on_start(sdk):
+    global _start_loop_id
+    loop = asyncio.get_running_loop()
+    _start_loop_id = id(loop)
+
+    async def sleeper():
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            return None
+
+    asyncio.create_task(sleeper())
+
+
+async def on_health_check(sdk):
+    loop = asyncio.get_running_loop()
+    sdk.config_set("plugin.same_loop", id(loop) == _start_loop_id)
+    pending = [
+        task
+        for task in asyncio.all_tasks(loop)
+        if task is not asyncio.current_task(loop)
+    ]
+    sdk.config_set("plugin.pending_tasks", len(pending))
+"#,
+    )
+    .expect("python module should be written");
+    let config_path_json = config_path.to_string_lossy().replace('\\', "/");
+
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        format!(
+            r#"{{
+  "id": "python-async-loop-consistency",
+  "name": "Python Async Loop Consistency",
+  "type": "service",
+  "permissions": ["config.write"],
+  "runtime": {{
+    "kind": "python",
+    "entrypoint": "async_loop_plugin",
+    "options": {{
+      "config_path": "{}",
+      "start_handler": "on_start",
+      "health_handler": "on_health_check"
+    }}
+  }}
+}}"#,
+            config_path_json
+        ),
+    )
+    .expect("manifest should be written");
+
+    let manifest = PluginManifestLoader::load_manifest(plugin_dir.join("plugin.json").as_path())
+        .expect("manifest should load");
+    let context = plugin_context();
+
+    let activated = context
+        .sdk
+        .load_manifest_plugin(&manifest.descriptor, &context.host)
+        .expect("python async consistency plugin should load");
+    assert!(
+        activated,
+        "python runtime should activate during direct load"
+    );
+    context
+        .sdk
+        .start_manifest_plugin(&manifest.descriptor)
+        .expect("start hooks should run");
+    context
+        .sdk
+        .health_check_manifest_plugin(&manifest.descriptor)
+        .expect("health hooks should run");
+
+    let updated_config =
+        std::fs::read_to_string(config_path).expect("updated config should stay readable");
+    assert!(
+        updated_config.contains("same_loop: true"),
+        "async lifecycle hooks should reuse the same dedicated loop"
+    );
+    assert!(
+        updated_config.contains("pending_tasks: 0"),
+        "background tasks created in a callback should be cancelled before the next callback"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_manager_can_disable_and_reenable_scoped_adapter_command() {
     if !python_command_available() {
         return;
@@ -1615,6 +2440,66 @@ async fn plugin_manager_clears_loading_state_after_hook_error() {
         other => panic!("expected Hook error, got {:?}", other),
     }
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+async fn start_http_capture_server() -> (String, tokio::task::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("capture server should bind");
+    let address = listener
+        .local_addr()
+        .expect("capture server should expose local addr");
+
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("request should arrive");
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        let mut expected_len: Option<usize> = None;
+
+        loop {
+            let read = stream.read(&mut buffer).await.expect("request should read");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if expected_len.is_none() {
+                expected_len = http_request_total_length(request.as_slice());
+            }
+            if expected_len.is_some_and(|len| request.len() >= len) {
+                break;
+            }
+        }
+
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .await
+            .expect("response should write");
+        String::from_utf8(request).expect("request should stay utf-8")
+    });
+
+    (format!("http://{address}/"), task)
+}
+
+fn http_request_total_length(request: &[u8]) -> Option<usize> {
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")?
+        + 4;
+    let headers = std::str::from_utf8(&request[..header_end]).ok()?;
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("Content-Length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    Some(header_end + content_length)
 }
 
 struct TempDir {

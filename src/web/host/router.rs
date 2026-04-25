@@ -141,6 +141,10 @@ pub(super) fn route_napcat_api(
         return response;
     }
 
+    if let Some(response) = capability_api::route_capability_api(method, api_path, is_head) {
+        return response;
+    }
+
     if let Some(response) = llm_api::route_llm_api(service, method, api_path, request, is_head) {
         return response;
     }
@@ -151,6 +155,12 @@ pub(super) fn route_napcat_api(
 
     if api_path.starts_with("/File/") {
         return file_api::route_file_api(method, api_path, raw_path, request, is_head);
+    }
+
+    if let Some(response) = plugin_api::route_plugin_runtime_web_api(
+        service, method, api_path, raw_path, request, is_head, peer_ip,
+    ) {
+        return response;
     }
 
     if let Some(response) =
