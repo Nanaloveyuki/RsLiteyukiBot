@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
 use liteyukibot_core::AdapterConfig;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config_paths::{
     migrate_legacy_app_config_to_user_dir, replace_config_file, resolve_default_app_config_path,
@@ -318,6 +318,8 @@ pub(crate) struct LlmConfigSection {
     #[serde(default)]
     pub(crate) api_key: Option<String>,
     #[serde(default)]
+    pub(crate) headers: Option<HashMap<String, String>>,
+    #[serde(default)]
     pub(crate) model: Option<String>,
     #[serde(default)]
     pub(crate) timeout_seconds: Option<u64>,
@@ -333,6 +335,38 @@ pub(crate) struct LlmConfigSection {
     pub(crate) system_prompt: Option<String>,
     #[serde(default)]
     pub(crate) command_prefix: Option<String>,
+    #[serde(default)]
+    pub(crate) active_provider_id: Option<String>,
+    #[serde(default)]
+    pub(crate) providers: Option<Vec<LlmManagedProviderConfig>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub(crate) struct LlmManagedProviderConfig {
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    #[serde(default)]
+    pub(crate) label: Option<String>,
+    #[serde(default)]
+    pub(crate) provider: Option<String>,
+    #[serde(default)]
+    pub(crate) base_url: Option<String>,
+    #[serde(default)]
+    pub(crate) api_key: Option<String>,
+    #[serde(default)]
+    pub(crate) timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub(crate) headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub(crate) models: Option<Vec<LlmManagedModelConfig>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub(crate) struct LlmManagedModelConfig {
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -342,6 +376,7 @@ pub(crate) struct LlmRuntimeConfig {
     pub(crate) provider: String,
     pub(crate) base_url: String,
     pub(crate) api_keys: Vec<String>,
+    pub(crate) headers: HashMap<String, String>,
     pub(crate) model: String,
     pub(crate) timeout_ms: u64,
     pub(crate) temperature: Option<f32>,
@@ -387,6 +422,10 @@ impl llm::OpenAiRuntimeConfig for LlmRuntimeConfig {
 
     fn system_prompt(&self) -> Option<&str> {
         self.system_prompt.as_deref()
+    }
+
+    fn default_headers(&self) -> Option<&HashMap<String, String>> {
+        Some(&self.headers)
     }
 }
 
@@ -1046,6 +1085,11 @@ pub(crate) fn resolve_llm_config(app_config: &AppConfigDoc) -> LlmRuntimeConfig 
     }
     api_keys = normalize_llm_key_list(api_keys);
 
+    let headers = section
+        .and_then(|cfg| cfg.headers.clone())
+        .map(normalize_llm_header_map)
+        .unwrap_or_default();
+
     let model = std::env::var("LY_LLM_MODEL")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -1116,6 +1160,7 @@ pub(crate) fn resolve_llm_config(app_config: &AppConfigDoc) -> LlmRuntimeConfig 
         provider,
         base_url,
         api_keys,
+        headers,
         model,
         timeout_ms,
         temperature,
@@ -1987,4 +2032,19 @@ fn normalize_llm_key_list(keys: Vec<String>) -> Vec<String> {
         }
     }
     normalized
+}
+
+fn normalize_llm_header_map(headers: HashMap<String, String>) -> HashMap<String, String> {
+    headers
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let key = key.trim().to_string();
+            let value = value.trim().to_string();
+            if key.is_empty() || value.is_empty() {
+                None
+            } else {
+                Some((key, value))
+            }
+        })
+        .collect()
 }

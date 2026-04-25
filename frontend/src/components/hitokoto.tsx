@@ -3,34 +3,104 @@
 import { Button } from '@heroui/button';
 import { Tooltip } from '@heroui/tooltip';
 import { useLocalStorage } from '@uidotdev/usehooks';
-import { useRequest } from 'ahooks';
 import clsx from 'clsx';
+import { useState } from 'react';
 import toast from 'react-hot-toast';
 import { IoMdQuote } from 'react-icons/io';
 import { IoCopy, IoRefresh } from 'react-icons/io5';
 
 import key from '@/const/key';
-import { serverRequest } from '@/utils/request';
 
-import PageLoading from './page_loading';
-
-export default function Hitokoto () {
-  const {
-    data: dataOri,
-    error,
-    loading,
-    run,
-  } = useRequest(() => serverRequest.get<ServerResponse<IHitokoto>>('/base/GetHitokoto'), {
-    throttleWait: 1000,
-  });
-  const backupData = {
+const HITOKOTO_POOL: Array<Pick<IHitokoto, 'hitokoto' | 'from' | 'from_who'>> = [
+  {
     hitokoto: '凡是过往，皆为序章。',
     from: '暴风雨',
     from_who: '莎士比亚',
-  };
-  const data = dataOri?.data?.data || (error ? backupData : undefined);
+  },
+  {
+    hitokoto: '自然选择，前进四！',
+    from: '自定义',
+    from_who: 'Liteyuki',
+  },
+  {
+    hitokoto: '铭刻在心：每一天都是一年中最好的日子。',
+    from: '语录',
+    from_who: '爱默生',
+  },
+  {
+    hitokoto: '一个人的价值，在于他贡献了什么，而不在于他能得到什么。',
+    from: '语录',
+    from_who: '爱因斯坦',
+  },
+  {
+    hitokoto: '智慧并不产生于学历，而是来自对于知识的终身不懈的追求。',
+    from: '教育论',
+    from_who: '爱因斯坦',
+  },
+  {
+    hitokoto: '未经反思自省的人生没有意义。',
+    from: '自辩辞',
+    from_who: '苏格拉底',
+  },
+  {
+    hitokoto: '少关心别人的逸闻私事，多留意别人的思路观点。',
+    from: '语录',
+    from_who: '居里夫人',
+  },
+  {
+    hitokoto: '生命是永恒不断的创造。',
+    from: '语录',
+    from_who: '泰戈尔',
+  },
+  {
+    hitokoto: '生活是黑暗中眨眼间的光。',
+    from: '风之谷',
+    from_who: '宫崎骏',
+  },
+  {
+    hitokoto: '千里之行，始于足下。',
+    from: '道德经',
+    from_who: '老子',
+  },
+  {
+    hitokoto: '上善若水，水善利万物而不争。',
+    from: '道德经',
+    from_who: '老子',
+  },
+  {
+    hitokoto: '民有、民治、民享。',
+    from: '葛底斯堡演说',
+    from_who: '林肯',
+  },
+  {
+    hitokoto: '文学就是我的天国。',
+    from: '我的生活',
+    from_who: '海伦·凯勒',
+  },
+];
+
+function pickRandomHitokoto (current?: string) {
+  if (HITOKOTO_POOL.length <= 1) {
+    return HITOKOTO_POOL[0];
+  }
+
+  let next = HITOKOTO_POOL[Math.floor(Math.random() * HITOKOTO_POOL.length)];
+
+  while (next.hitokoto === current) {
+    next = HITOKOTO_POOL[Math.floor(Math.random() * HITOKOTO_POOL.length)];
+  }
+
+  return next;
+}
+
+export default function Hitokoto () {
+  const [data, setData] = useState(() => pickRandomHitokoto());
   const [backgroundImage] = useLocalStorage<string>(key.backgroundImage, '');
   const hasBackground = !!backgroundImage;
+
+  const onRefresh = () => {
+    setData(current => pickRandomHitokoto(current.hitokoto));
+  };
 
   const onCopy = () => {
     try {
@@ -44,7 +114,6 @@ export default function Hitokoto () {
   return (
     <div className='overflow-hidden'>
       <div className='relative flex flex-col items-center justify-center p-4 md:p-6'>
-        {loading && !data && <PageLoading />}
         {data && (
           <>
             <IoMdQuote className={clsx(
@@ -83,9 +152,8 @@ export default function Hitokoto () {
               'transition-colors',
               hasBackground ? 'text-white/60 hover:text-white' : 'text-default-400 hover:text-primary'
             )}
-            onPress={run}
+            onPress={onRefresh}
             size='sm'
-            isLoading={loading}
             isIconOnly
             radius='full'
             variant='light'

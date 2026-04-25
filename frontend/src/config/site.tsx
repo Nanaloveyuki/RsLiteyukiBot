@@ -43,7 +43,7 @@ export const siteConfig = {
       href: '/logs',
     },
     {
-      label: '接口调试',
+      label: '模型管理',
       icon: <LuActivity className='w-5 h-5' />,
       href: '/debug/http',
     },

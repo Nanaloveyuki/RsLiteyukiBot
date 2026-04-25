@@ -28,6 +28,8 @@ __pycache__/
 .npm-cache/
 .pnpm-store/
 .pnpm-tmp/
+tmp/
+temp/
 
 #config
 /config/

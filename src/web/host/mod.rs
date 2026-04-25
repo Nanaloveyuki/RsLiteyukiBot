@@ -1842,6 +1842,76 @@ mod tests {
         test_server_with_snapshot(test_snapshot())
     }
 
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    struct LlmManagerRouteTestEnv {
+        root: PathBuf,
+        guards: Vec<EnvVarGuard>,
+    }
+
+    impl LlmManagerRouteTestEnv {
+        fn new() -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("rsliteyuki-llm-manager-route-{nanos}"));
+            fs::create_dir_all(root.as_path()).expect("temp route test dir should be created");
+            let config_path = root.join("config.yaml");
+            fs::write(config_path.as_path(), "core:\n  adapters: []\n")
+                .expect("test config should be written");
+
+            let guards = vec![
+                EnvVarGuard::set("LY_CONFIG_PATH", config_path.as_path()),
+                EnvVarGuard::set("LY_LLM_CONFIG_PATH", root.join("llm-config.yaml").as_path()),
+                EnvVarGuard::set(
+                    "LY_LLM_PROMPT_STORE_PATH",
+                    root.join("llm-prompts.json").as_path(),
+                ),
+            ];
+
+            Self { root, guards }
+        }
+
+        fn llm_config_path(&self) -> PathBuf {
+            self.root.join("llm-config.yaml")
+        }
+    }
+
+    impl Drop for LlmManagerRouteTestEnv {
+        fn drop(&mut self) {
+            self.guards.clear();
+            let _ = fs::remove_dir_all(self.root.as_path());
+        }
+    }
+
     fn split_response(response: Vec<u8>) -> (String, Vec<u8>) {
         let Some(split_at) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
             panic!("response did not include header separator");
@@ -1868,6 +1938,36 @@ mod tests {
             "Authorization: Bearer {}",
             server.auth.local_session_token()
         )
+    }
+
+    fn route_json_api(
+        server: &WebHostService,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> serde_json::Value {
+        let body_text = body.map(ToString::to_string).unwrap_or_default();
+        let request = if body_text.is_empty() {
+            format!(
+                "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{}\r\n\r\n",
+                local_auth_header(server)
+            )
+        } else {
+            format!(
+                "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                local_auth_header(server),
+                body_text.len(),
+                body_text
+            )
+        };
+        let response =
+            server.route_http_request(request.as_bytes(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let (headers, body) = split_response(response);
+        assert!(
+            headers.starts_with("HTTP/1.1 200 OK\r\n"),
+            "unexpected headers for {method} {path}: {headers}"
+        );
+        serde_json::from_slice(&body).expect("API response body should be valid json")
     }
 
     fn bootstrap_login_hash(server: &WebHostService) -> String {
@@ -1926,6 +2026,150 @@ mod tests {
         assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
         assert_eq!(body["code"], 401);
         assert_eq!(body["message"], "Unauthorized");
+    }
+
+    #[test]
+    fn llm_manager_routes_save_read_fetch_preview_and_test_models() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let env = LlmManagerRouteTestEnv::new();
+        let server = test_server();
+
+        let save_body = serde_json::json!({
+            "activeProviderId": "anthropic-main",
+            "providers": [
+                {
+                    "id": "openai-main",
+                    "label": "OpenAI Main",
+                    "providerId": "openai",
+                    "baseUrl": "http://127.0.0.1:9/v1",
+                    "apiKey": "openai-test-key",
+                    "timeoutSeconds": 4,
+                    "headers": { "X-Test": "openai" },
+                    "models": [
+                        { "id": "gpt-5-mini", "enabled": true },
+                        { "id": "gpt-4.1", "enabled": false }
+                    ]
+                },
+                {
+                    "id": "anthropic-main",
+                    "label": "Anthropic Main",
+                    "providerId": "anthropic",
+                    "baseUrl": "http://127.0.0.1:9",
+                    "apiKey": "anthropic-test-key",
+                    "timeoutSeconds": 5,
+                    "headers": { "X-Test": "anthropic" },
+                    "models": [
+                        { "id": "claude-sonnet-4-20250514", "enabled": true },
+                        { "id": "claude-3-7-sonnet-20250219", "enabled": false }
+                    ]
+                }
+            ]
+        });
+
+        let save_response = route_json_api(
+            &server,
+            "POST",
+            "/api/LLM/SaveManagerState",
+            Some(&save_body),
+        );
+        assert_eq!(save_response["code"], 0);
+        assert_eq!(save_response["data"]["activeProviderId"], "anthropic-main");
+        assert_eq!(save_response["data"]["providers"][1]["active"], true);
+
+        let state_response = route_json_api(&server, "GET", "/api/LLM/GetManagerState", None);
+        assert_eq!(state_response["code"], 0);
+        assert_eq!(state_response["data"]["activeProviderId"], "anthropic-main");
+        assert_eq!(
+            state_response["data"]["providers"]
+                .as_array()
+                .expect("providers should be an array")
+                .len(),
+            2
+        );
+        let active_provider = state_response["data"]["providers"]
+            .as_array()
+            .expect("providers should be an array")
+            .iter()
+            .find(|provider| provider["id"] == "anthropic-main")
+            .expect("active provider should be returned")
+            .clone();
+
+        let fetch_response = route_json_api(
+            &server,
+            "POST",
+            "/api/LLM/FetchModels",
+            Some(&serde_json::json!({ "provider": active_provider.clone() })),
+        );
+        assert_eq!(fetch_response["code"], 0);
+        assert_eq!(fetch_response["data"]["source"], "catalog");
+        assert!(
+            fetch_response["data"]["models"]
+                .as_array()
+                .is_some_and(|models| models
+                    .iter()
+                    .any(|model| model["id"] == "claude-sonnet-4-20250514")),
+            "expected anthropic catalog models, got {fetch_response:?}"
+        );
+
+        let preview_response = route_json_api(
+            &server,
+            "POST",
+            "/api/LLM/PreviewRequest",
+            Some(&serde_json::json!({
+                "provider": active_provider.clone(),
+                "modelId": "claude-sonnet-4-20250514"
+            })),
+        );
+        assert_eq!(preview_response["code"], 0);
+        assert_eq!(
+            preview_response["data"]["endpoint"],
+            "http://127.0.0.1:9/v1/messages"
+        );
+        assert_eq!(
+            preview_response["data"]["headers"]["anthropic-version"],
+            "2023-06-01"
+        );
+        assert_eq!(preview_response["data"]["headers"]["X-Test"], "anthropic");
+        assert!(
+            preview_response["data"]["bodyText"]
+                .as_str()
+                .is_some_and(|body| body.contains("<redacted>")),
+            "preview body should be redacted, got {preview_response:?}"
+        );
+
+        let test_response = route_json_api(
+            &server,
+            "POST",
+            "/api/LLM/TestModels",
+            Some(&serde_json::json!({
+                "provider": {
+                    "id": "fast-fail",
+                    "label": "Fast Fail",
+                    "providerId": "openai",
+                    "baseUrl": "",
+                    "models": [{ "id": "gpt-5-mini", "enabled": true }]
+                },
+                "modelId": "gpt-5-mini"
+            })),
+        );
+        assert_eq!(test_response["code"], 0);
+        assert_eq!(test_response["data"]["results"][0]["modelId"], "gpt-5-mini");
+        assert_eq!(test_response["data"]["results"][0]["ok"], false);
+        assert!(
+            test_response["data"]["results"][0]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("base_url is empty")),
+            "expected validation error in model test result, got {test_response:?}"
+        );
+
+        let llm_config = fs::read_to_string(env.llm_config_path())
+            .expect("LLM manager save should persist llm-config.yaml");
+        assert!(llm_config.contains("active_provider_id: 'anthropic-main'"));
+        assert!(llm_config.contains("provider: 'anthropic'"));
+        assert!(llm_config.contains("base_url: 'http://127.0.0.1:9'"));
+        assert!(llm_config.contains("model: 'claude-sonnet-4-20250514'"));
+        assert!(llm_config.contains("api_key: 'openai-test-key'"));
+        assert!(llm_config.contains("api_key: 'anthropic-test-key'"));
     }
 
     #[test]

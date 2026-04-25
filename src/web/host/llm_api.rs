@@ -1,15 +1,24 @@
 use super::*;
 
+use std::collections::HashMap;
 use std::time::Duration;
+use std::time::Instant;
 
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::app_config::{LlmManagedModelConfig, LlmManagedProviderConfig};
+use crate::config_edit::LlmConfigPatch;
+use crate::config_paths::resolve_default_llm_config_path;
 use crate::llm::client::extract_output_text;
-use crate::llm::service::{current_active_prompt_profile, current_llm_runtime_config};
+use crate::llm::service::{
+    current_active_prompt_profile, current_llm_runtime_config, load_current_app_config_doc,
+};
 use crate::llm::{LlmClientError, OpenAiResponsesClient, OpenAiRuntimeConfig};
-use crate::runtime_support::next_llm_api_key_index;
+use crate::runtime_support::{
+    ensure_llm_config_file, next_llm_api_key_index, resolve_llm_config_path,
+};
 
 const DEFAULT_WEB_LLM_MAX_OUTPUT_TOKENS: u32 = 2048;
 const DEFAULT_ANTHROPIC_API_VERSION: &str = "2023-06-01";
@@ -42,7 +51,72 @@ pub(super) fn route_llm_api(
         return Some(napcat_response(body, is_head));
     }
 
+    if api_path == "/LLM/GetManagerState" {
+        let body = match llm_manager_state_payload() {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/LLM/SaveManagerState" {
+        if let Some(response) = reject_non_post_method(method, "LLM/SaveManagerState", is_head) {
+            return Some(response);
+        }
+
+        let body = match save_llm_manager_state(request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/LLM/FetchModels" {
+        if let Some(response) = reject_non_post_method(method, "LLM/FetchModels", is_head) {
+            return Some(response);
+        }
+
+        let body = match llm_fetch_models_payload(request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/LLM/TestModels" {
+        if let Some(response) = reject_non_post_method(method, "LLM/TestModels", is_head) {
+            return Some(response);
+        }
+
+        let body = match llm_test_models_payload(request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/LLM/PreviewRequest" {
+        if let Some(response) = reject_non_post_method(method, "LLM/PreviewRequest", is_head) {
+            return Some(response);
+        }
+
+        let body = match llm_preview_request_payload(request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
     None
+}
+
+fn reject_non_post_method(method: &str, route_name: &str, is_head: bool) -> Option<Vec<u8>> {
+    if method.eq_ignore_ascii_case("POST") {
+        return None;
+    }
+
+    let body = napcat_err(-1, format!("{route_name} only accepts POST").as_str());
+    Some(napcat_response(body, is_head))
 }
 
 fn llm_settings_payload() -> Result<Value, String> {
@@ -71,6 +145,168 @@ fn llm_settings_payload() -> Result<Value, String> {
         "promptProfile": prompt_profile.name,
         "supports": supports,
         "providerCatalog": provider_catalog(),
+    }))
+}
+
+fn llm_manager_state_payload() -> Result<Value, String> {
+    let doc = load_current_app_config_doc()?;
+    let runtime = current_llm_runtime_config()?;
+    let providers = load_managed_providers_from_doc(&doc, &runtime);
+    let active_provider_id = resolve_active_provider_id(
+        doc.llm
+            .as_ref()
+            .and_then(|section| section.active_provider_id.clone()),
+        &providers,
+        runtime.base_url.as_str(),
+    );
+    let config_path = resolve_llm_config_write_path_for_web();
+
+    Ok(json!({
+        "activeProviderId": active_provider_id,
+        "configPath": config_path.display().to_string(),
+        "providerCatalog": provider_catalog(),
+        "providers": providers
+            .iter()
+            .map(|provider| serialize_managed_provider(provider, active_provider_id.as_deref()))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+fn save_llm_manager_state(request: &[u8]) -> Result<Value, String> {
+    let request_body = parse_json_body(request);
+    let save_request: WebLlmManagerSaveRequest = serde_json::from_value(request_body)
+        .map_err(|err| format!("invalid LLM manager save payload: {err}"))?;
+
+    let doc = load_current_app_config_doc()?;
+    let runtime = current_llm_runtime_config()?;
+    let providers = normalize_managed_provider_inputs(
+        save_request.providers.as_slice(),
+        runtime.timeout_ms.saturating_div(1000).max(1),
+    );
+    let active_provider_id = resolve_active_provider_id(
+        save_request.active_provider_id,
+        &providers,
+        runtime.base_url.as_str(),
+    );
+    let active_provider = active_provider_id.as_deref().and_then(|active_id| {
+        providers
+            .iter()
+            .find(|provider| provider.id.as_deref() == Some(active_id))
+    });
+    let active_model = active_provider.and_then(select_primary_model_id);
+    let fallback_model = doc
+        .llm
+        .as_ref()
+        .and_then(|section| section.model.clone())
+        .unwrap_or_else(|| runtime.model.clone());
+    let provider_urls = providers
+        .iter()
+        .filter_map(|provider| provider.base_url.clone())
+        .collect::<Vec<_>>();
+    let active_api_keys = active_provider
+        .and_then(|provider| provider.api_key.clone())
+        .map(|value| vec![value])
+        .unwrap_or_default();
+    let active_headers = active_provider
+        .and_then(|provider| provider.headers.clone())
+        .unwrap_or_default();
+    let timeout_seconds = active_provider
+        .and_then(|provider| provider.timeout_seconds)
+        .or_else(|| {
+            doc.llm
+                .as_ref()
+                .and_then(|section| section.timeout_seconds)
+                .filter(|value| *value > 0)
+        })
+        .or(Some(runtime.timeout_ms.saturating_div(1000).max(1)));
+
+    let patch = LlmConfigPatch {
+        enabled: Some(active_provider.is_some() && active_model.is_some()),
+        provider: active_provider.and_then(|provider| provider.provider.clone()),
+        base_url: active_provider.and_then(|provider| provider.base_url.clone()),
+        provider_urls: Some(provider_urls),
+        model: Some(active_model.unwrap_or(fallback_model)),
+        api_keys: Some(active_api_keys),
+        timeout_seconds,
+        headers: Some(active_headers),
+        active_provider_id,
+        providers: Some(providers),
+        ..Default::default()
+    };
+
+    let path = resolve_llm_config_write_path_for_web();
+    ensure_llm_config_file(path.as_path())?;
+    crate::config_edit::persist_llm_config(path.as_path(), &patch)?;
+    llm_manager_state_payload()
+}
+
+fn llm_fetch_models_payload(request: &[u8]) -> Result<Value, String> {
+    let request_body = parse_json_body(request);
+    let payload: WebLlmProviderActionRequest = serde_json::from_value(request_body)
+        .map_err(|err| format!("invalid LLM provider payload: {err}"))?;
+    let runtime = current_llm_runtime_config()?;
+    let provider = normalize_single_provider_input(&payload.provider, 0, runtime.timeout_ms / 1000);
+    let (models, source) = discover_models_for_provider(&provider)?;
+    let enabled_models = provider_enabled_model_set(&provider);
+    let merged_models =
+        merge_saved_and_discovered_models(&provider, models.as_slice(), &enabled_models);
+
+    Ok(json!({
+        "source": source,
+        "provider": serialize_managed_provider(&provider, None),
+        "models": merged_models,
+    }))
+}
+
+fn llm_test_models_payload(request: &[u8]) -> Result<Value, String> {
+    let request_body = parse_json_body(request);
+    let payload: WebLlmProviderActionRequest = serde_json::from_value(request_body)
+        .map_err(|err| format!("invalid LLM provider test payload: {err}"))?;
+    let runtime = current_llm_runtime_config()?;
+    let provider = normalize_single_provider_input(&payload.provider, 0, runtime.timeout_ms / 1000);
+    let model_ids =
+        resolve_models_to_test(&provider, payload.model_id.as_deref(), payload.test_all);
+    if model_ids.is_empty() {
+        return Err("no provider model available for probing".to_string());
+    }
+
+    let results = model_ids
+        .into_iter()
+        .map(|model_id| probe_single_provider_model(&provider, model_id.as_str()))
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "provider": serialize_managed_provider(&provider, None),
+        "results": results,
+    }))
+}
+
+fn llm_preview_request_payload(request: &[u8]) -> Result<Value, String> {
+    let request_body = parse_json_body(request);
+    let payload: WebLlmProviderActionRequest = serde_json::from_value(request_body)
+        .map_err(|err| format!("invalid LLM preview payload: {err}"))?;
+    let runtime = current_llm_runtime_config()?;
+    let provider = normalize_single_provider_input(&payload.provider, 0, runtime.timeout_ms / 1000);
+    let model_id = payload
+        .model_id
+        .or_else(|| select_primary_model_id(&provider))
+        .ok_or_else(|| "no model available for request preview".to_string())?;
+    let prepared = prepare_provider_request(&provider, model_id.as_str())?;
+    let preview_body = redact_preview_payload(&prepared.payload);
+
+    Ok(json!({
+        "provider": serialize_managed_provider(&provider, None),
+        "modelId": model_id,
+        "method": "POST",
+        "endpoint": prepared.endpoint,
+        "headers": preview_headers_map(
+            prepared.api_key.as_deref(),
+            prepared.auth.clone(),
+            prepared.extra_headers.as_slice(),
+        ),
+        "body": preview_body,
+        "bodyText": serde_json::to_string_pretty(&preview_body)
+            .unwrap_or_else(|err| format!("<failed to render request body: {err}>")),
     }))
 }
 
@@ -323,6 +559,7 @@ async fn send_openai_compatible_chat(
         top_k: request.top_k.or(llm_config.top_k),
         parallel_tool_calls: llm_config.parallel_tool_calls,
         reasoning_effort: reasoning_effort.map(ToString::to_string),
+        default_headers: llm_config.headers.clone(),
     };
 
     let client = OpenAiResponsesClient::from_runtime_with_api_key(&effective_config, api_key)
@@ -363,7 +600,7 @@ async fn send_openrouter_chat(
         endpoint.as_str(),
         api_key,
         ProviderAuth::Bearer,
-        &[],
+        &collect_runtime_headers(&llm_config.headers, &[]),
         &payload,
     )
     .await?;
@@ -406,8 +643,11 @@ async fn send_anthropic_chat(
         llm_config.timeout_ms,
         endpoint.as_str(),
         api_key,
-        ProviderAuth::ApiKeyHeader("x-api-key"),
-        &[("anthropic-version", DEFAULT_ANTHROPIC_API_VERSION)],
+        ProviderAuth::ApiKeyHeader("x-api-key".to_string()),
+        &collect_runtime_headers(
+            &llm_config.headers,
+            &[("anthropic-version", DEFAULT_ANTHROPIC_API_VERSION)],
+        ),
         &payload,
     )
     .await?;
@@ -452,8 +692,8 @@ async fn send_gemini_chat(
         llm_config.timeout_ms,
         endpoint.as_str(),
         api_key,
-        ProviderAuth::ApiKeyHeader("x-goog-api-key"),
-        &[],
+        ProviderAuth::ApiKeyHeader("x-goog-api-key".to_string()),
+        &collect_runtime_headers(&llm_config.headers, &[]),
         &payload,
     )
     .await?;
@@ -471,8 +711,8 @@ async fn send_json_request(
     timeout_ms: u64,
     endpoint: &str,
     api_key: &str,
-    auth: ProviderAuth<'_>,
-    extra_headers: &[(&str, &str)],
+    auth: ProviderAuth,
+    extra_headers: &[(String, String)],
     payload: &Value,
 ) -> Result<Value, String> {
     log_provider_request_body(endpoint, payload);
@@ -487,7 +727,7 @@ async fn send_json_request(
     };
 
     for (name, value) in extra_headers {
-        request = request.header(*name, *value);
+        request = request.header(name, value);
     }
 
     let response = request
@@ -506,6 +746,95 @@ async fn send_json_request(
     }
 
     serde_json::from_str(&body).map_err(|err| format!("upstream returned invalid JSON: {err}"))
+}
+
+async fn send_json_request_with_optional_auth(
+    timeout_ms: u64,
+    endpoint: &str,
+    api_key: Option<&str>,
+    auth: Option<ProviderAuth>,
+    extra_headers: &[(String, String)],
+    payload: &Value,
+) -> Result<Value, String> {
+    let mut request = build_provider_http_client(timeout_ms)?
+        .post(endpoint)
+        .header(reqwest::header::CONTENT_TYPE, "application/json");
+    request = apply_provider_auth(request, api_key, auth)?;
+    for (name, value) in extra_headers {
+        request = request.header(name, value);
+    }
+
+    log_provider_request_body(endpoint, payload);
+    let response = request
+        .json(payload)
+        .send()
+        .await
+        .map_err(|err| format!("failed to call upstream LLM provider: {err}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("failed to read upstream LLM response: {err}"))?;
+
+    if !status.is_success() {
+        return Err(summarize_llm_upstream_error(status, body.as_str()));
+    }
+
+    serde_json::from_str(&body).map_err(|err| format!("upstream returned invalid JSON: {err}"))
+}
+
+async fn send_json_get_request(
+    timeout_ms: u64,
+    endpoint: &str,
+    api_key: Option<&str>,
+    auth: Option<ProviderAuth>,
+    extra_headers: &[(String, String)],
+) -> Result<Value, String> {
+    let mut request = build_provider_http_client(timeout_ms)?.get(endpoint);
+    request = apply_provider_auth(request, api_key, auth)?;
+    for (name, value) in extra_headers {
+        request = request.header(name, value);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|err| format!("failed to call upstream LLM provider: {err}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("failed to read upstream LLM response: {err}"))?;
+
+    if !status.is_success() {
+        return Err(summarize_llm_upstream_error(status, body.as_str()));
+    }
+
+    serde_json::from_str(&body).map_err(|err| format!("upstream returned invalid JSON: {err}"))
+}
+
+fn apply_provider_auth(
+    request: reqwest::RequestBuilder,
+    api_key: Option<&str>,
+    auth: Option<ProviderAuth>,
+) -> Result<reqwest::RequestBuilder, String> {
+    match auth {
+        Some(ProviderAuth::Bearer) => {
+            let api_key = api_key
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "provider api key is required for this action".to_string())?;
+            Ok(request.bearer_auth(api_key))
+        }
+        Some(ProviderAuth::ApiKeyHeader(name)) => {
+            let api_key = api_key
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "provider api key is required for this action".to_string())?;
+            Ok(request.header(name, api_key))
+        }
+        None => Ok(request),
+    }
 }
 
 fn log_provider_request_body(endpoint: &str, payload: &Value) {
@@ -1169,6 +1498,7 @@ struct WebLlmRuntimeConfig {
     top_k: Option<u32>,
     parallel_tool_calls: bool,
     reasoning_effort: Option<String>,
+    default_headers: HashMap<String, String>,
 }
 
 impl OpenAiRuntimeConfig for WebLlmRuntimeConfig {
@@ -1211,6 +1541,10 @@ impl OpenAiRuntimeConfig for WebLlmRuntimeConfig {
     fn reasoning_effort(&self) -> Option<&str> {
         self.reasoning_effort.as_deref()
     }
+
+    fn default_headers(&self) -> Option<&HashMap<String, String>> {
+        Some(&self.default_headers)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1226,9 +1560,10 @@ struct ParsedDataUrl {
     data: String,
 }
 
-enum ProviderAuth<'a> {
+#[derive(Debug, Clone)]
+enum ProviderAuth {
     Bearer,
-    ApiKeyHeader(&'a str),
+    ApiKeyHeader(String),
 }
 
 fn pick_llm_api_key(llm_config: &crate::app_config::LlmRuntimeConfig) -> Result<String, String> {
@@ -1363,6 +1698,835 @@ fn compose_chat_fallback_prompt(request: &WebLlmChatRequest, soul: &str) -> Resu
     sections.push(format!("Conversation transcript:\n{}", transcript.trim()));
 
     Ok(sections.join("\n\n"))
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WebLlmManagerSaveRequest {
+    #[serde(default)]
+    active_provider_id: Option<String>,
+    #[serde(default)]
+    providers: Vec<WebLlmManagedProviderPayload>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WebLlmProviderActionRequest {
+    #[serde(default)]
+    provider: WebLlmManagedProviderPayload,
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    test_all: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WebLlmManagedProviderPayload {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    provider_id: Option<String>,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    api_key: String,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+    #[serde(default)]
+    models: Vec<WebLlmManagedModelPayload>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WebLlmManagedModelPayload {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedProviderRequest {
+    endpoint: String,
+    auth: Option<ProviderAuth>,
+    api_key: Option<String>,
+    extra_headers: Vec<(String, String)>,
+    payload: Value,
+}
+
+fn resolve_llm_config_write_path_for_web() -> std::path::PathBuf {
+    resolve_llm_config_path().unwrap_or_else(resolve_default_llm_config_path)
+}
+
+fn load_managed_providers_from_doc(
+    doc: &crate::app_config::AppConfigDoc,
+    runtime: &crate::app_config::LlmRuntimeConfig,
+) -> Vec<LlmManagedProviderConfig> {
+    if let Some(saved) = doc
+        .llm
+        .as_ref()
+        .and_then(|section| section.providers.clone())
+        .filter(|providers| !providers.is_empty())
+    {
+        let fallback_timeout = doc
+            .llm
+            .as_ref()
+            .and_then(|section| section.timeout_seconds)
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| runtime.timeout_ms.saturating_div(1000).max(1));
+        return saved
+            .iter()
+            .enumerate()
+            .map(|(index, provider)| {
+                enrich_saved_provider(provider, index, fallback_timeout, runtime)
+            })
+            .collect();
+    }
+
+    vec![LlmManagedProviderConfig {
+        id: Some(derive_provider_entry_id(
+            None,
+            Some(runtime.provider.as_str()),
+            runtime.base_url.as_str(),
+            0,
+        )),
+        label: Some(
+            provider_label(detect_provider_id(runtime.base_url.as_str()).as_str()).to_string(),
+        ),
+        provider: Some(detect_provider_id(runtime.base_url.as_str())),
+        base_url: Some(normalize_base_url(runtime.base_url.as_str())),
+        api_key: runtime.api_keys.first().cloned(),
+        timeout_seconds: Some(runtime.timeout_ms.saturating_div(1000).max(1)),
+        headers: Some(runtime.headers.clone()),
+        models: Some(vec![LlmManagedModelConfig {
+            id: Some(runtime.model.clone()),
+            enabled: Some(true),
+        }]),
+    }]
+}
+
+fn enrich_saved_provider(
+    provider: &LlmManagedProviderConfig,
+    index: usize,
+    fallback_timeout_seconds: u64,
+    runtime: &crate::app_config::LlmRuntimeConfig,
+) -> LlmManagedProviderConfig {
+    let base_url = provider
+        .base_url
+        .as_deref()
+        .map(normalize_base_url)
+        .filter(|value| !value.is_empty())
+        .or_else(|| Some(normalize_base_url(runtime.base_url.as_str())));
+    let provider_id = provider
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .or_else(|| base_url.as_deref().map(detect_provider_id));
+    let id = Some(derive_provider_entry_id(
+        provider.id.as_deref(),
+        provider.label.as_deref(),
+        base_url.as_deref().unwrap_or(runtime.base_url.as_str()),
+        index,
+    ));
+    let label = normalize_optional_string(provider.label.as_deref())
+        .or_else(|| id.clone())
+        .or_else(|| {
+            provider_id
+                .as_deref()
+                .map(provider_label)
+                .map(ToString::to_string)
+        });
+    let api_key = normalize_optional_string(provider.api_key.as_deref()).or_else(|| {
+        if base_url.as_deref() == Some(runtime.base_url.as_str()) {
+            runtime.api_keys.first().cloned()
+        } else {
+            None
+        }
+    });
+    let headers = provider.headers.clone().unwrap_or_else(|| {
+        if base_url.as_deref() == Some(runtime.base_url.as_str()) {
+            runtime.headers.clone()
+        } else {
+            HashMap::new()
+        }
+    });
+    let models = provider
+        .models
+        .clone()
+        .filter(|models| !models.is_empty())
+        .or_else(|| {
+            if base_url.as_deref() == Some(runtime.base_url.as_str()) {
+                Some(vec![LlmManagedModelConfig {
+                    id: Some(runtime.model.clone()),
+                    enabled: Some(true),
+                }])
+            } else {
+                None
+            }
+        });
+
+    LlmManagedProviderConfig {
+        id,
+        label,
+        provider: provider_id,
+        base_url,
+        api_key,
+        timeout_seconds: provider
+            .timeout_seconds
+            .filter(|value| *value > 0)
+            .or(Some(fallback_timeout_seconds.max(1))),
+        headers: Some(headers),
+        models,
+    }
+}
+
+fn resolve_active_provider_id(
+    explicit_active_provider_id: Option<String>,
+    providers: &[LlmManagedProviderConfig],
+    active_base_url: &str,
+) -> Option<String> {
+    let explicit_active_provider_id = explicit_active_provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(explicit_active_provider_id) = explicit_active_provider_id
+        && providers
+            .iter()
+            .any(|provider| provider.id.as_deref() == Some(explicit_active_provider_id))
+    {
+        return Some(explicit_active_provider_id.to_string());
+    }
+
+    providers
+        .iter()
+        .find(|provider| provider.base_url.as_deref() == Some(active_base_url))
+        .and_then(|provider| provider.id.clone())
+        .or_else(|| providers.first().and_then(|provider| provider.id.clone()))
+}
+
+fn serialize_managed_provider(
+    provider: &LlmManagedProviderConfig,
+    active_provider_id: Option<&str>,
+) -> Value {
+    let provider_id = provider
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| provider.base_url.as_deref().map(detect_provider_id))
+        .unwrap_or_else(|| "openai-compatible".to_string());
+    let label = provider
+        .label
+        .clone()
+        .or_else(|| provider.id.clone())
+        .unwrap_or_else(|| provider_label(provider_id.as_str()).to_string());
+    let headers = provider.headers.clone().unwrap_or_default();
+    let models = provider
+        .models
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|model| {
+            model.id.map(|id| {
+                json!({
+                    "id": id,
+                    "enabled": model.enabled.unwrap_or(false),
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "id": provider.id.clone().unwrap_or_default(),
+        "label": label,
+        "providerId": provider_id.clone(),
+        "providerLabel": provider_label(provider_id.as_str()),
+        "baseUrl": provider.base_url.clone().unwrap_or_default(),
+        "apiKey": provider.api_key.clone().unwrap_or_default(),
+        "timeoutSeconds": provider.timeout_seconds.unwrap_or(120),
+        "headers": headers,
+        "models": models,
+        "active": active_provider_id.is_some_and(|active_id| provider.id.as_deref() == Some(active_id)),
+    })
+}
+
+fn normalize_managed_provider_inputs(
+    providers: &[WebLlmManagedProviderPayload],
+    fallback_timeout_seconds: u64,
+) -> Vec<LlmManagedProviderConfig> {
+    providers
+        .iter()
+        .enumerate()
+        .map(|(index, provider)| {
+            normalize_single_provider_input(provider, index, fallback_timeout_seconds)
+        })
+        .collect()
+}
+
+fn normalize_single_provider_input(
+    provider: &WebLlmManagedProviderPayload,
+    index: usize,
+    fallback_timeout_seconds: u64,
+) -> LlmManagedProviderConfig {
+    let base_url = normalize_base_url(provider.base_url.as_str());
+    let provider_id = provider
+        .provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_else(|| detect_provider_id(base_url.as_str()));
+    let id = derive_provider_entry_id(
+        Some(provider.id.as_str()),
+        Some(provider.label.as_str()),
+        base_url.as_str(),
+        index,
+    );
+    let label =
+        normalize_optional_string(Some(provider.label.as_str())).unwrap_or_else(|| id.clone());
+    let mut headers = provider
+        .headers
+        .iter()
+        .filter_map(|(key, value)| {
+            let key = key.trim().to_string();
+            let value = value.trim().to_string();
+            if key.is_empty() || value.is_empty() {
+                None
+            } else {
+                Some((key, value))
+            }
+        })
+        .collect::<HashMap<_, _>>();
+    if headers.is_empty() {
+        headers = HashMap::new();
+    }
+    let models = provider
+        .models
+        .iter()
+        .filter_map(|model| {
+            let id = model.id.trim();
+            if id.is_empty() {
+                None
+            } else {
+                Some(LlmManagedModelConfig {
+                    id: Some(id.to_string()),
+                    enabled: Some(model.enabled),
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+
+    LlmManagedProviderConfig {
+        id: Some(id),
+        label: Some(label),
+        provider: Some(provider_id),
+        base_url: Some(base_url),
+        api_key: normalize_optional_string(Some(provider.api_key.as_str())),
+        timeout_seconds: Some(
+            provider
+                .timeout_seconds
+                .unwrap_or(fallback_timeout_seconds.max(1))
+                .max(1),
+        ),
+        headers: Some(headers),
+        models: Some(models),
+    }
+}
+
+fn derive_provider_entry_id(
+    explicit_id: Option<&str>,
+    label: Option<&str>,
+    base_url: &str,
+    index: usize,
+) -> String {
+    let raw = explicit_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| label.map(str::trim).filter(|value| !value.is_empty()))
+        .unwrap_or(base_url);
+    let slug = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if slug.is_empty() {
+        format!("provider-{}", index + 1)
+    } else {
+        slug
+    }
+}
+
+fn normalize_optional_string(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn provider_enabled_model_set(
+    provider: &LlmManagedProviderConfig,
+) -> std::collections::HashSet<String> {
+    provider
+        .models
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .filter_map(|model| {
+            model
+                .enabled
+                .unwrap_or(false)
+                .then(|| model.id.clone())
+                .flatten()
+        })
+        .collect()
+}
+
+fn merge_saved_and_discovered_models(
+    provider: &LlmManagedProviderConfig,
+    discovered_models: &[String],
+    enabled_models: &std::collections::HashSet<String>,
+) -> Vec<Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::new();
+
+    for model_id in discovered_models {
+        if seen.insert(model_id.clone()) {
+            merged.push(json!({
+                "id": model_id,
+                "enabled": enabled_models.contains(model_id),
+            }));
+        }
+    }
+
+    if let Some(saved_models) = provider.models.as_ref() {
+        for saved_model in saved_models {
+            let Some(model_id) = saved_model.id.as_ref() else {
+                continue;
+            };
+            if seen.insert(model_id.clone()) {
+                merged.push(json!({
+                    "id": model_id,
+                    "enabled": saved_model.enabled.unwrap_or(false),
+                }));
+            }
+        }
+    }
+
+    merged
+}
+
+fn resolve_models_to_test(
+    provider: &LlmManagedProviderConfig,
+    explicit_model_id: Option<&str>,
+    test_all: bool,
+) -> Vec<String> {
+    if let Some(explicit_model_id) = explicit_model_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return vec![explicit_model_id.to_string()];
+    }
+
+    if test_all {
+        return provider
+            .models
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter_map(|model| model.id.clone())
+            .collect();
+    }
+
+    select_primary_model_id(provider).into_iter().collect()
+}
+
+fn select_primary_model_id(provider: &LlmManagedProviderConfig) -> Option<String> {
+    provider
+        .models
+        .as_ref()
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|model| model.enabled.unwrap_or(false))
+                .or_else(|| models.first())
+        })
+        .and_then(|model| model.id.clone())
+}
+
+fn discover_models_for_provider(
+    provider: &LlmManagedProviderConfig,
+) -> Result<(Vec<String>, &'static str), String> {
+    let provider_id = provider
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| provider.base_url.as_deref().map(detect_provider_id))
+        .unwrap_or_else(|| "openai-compatible".to_string());
+
+    match provider_id.as_str() {
+        "openai" | "openai-compatible" | "openrouter" | "kimi" | "qwen" => {
+            match run_async_for_web_host(fetch_openai_style_models(provider, provider_id.as_str()))
+            {
+                Ok(models) => Ok((models, "remote")),
+                Err(_) => Ok((model_options_for_provider(provider_id.as_str()), "catalog")),
+            }
+        }
+        _ => Ok((model_options_for_provider(provider_id.as_str()), "catalog")),
+    }
+}
+
+async fn fetch_openai_style_models(
+    provider: &LlmManagedProviderConfig,
+    provider_id: &str,
+) -> Result<Vec<String>, String> {
+    let base_url = provider
+        .base_url
+        .as_deref()
+        .map(normalize_base_url)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "provider base_url is empty".to_string())?;
+    let endpoint = join_api_endpoint(base_url.as_str(), "models");
+    let auth = if provider_id == "openrouter" && provider.api_key.as_deref().is_none() {
+        None
+    } else {
+        Some(ProviderAuth::Bearer)
+    };
+    let runtime_headers = provider.headers.clone().unwrap_or_default();
+    let response = send_json_get_request(
+        provider_timeout_ms(provider),
+        endpoint.as_str(),
+        provider.api_key.as_deref(),
+        auth,
+        &collect_runtime_headers(&runtime_headers, &[]),
+    )
+    .await?;
+    let models = response
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if models.is_empty() {
+        return Err("provider returned an empty model list".to_string());
+    }
+    Ok(models)
+}
+
+fn provider_timeout_ms(provider: &LlmManagedProviderConfig) -> u64 {
+    provider
+        .timeout_seconds
+        .filter(|value| *value > 0)
+        .unwrap_or(120)
+        .saturating_mul(1000)
+}
+
+fn probe_single_provider_model(provider: &LlmManagedProviderConfig, model_id: &str) -> Value {
+    let started_at = Instant::now();
+    let prepared = prepare_provider_request(provider, model_id);
+    match prepared {
+        Ok(prepared) => {
+            let result = run_async_for_web_host(execute_prepared_provider_request(
+                provider_timeout_ms(provider),
+                &prepared,
+            ));
+            match result {
+                Ok(_) => json!({
+                    "modelId": model_id,
+                    "ok": true,
+                    "latencyMs": started_at.elapsed().as_millis() as u64,
+                }),
+                Err(err) => json!({
+                    "modelId": model_id,
+                    "ok": false,
+                    "latencyMs": started_at.elapsed().as_millis() as u64,
+                    "error": err,
+                }),
+            }
+        }
+        Err(err) => json!({
+            "modelId": model_id,
+            "ok": false,
+            "latencyMs": started_at.elapsed().as_millis() as u64,
+            "error": err,
+        }),
+    }
+}
+
+fn prepare_provider_request(
+    provider: &LlmManagedProviderConfig,
+    model_id: &str,
+) -> Result<PreparedProviderRequest, String> {
+    let provider_id = provider
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| provider.base_url.as_deref().map(detect_provider_id))
+        .unwrap_or_else(|| "openai-compatible".to_string());
+    let base_url = provider
+        .base_url
+        .as_deref()
+        .map(normalize_base_url)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "provider base_url is empty".to_string())?;
+    let prompt_profile = current_active_prompt_profile()?;
+    let chat_request = build_probe_chat_request();
+    let runtime = WebLlmRuntimeConfig {
+        base_url: base_url.clone(),
+        model: model_id.to_string(),
+        timeout_ms: provider_timeout_ms(provider),
+        system_prompt: None,
+        stream: false,
+        temperature: None,
+        top_p: None,
+        top_k: None,
+        parallel_tool_calls: false,
+        reasoning_effort: None,
+        default_headers: provider.headers.clone().unwrap_or_default(),
+    };
+
+    match provider_id.as_str() {
+        "openrouter" => Ok(PreparedProviderRequest {
+            endpoint: join_api_endpoint(base_url.as_str(), "chat/completions"),
+            auth: Some(ProviderAuth::Bearer),
+            api_key: provider.api_key.clone(),
+            extra_headers: collect_runtime_headers(&runtime.default_headers, &[]),
+            payload: build_openrouter_request(
+                &chat_request,
+                None,
+                prompt_profile.soul.as_str(),
+                model_id,
+                None,
+                None,
+                None,
+            )?,
+        }),
+        "anthropic" => Ok(PreparedProviderRequest {
+            endpoint: join_api_endpoint(base_url.as_str(), "v1/messages"),
+            auth: Some(ProviderAuth::ApiKeyHeader("x-api-key".to_string())),
+            api_key: provider.api_key.clone(),
+            extra_headers: collect_runtime_headers(
+                &runtime.default_headers,
+                &[("anthropic-version", DEFAULT_ANTHROPIC_API_VERSION)],
+            ),
+            payload: build_anthropic_request(
+                &chat_request,
+                None,
+                prompt_profile.soul.as_str(),
+                model_id,
+                None,
+                None,
+                None,
+                None,
+            )?,
+        }),
+        "google-gemini" => Ok(PreparedProviderRequest {
+            endpoint: join_api_endpoint(
+                base_url.as_str(),
+                format!("models/{model_id}:generateContent").as_str(),
+            ),
+            auth: Some(ProviderAuth::ApiKeyHeader("x-goog-api-key".to_string())),
+            api_key: provider.api_key.clone(),
+            extra_headers: collect_runtime_headers(&runtime.default_headers, &[]),
+            payload: build_gemini_request(
+                &chat_request,
+                None,
+                prompt_profile.soul.as_str(),
+                model_id,
+                None,
+                None,
+                None,
+                None,
+            )?,
+        }),
+        _ => Ok(PreparedProviderRequest {
+            endpoint: join_api_endpoint(base_url.as_str(), "responses"),
+            auth: Some(ProviderAuth::Bearer),
+            api_key: provider.api_key.clone(),
+            extra_headers: collect_runtime_headers(&runtime.default_headers, &[]),
+            payload: build_openai_compatible_request(
+                &chat_request,
+                &runtime,
+                prompt_profile.soul.as_str(),
+                provider_id.as_str(),
+            )?,
+        }),
+    }
+}
+
+fn build_probe_chat_request() -> WebLlmChatRequest {
+    WebLlmChatRequest {
+        message: "reply with pong only".to_string(),
+        messages: vec![WebLlmMessage {
+            role: "user".to_string(),
+            content: "reply with pong only".to_string(),
+            attachments: Vec::new(),
+        }],
+        attachments: Vec::new(),
+        base_url: None,
+        model: None,
+        reasoning_effort: None,
+        temperature: None,
+        top_p: None,
+        top_k: None,
+    }
+}
+
+fn build_openai_compatible_request(
+    request: &WebLlmChatRequest,
+    runtime: &WebLlmRuntimeConfig,
+    soul: &str,
+    provider_id: &str,
+) -> Result<Value, String> {
+    let mut body = Map::new();
+    body.insert("model".to_string(), Value::String(runtime.model.clone()));
+    let responses_input = build_responses_input(request, soul, provider_id)?;
+    body.insert("input".to_string(), responses_input);
+    if let Some(instructions) = runtime
+        .system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body.insert(
+            "instructions".to_string(),
+            Value::String(instructions.to_string()),
+        );
+    }
+    if let Some(temperature) = runtime.temperature {
+        body.insert("temperature".to_string(), json!(temperature));
+    }
+    if let Some(top_p) = runtime.top_p {
+        body.insert("top_p".to_string(), json!(top_p));
+    }
+    if let Some(top_k) = runtime.top_k.filter(|_| {
+        !runtime
+            .base_url
+            .to_ascii_lowercase()
+            .contains("api.openai.com")
+    }) {
+        body.insert("top_k".to_string(), json!(top_k));
+    }
+    if let Some(reasoning_effort) = runtime.reasoning_effort.as_deref() {
+        body.insert(
+            "reasoning".to_string(),
+            json!({ "effort": reasoning_effort }),
+        );
+    }
+    Ok(Value::Object(body))
+}
+
+async fn execute_prepared_provider_request(
+    timeout_ms: u64,
+    prepared: &PreparedProviderRequest,
+) -> Result<Value, String> {
+    send_json_request_with_optional_auth(
+        timeout_ms,
+        prepared.endpoint.as_str(),
+        prepared.api_key.as_deref(),
+        prepared.auth.clone(),
+        prepared.extra_headers.as_slice(),
+        &prepared.payload,
+    )
+    .await
+}
+
+fn collect_runtime_headers(
+    headers: &HashMap<String, String>,
+    extra_headers: &[(&str, &str)],
+) -> Vec<(String, String)> {
+    let mut collected = headers
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    collected.extend(
+        extra_headers
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string())),
+    );
+    collected
+}
+
+fn preview_headers_map(
+    api_key: Option<&str>,
+    auth: Option<ProviderAuth>,
+    extra_headers: &[(String, String)],
+) -> HashMap<String, String> {
+    let mut headers = HashMap::new();
+    if let Some(auth) = auth {
+        match auth {
+            ProviderAuth::Bearer => {
+                headers.insert(
+                    "Authorization".to_string(),
+                    format!("Bearer {}", mask_secret(api_key.unwrap_or_default())),
+                );
+            }
+            ProviderAuth::ApiKeyHeader(name) => {
+                headers.insert(name, mask_secret(api_key.unwrap_or_default()));
+            }
+        }
+    }
+    for (name, value) in extra_headers {
+        headers.insert(name.clone(), value.clone());
+    }
+    headers
+}
+
+fn mask_secret(secret: &str) -> String {
+    let trimmed = secret.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let prefix: String = trimmed.chars().take(6).collect();
+    let suffix: String = trimmed
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("{prefix}***{suffix}")
+}
+
+fn redact_preview_payload(payload: &Value) -> Value {
+    match payload {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    let redacted = match key.as_str() {
+                        "instructions" | "text" => Value::String("<redacted>".to_string()),
+                        _ => redact_preview_payload(value),
+                    };
+                    (key.clone(), redacted)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_preview_payload).collect()),
+        _ => payload.clone(),
+    }
 }
 
 fn effective_messages(request: &WebLlmChatRequest) -> Vec<WebLlmMessage> {
@@ -1694,7 +2858,7 @@ fn provider_catalog() -> Vec<Value> {
             "authScheme": "bearer",
             "defaultEndpoint": "/responses",
             "baseUrls": [{ "label": "OpenAI Public", "url": "https://api.openai.com/v1", "default": true }],
-            "modelDiscovery": "static",
+            "modelDiscovery": "hybrid",
             "sampleModels": ["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5.1", "gpt-4.1"],
             "parameterSupport": {
                 "temperature": "supported",
@@ -1781,7 +2945,7 @@ fn provider_catalog() -> Vec<Value> {
             "authScheme": "bearer",
             "defaultEndpoint": "/chat/completions",
             "baseUrls": [{ "label": "OpenRouter", "url": "https://openrouter.ai/api/v1", "default": true }],
-            "modelDiscovery": "remote",
+            "modelDiscovery": "hybrid",
             "modelListEndpoint": "https://openrouter.ai/api/v1/models",
             "sampleModels": ["openai/gpt-5", "anthropic/claude-sonnet-4", "google/gemini-2.5-pro"],
             "parameterSupport": {
@@ -1809,7 +2973,7 @@ fn provider_catalog() -> Vec<Value> {
             "authScheme": "bearer",
             "defaultEndpoint": "/chat/completions",
             "baseUrls": [{ "label": "Moonshot Public", "url": "https://api.moonshot.ai/v1", "default": true }],
-            "modelDiscovery": "static",
+            "modelDiscovery": "hybrid",
             "sampleModels": ["kimi-k2.5", "kimi-k2-thinking", "kimi-latest-8k", "kimi-latest-128k"],
             "parameterSupport": {
                 "temperature": "conditional",
@@ -1841,7 +3005,7 @@ fn provider_catalog() -> Vec<Value> {
                 { "label": "Singapore", "url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "region": "ap-southeast-1" },
                 { "label": "US Virginia", "url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "region": "us-east-1" }
             ],
-            "modelDiscovery": "static",
+            "modelDiscovery": "hybrid",
             "sampleModels": ["qwen-max", "qwen-plus", "qwen-turbo", "qwen3-max"],
             "parameterSupport": {
                 "temperature": "conditional",
@@ -2115,5 +3279,99 @@ mod tests {
         assert!(prompt.contains("user:\n你好"));
         assert!(prompt.contains("assistant:\n你好！有什么我可以帮助你的吗？"));
         assert!(prompt.contains("user:\n0.9的9循环和1是否相等"));
+    }
+
+    #[test]
+    fn preview_payload_redacts_prompt_like_text_fields() {
+        let payload = json!({
+            "instructions": "secret system prompt",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "input_text", "text": "secret composed prompt" }
+                    ]
+                }
+            ],
+            "model": "gpt-5"
+        });
+
+        let redacted = redact_preview_payload(&payload);
+
+        assert_eq!(redacted["instructions"], "<redacted>");
+        assert_eq!(redacted["input"][0]["content"][0]["text"], "<redacted>");
+        assert_eq!(redacted["model"], "gpt-5");
+    }
+
+    #[test]
+    fn normalize_single_provider_input_keeps_explicit_provider_and_trims_headers() {
+        let provider = WebLlmManagedProviderPayload {
+            id: " Gemini Main ".to_string(),
+            label: " Gemini Main ".to_string(),
+            provider_id: Some("google-gemini".to_string()),
+            base_url: " https://generativelanguage.googleapis.com/v1beta ".to_string(),
+            api_key: " secret ".to_string(),
+            timeout_seconds: Some(0),
+            headers: HashMap::from([
+                (" X-Test ".to_string(), " ok ".to_string()),
+                (" ".to_string(), "ignored".to_string()),
+            ]),
+            models: vec![WebLlmManagedModelPayload {
+                id: " gemini-2.5-pro ".to_string(),
+                enabled: true,
+            }],
+        };
+
+        let normalized = normalize_single_provider_input(&provider, 0, 120);
+
+        assert_eq!(normalized.id.as_deref(), Some("gemini-main"));
+        assert_eq!(normalized.label.as_deref(), Some("Gemini Main"));
+        assert_eq!(normalized.provider.as_deref(), Some("google-gemini"));
+        assert_eq!(
+            normalized.base_url.as_deref(),
+            Some("https://generativelanguage.googleapis.com/v1beta")
+        );
+        assert_eq!(normalized.api_key.as_deref(), Some("secret"));
+        assert_eq!(normalized.timeout_seconds, Some(1));
+        assert_eq!(
+            normalized
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("X-Test"))
+                .map(String::as_str),
+            Some("ok")
+        );
+        assert_eq!(
+            normalized
+                .models
+                .as_ref()
+                .and_then(|models| models.first())
+                .and_then(|model| model.id.as_deref()),
+            Some("gemini-2.5-pro")
+        );
+    }
+
+    #[test]
+    fn discover_models_for_provider_reports_catalog_when_remote_lookup_falls_back() {
+        let provider = LlmManagedProviderConfig {
+            provider: Some("openai".to_string()),
+            base_url: Some(String::new()),
+            ..Default::default()
+        };
+
+        let (models, source) =
+            discover_models_for_provider(&provider).expect("fallback discovery should succeed");
+
+        assert_eq!(source, "catalog");
+        assert!(models.iter().any(|model| model == "gpt-5"));
+    }
+
+    #[test]
+    fn reject_non_post_method_returns_method_error_response() {
+        let response =
+            reject_non_post_method("GET", "LLM/SaveManagerState", false).expect("response");
+        let text = String::from_utf8(response).expect("response should be utf8");
+        assert!(text.contains("LLM/SaveManagerState only accepts POST"));
+        assert!(reject_non_post_method("POST", "LLM/SaveManagerState", false).is_none());
     }
 }

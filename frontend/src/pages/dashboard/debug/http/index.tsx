@@ -1,276 +1,934 @@
 import { Button } from '@heroui/button';
+import { Input, Textarea } from '@heroui/input';
+import { Select, SelectItem } from '@heroui/select';
+import { Switch } from '@heroui/switch';
 import { useLocalStorage } from '@uidotdev/usehooks';
 import clsx from 'clsx';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { IoClose } from 'react-icons/io5';
-import { TbSearch } from 'react-icons/tb';
+import { useEffect, useMemo, useState } from 'react';
+import toast from 'react-hot-toast';
+import {
+  LuCircleCheck,
+  LuCircleX,
+  LuCopy,
+  LuFlaskConical,
+  LuLoaderCircle,
+  LuPlus,
+  LuRefreshCw,
+  LuSave,
+  LuTrash2,
+  LuWandSparkles,
+} from 'react-icons/lu';
 
 import key from '@/const/key';
-import { fetchOneBotHttpApi, OneBotHttpApiPath } from '@/const/ob_api';
-import type { OneBotHttpApi } from '@/const/ob_api';
+import LlmManager, {
+  type LlmManagedProvider,
+  type LlmManagerPreviewResponse,
+  type LlmManagerState,
+  type LlmModelTestResult,
+  type LlmProviderCatalogItem,
+} from '@/controllers/llm_manager';
 
-import OneBotApiDebug from '@/components/onebot/api/debug';
-import CommandPalette from '@/components/command_palette';
-import type { CommandPaletteCommand, CommandPaletteExecuteMode } from '@/components/command_palette';
+const DEFAULT_TIMEOUT_SECONDS = 120;
 
-import { generateDefaultFromTypeBox } from '@/utils/typebox';
-import type { OneBotApiDebugRef } from '@/components/onebot/api/debug';
-import { buildBearerAuthHeader } from '@/utils/auth';
-import { resolveApiUrl } from '@/utils/runtime';
+function headersToText (headers: Record<string, string>) {
+  return Object.entries(headers)
+    .map(([headerKey, value]) => `${headerKey}: ${value}`)
+    .join('\n');
+}
 
-export default function HttpDebug () {
-  const [activeApi, setActiveApi] = useState<OneBotHttpApiPath | null>(null);
-  const [openApis, setOpenApis] = useState<OneBotHttpApiPath[]>([]);
-  const [oneBotHttpApi, setOneBotHttpApi] = useState<OneBotHttpApi>({});
+function parseHeadersText (raw: string) {
+  const entries = raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const separatorIndex = line.indexOf(':');
+      if (separatorIndex < 0) {
+        return null;
+      }
+      const headerKey = line.slice(0, separatorIndex).trim();
+      const value = line.slice(separatorIndex + 1).trim();
+      if (!headerKey || !value) {
+        return null;
+      }
+      return [headerKey, value] as const;
+    })
+    .filter((entry): entry is readonly [string, string] => entry !== null);
+
+  return Object.fromEntries(entries);
+}
+
+function normalizeProviderId (input: string) {
+  const normalized = input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return normalized || `provider-${Date.now()}`;
+}
+
+function getProviderCatalogItem (
+  providerId: string | undefined,
+  catalog: LlmProviderCatalogItem[]
+) {
+  if (!providerId) {
+    return undefined;
+  }
+  return catalog.find((item) => item.id === providerId);
+}
+
+function getDefaultBaseUrl (catalogItem?: LlmProviderCatalogItem) {
+  return catalogItem?.baseUrls.find((item) => item.default)?.url
+    ?? catalogItem?.baseUrls[0]?.url
+    ?? '';
+}
+
+function applyCatalogMetadata (
+  provider: LlmManagedProvider,
+  catalog: LlmProviderCatalogItem[]
+) {
+  const catalogItem = getProviderCatalogItem(provider.providerId, catalog);
+  const fallbackBaseUrl = getDefaultBaseUrl(catalogItem);
+  return {
+    ...provider,
+    providerId: catalogItem?.id ?? provider.providerId ?? 'openai-compatible',
+    providerLabel: catalogItem?.label ?? provider.providerLabel ?? provider.label,
+    baseUrl: provider.baseUrl.trim() || fallbackBaseUrl,
+  };
+}
+
+function buildNewProvider (
+  catalog: LlmProviderCatalogItem[],
+  index: number
+): LlmManagedProvider {
+  const firstCatalog = catalog[0];
+  const defaultBaseUrl = getDefaultBaseUrl(firstCatalog);
+  const defaultProviderId = firstCatalog?.id ?? 'openai-compatible';
+  const defaultLabel = firstCatalog?.label ?? `Provider ${index}`;
+  const id = normalizeProviderId(defaultLabel);
+
+  return {
+    id,
+    label: defaultLabel,
+    providerId: defaultProviderId,
+    providerLabel: firstCatalog?.label ?? defaultLabel,
+    baseUrl: defaultBaseUrl,
+    apiKey: '',
+    timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
+    headers: {},
+    models: [],
+    active: false,
+  };
+}
+
+function normalizeManagerState (
+  state: LlmManagerState,
+  catalog: LlmProviderCatalogItem[]
+) {
+  const providers = (state.providers.length > 0
+    ? state.providers
+    : [buildNewProvider(catalog, 1)])
+    .map((provider) => applyCatalogMetadata(provider, catalog));
+  const nextActiveProviderId = providers.some((provider) => provider.id === state.activeProviderId)
+    ? state.activeProviderId
+    : providers[0]?.id;
+
+  return {
+    providers,
+    activeProviderId: nextActiveProviderId,
+    configPath: state.configPath,
+    providerCatalog: state.providerCatalog,
+  };
+}
+
+function buildProviderPayload (
+  provider: LlmManagedProvider,
+  catalog: LlmProviderCatalogItem[]
+) {
+  return applyCatalogMetadata(provider, catalog);
+}
+
+function formatLatency (result: LlmModelTestResult) {
+  return `${result.modelId} ${result.latencyMs}ms`;
+}
+
+export default function LlmManagerPage () {
   const [backgroundImage] = useLocalStorage<string>(key.backgroundImage, '');
   const hasBackground = !!backgroundImage;
 
-  const [adapterName, setAdapterName] = useState<string>('');
-  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [testingAll, setTestingAll] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
 
-  const debugRefs = useRef(new Map<string, OneBotApiDebugRef>());
-  const [pendingRun, setPendingRun] = useState<{ path: OneBotHttpApiPath; body: string; } | null>(null);
+  const [providerCatalog, setProviderCatalog] = useState<LlmProviderCatalogItem[]>([]);
+  const [configPath, setConfigPath] = useState('');
+  const [providers, setProviders] = useState<LlmManagedProvider[]>([]);
+  const [activeProviderId, setActiveProviderId] = useState<string>();
+  const [selectedProviderId, setSelectedProviderId] = useState<string>();
+  const [headersDraft, setHeadersDraft] = useState('');
+  const [newModelId, setNewModelId] = useState('');
+  const [previewModelId, setPreviewModelId] = useState('');
+  const [previewData, setPreviewData] = useState<LlmManagerPreviewResponse | null>(null);
+  const [runningModelId, setRunningModelId] = useState<string>();
 
-  // Ctrl/Cmd + K 打开命令面板
+  const activeProvider = useMemo(() => {
+    return providers.find((provider) => provider.id === activeProviderId);
+  }, [activeProviderId, providers]);
+
+  const selectedProvider = useMemo(() => {
+    return providers.find((provider) => provider.id === selectedProviderId)
+      ?? activeProvider
+      ?? providers[0];
+  }, [activeProvider, providers, selectedProviderId]);
+
+  const selectedCatalogProvider = useMemo(() => {
+    return getProviderCatalogItem(selectedProvider?.providerId, providerCatalog);
+  }, [providerCatalog, selectedProvider?.providerId]);
+
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        setPaletteOpen(true);
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, []);
-
-  // Initialize Debug Adapter and fetch schemas
-  useEffect(() => {
-    let currentAdapterName = '';
-
-    const init = async () => {
-      try {
-        const [apiData] = await Promise.all([
-          fetchOneBotHttpApi(),
-          fetch(resolveApiUrl('/Debug/create'), {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...buildBearerAuthHeader(),
-            },
-          }).then(res => res.json()).then(data => {
-            if (data.code === 0) {
-              currentAdapterName = data.data.adapterName;
-              setAdapterName(currentAdapterName);
-            }
-          }),
-        ]);
-        setOneBotHttpApi(apiData);
-      } catch (error) {
-        console.error('Failed to initialize debug:', error);
-      }
-    };
-
-    init();
-
-    return () => {
-      // 不再主动关闭 adapter，由后端自动管理活跃状态
-    };
-  }, []);
-
-  const handleSelectApi = (api: OneBotHttpApiPath) => {
-    if (!openApis.includes(api)) {
-      setOpenApis([...openApis, api]);
-    }
-    setActiveApi(api);
-  };
-
-  // 等对应 Debug 组件挂载后再触发发送
-  useEffect(() => {
-    if (!pendingRun) return;
-    if (activeApi !== pendingRun.path) return;
-    const ref = debugRefs.current.get(pendingRun.path);
-    if (!ref) return;
-    ref.sendWithBody(pendingRun.body);
-    setPendingRun(null);
-  }, [activeApi, pendingRun]);
-
-  const commands: CommandPaletteCommand[] = useMemo(() => {
-    return Object.keys(oneBotHttpApi).map((p) => {
-      const path = p as OneBotHttpApiPath;
-      const item = oneBotHttpApi[path];
-      const displayPath = '/' + path;
-      // 简单分组：按描述里已有分类不可靠，这里只用 path 前缀推断
-      const group = path.startsWith('get_') ? 'GET' : (path.startsWith('set_') ? 'SET' : 'API');
-      return {
-        id: path,
-        title: item?.description || displayPath,
-        subtitle: item?.payload ? '回车发送 · Shift+Enter 仅打开' : undefined,
-        group,
-      };
-    });
-  }, [oneBotHttpApi]);
-
-  const executeCommand = (commandId: string, mode: CommandPaletteExecuteMode) => {
-    const api = commandId as OneBotHttpApiPath;
-    const item = oneBotHttpApi[api];
-    let body = '{}';
-    if (item?.payloadExample) {
-      body = JSON.stringify(item.payloadExample, null, 2);
-    } else if (item?.payload) {
-      try {
-        body = JSON.stringify(generateDefaultFromTypeBox(item.payload), null, 2);
-      } catch (e) {
-        console.error('Error generating default:', e);
-        body = '{}';
-      }
-    }
-
-    handleSelectApi(api);
-    // 确保请求参数可见
-    const ref = debugRefs.current.get(api);
-    if (ref) {
-      if (mode === 'send') ref.sendWithBody(body);
-      else ref.setRequestBody(body);
+    if (!selectedProvider) {
+      setHeadersDraft('');
       return;
     }
-    // 若还没挂载，延迟执行
-    if (mode === 'send') setPendingRun({ path: api, body });
-  };
+    setHeadersDraft(headersToText(selectedProvider.headers));
+  }, [selectedProvider?.id, selectedProvider?.headers]);
 
-  const handleCloseTab = (e: React.MouseEvent, apiToRemove: OneBotHttpApiPath) => {
-    e.stopPropagation();
-    const newOpenApis = openApis.filter((api) => api !== apiToRemove);
-    setOpenApis(newOpenApis);
-
-    if (activeApi === apiToRemove) {
-      if (newOpenApis.length > 0) {
-        setActiveApi(newOpenApis[newOpenApis.length - 1]);
-      } else {
-        setActiveApi(null);
+  useEffect(() => {
+    if (!selectedProvider) {
+      setPreviewModelId('');
+      return;
+    }
+    const selectedModel = selectedProvider.models.find((model) => model.enabled)?.id
+      ?? selectedProvider.models[0]?.id
+      ?? '';
+    setPreviewModelId((current) => {
+      if (current && selectedProvider.models.some((model) => model.id === current)) {
+        return current;
       }
+      return selectedModel;
+    });
+  }, [selectedProvider?.id, selectedProvider?.models]);
+
+  const loadManagerState = async () => {
+    setLoading(true);
+    try {
+      const state = await LlmManager.getManagerState();
+      const normalized = normalizeManagerState(state, state.providerCatalog);
+      setProviderCatalog(normalized.providerCatalog);
+      setConfigPath(normalized.configPath);
+      setProviders(normalized.providers);
+      setActiveProviderId(normalized.activeProviderId);
+      setSelectedProviderId(normalized.activeProviderId ?? normalized.providers[0]?.id);
+      setPreviewData(null);
+      setNewModelId('');
+    } catch (error) {
+      toast.error(`加载模型管理状态失败: ${(error as Error).message}`);
+    } finally {
+      setLoading(false);
     }
   };
+
+  useEffect(() => {
+    void loadManagerState();
+  }, []);
+
+  const replaceProvider = (
+    providerId: string,
+    updater: (provider: LlmManagedProvider) => LlmManagedProvider
+  ) => {
+    setProviders((current) => current.map((provider) => {
+      if (provider.id !== providerId) {
+        return provider;
+      }
+      return updater(provider);
+    }));
+  };
+
+  const applyHeadersDraft = (baseProviders: LlmManagedProvider[]) => {
+    if (!selectedProvider) {
+      return baseProviders;
+    }
+    const nextHeaders = parseHeadersText(headersDraft);
+    return baseProviders.map((provider) => {
+      if (provider.id !== selectedProvider.id) {
+        return provider;
+      }
+      return {
+        ...provider,
+        headers: nextHeaders,
+      };
+    });
+  };
+
+  const updateSelectedProvider = (updater: (provider: LlmManagedProvider) => LlmManagedProvider) => {
+    if (!selectedProvider) {
+      return;
+    }
+    replaceProvider(selectedProvider.id, updater);
+  };
+
+  const handleAddProvider = () => {
+    const candidate = buildNewProvider(providerCatalog, providers.length + 1);
+    let nextId = candidate.id;
+    let counter = 1;
+    while (providers.some((provider) => provider.id === nextId)) {
+      counter += 1;
+      nextId = `${candidate.id}-${counter}`;
+    }
+    const providerToInsert = {
+      ...candidate,
+      id: nextId,
+      active: providers.length === 0,
+    };
+    const nextProviders = [...providers, providerToInsert];
+    setProviders(nextProviders);
+    if (!activeProviderId) {
+      setActiveProviderId(providerToInsert.id);
+    }
+    setSelectedProviderId(providerToInsert.id);
+  };
+
+  const handleDeleteProvider = (providerId: string) => {
+    const nextProviders = providers.filter((provider) => provider.id !== providerId);
+    if (nextProviders.length === 0) {
+      const fallback = buildNewProvider(providerCatalog, 1);
+      setProviders([{ ...fallback, active: true }]);
+      setActiveProviderId(fallback.id);
+      setSelectedProviderId(fallback.id);
+      return;
+    }
+    setProviders(nextProviders);
+    if (activeProviderId === providerId) {
+      setActiveProviderId(nextProviders[0].id);
+    }
+    if (selectedProviderId === providerId) {
+      setSelectedProviderId(nextProviders[0].id);
+    }
+  };
+
+  const handleProviderIdChange = (nextIdInput: string) => {
+    if (!selectedProvider) {
+      return;
+    }
+    const nextId = normalizeProviderId(nextIdInput);
+    if (nextId === selectedProvider.id) {
+      return;
+    }
+    if (providers.some((provider) => provider.id === nextId)) {
+      toast.error('provider id 已存在');
+      return;
+    }
+
+    const previousId = selectedProvider.id;
+    replaceProvider(previousId, (provider) => ({
+      ...provider,
+      id: nextId,
+    }));
+    if (activeProviderId === previousId) {
+      setActiveProviderId(nextId);
+    }
+    if (selectedProviderId === previousId) {
+      setSelectedProviderId(nextId);
+    }
+  };
+
+  const handleSave = async () => {
+    const providersToSave = applyHeadersDraft(providers).map((provider) => (
+      buildProviderPayload(provider, providerCatalog)
+    ));
+    setProviders(providersToSave);
+    setSaving(true);
+    try {
+      const state = await LlmManager.saveManagerState({
+        activeProviderId,
+        providers: providersToSave,
+      });
+      const normalized = normalizeManagerState(state, state.providerCatalog);
+      setProviderCatalog(normalized.providerCatalog);
+      setConfigPath(normalized.configPath);
+      setProviders(normalized.providers);
+      setActiveProviderId(normalized.activeProviderId);
+      setSelectedProviderId((current) => {
+        if (current && normalized.providers.some((provider) => provider.id === current)) {
+          return current;
+        }
+        return normalized.activeProviderId ?? normalized.providers[0]?.id;
+      });
+      toast.success('模型管理配置已保存');
+    } catch (error) {
+      toast.error(`保存失败: ${(error as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleFetchModels = async () => {
+    if (!selectedProvider) {
+      return;
+    }
+    const providerForRequest = buildProviderPayload({
+      ...selectedProvider,
+      headers: parseHeadersText(headersDraft),
+    }, providerCatalog);
+    setFetchingModels(true);
+    try {
+      const result = await LlmManager.fetchModels(providerForRequest);
+      replaceProvider(selectedProvider.id, (provider) => ({
+        ...provider,
+        providerId: result.provider.providerId,
+        providerLabel: result.provider.providerLabel,
+        models: result.models,
+      }));
+      toast.success(`模型列表已更新 (${result.source})`);
+    } catch (error) {
+      toast.error(`获取模型失败: ${(error as Error).message}`);
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
+  const handleToggleModel = (modelId: string, enabled: boolean) => {
+    updateSelectedProvider((provider) => ({
+      ...provider,
+      models: provider.models.map((model) => {
+        if (model.id !== modelId) {
+          return model;
+        }
+        return {
+          ...model,
+          enabled,
+        };
+      }),
+    }));
+  };
+
+  const handleAddModel = () => {
+    const modelId = newModelId.trim();
+    if (!modelId || !selectedProvider) {
+      return;
+    }
+    if (selectedProvider.models.some((model) => model.id === modelId)) {
+      toast.error('该模型已存在');
+      return;
+    }
+    updateSelectedProvider((provider) => ({
+      ...provider,
+      models: [...provider.models, { id: modelId, enabled: provider.models.length === 0 }],
+    }));
+    setNewModelId('');
+    if (!previewModelId) {
+      setPreviewModelId(modelId);
+    }
+  };
+
+  const handleRemoveModel = (modelId: string) => {
+    if (!selectedProvider) {
+      return;
+    }
+    updateSelectedProvider((provider) => ({
+      ...provider,
+      models: provider.models.filter((model) => model.id !== modelId),
+    }));
+    if (previewModelId === modelId) {
+      setPreviewModelId('');
+    }
+  };
+
+  const showTestResultToast = (result: LlmModelTestResult) => {
+    if (result.ok) {
+      toast.success(`测试通过: ${formatLatency(result)}`);
+      return;
+    }
+    toast.error(`测试失败: ${formatLatency(result)}${result.error ? ` · ${result.error}` : ''}`);
+  };
+
+  const handleTestSingle = async (modelId: string) => {
+    if (!selectedProvider) {
+      return;
+    }
+    const providerForRequest = buildProviderPayload({
+      ...selectedProvider,
+      headers: parseHeadersText(headersDraft),
+    }, providerCatalog);
+    setRunningModelId(modelId);
+    try {
+      const result = await LlmManager.testModels(providerForRequest, { modelId });
+      const first = result.results[0];
+      if (first) {
+        showTestResultToast(first);
+      } else {
+        toast.error('测试返回为空');
+      }
+    } catch (error) {
+      toast.error(`单模型测试失败: ${(error as Error).message}`);
+    } finally {
+      setRunningModelId(undefined);
+    }
+  };
+
+  const handleTestAll = async () => {
+    if (!selectedProvider) {
+      return;
+    }
+    const providerForRequest = buildProviderPayload({
+      ...selectedProvider,
+      headers: parseHeadersText(headersDraft),
+    }, providerCatalog);
+    setTestingAll(true);
+    try {
+      const result = await LlmManager.testModels(providerForRequest, { testAll: true });
+      if (result.results.length === 0) {
+        toast.error('没有可测试模型');
+        return;
+      }
+      result.results.forEach(showTestResultToast);
+    } catch (error) {
+      toast.error(`批量测试失败: ${(error as Error).message}`);
+    } finally {
+      setTestingAll(false);
+    }
+  };
+
+  const handlePreview = async () => {
+    if (!selectedProvider) {
+      return;
+    }
+    const providerForRequest = buildProviderPayload({
+      ...selectedProvider,
+      headers: parseHeadersText(headersDraft),
+    }, providerCatalog);
+    setPreviewing(true);
+    try {
+      const response = await LlmManager.previewRequest(providerForRequest, previewModelId || undefined);
+      setPreviewData(response);
+      toast.success('请求预览已生成');
+    } catch (error) {
+      toast.error(`请求预览失败: ${(error as Error).message}`);
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  const activeProviderCount = providers.filter((provider) => provider.id === activeProviderId).length;
 
   return (
     <>
-      <title>HTTP调试 - Liteyuki WebUI</title>
-      <div className='h-[calc(100vh-3.5rem)] pt-2 px-0 md:px-4'>
-        <div className={clsx(
-          'h-full flex flex-col overflow-hidden transition-all relative',
-          // 'rounded-none md:rounded-2xl border', // Removing the main border/radius
-          // hasBackground
-          //   ? 'bg-white/5 dark:bg-black/5 backdrop-blur-sm border-white/10'
-          //   : 'bg-white/40 dark:bg-black/20 backdrop-blur-md shadow-sm border-white/40 dark:border-white/10'
-          'bg-transparent'
-        )}
-        >
-          <div className='flex-1 flex flex-col overflow-hidden relative'>
-            <div className={clsx(
-              'flex items-center w-full flex-shrink-0 pr-2 md:pl-4 py-1 relative z-20 rounded-md',
+      <title>模型管理 - Liteyuki WebUI</title>
+      <div className='h-[calc(100vh-3.5rem)] px-2 py-2 md:px-4'>
+        <div className='h-full overflow-hidden rounded-2xl border border-white/20 bg-white/55 backdrop-blur-xl dark:border-white/10 dark:bg-black/35'>
+          <div className='flex h-full min-h-0 flex-col md:flex-row'>
+            <aside className={clsx(
+              'w-full shrink-0 border-b p-3 md:w-72 md:border-b-0 md:border-r',
               hasBackground
-                ? 'bg-white/5'
-                : 'bg-white/30 dark:bg-white/5'
+                ? 'border-white/20 bg-white/10'
+                : 'border-white/25 bg-white/45 dark:bg-white/5'
             )}
             >
-              {/* Tab List */}
-              <div className='flex-1 overflow-x-auto no-scrollbar flex items-center'>
-                {openApis.map((api) => {
-                  const isActive = api === activeApi;
-                  const item = oneBotHttpApi[api];
+              <div className='mb-3 flex items-center justify-between'>
+                <div>
+                  <div className='text-sm font-semibold text-default-700 dark:text-default-100'>
+                    Provider
+                  </div>
+                  <div className='text-xs text-default-400'>
+                    Active: {activeProviderCount > 0 ? activeProviderId : '未设置'}
+                  </div>
+                </div>
+                <Button isIconOnly size='sm' color='primary' variant='flat' onPress={handleAddProvider}>
+                  <LuPlus />
+                </Button>
+              </div>
+
+              <div className='space-y-2 overflow-y-auto md:max-h-[calc(100vh-11rem)]'>
+                {providers.map((provider) => {
+                  const isSelected = provider.id === selectedProvider?.id;
+                  const isActive = provider.id === activeProviderId;
                   return (
                     <div
-                      key={api}
-                      onClick={() => setActiveApi(api)}
+                      key={provider.id}
                       className={clsx(
-                        'group flex items-center gap-2 px-3 h-8 my-1 mr-1 rounded-md cursor-pointer border select-none transition-all min-w-[120px] max-w-[260px]',
-                        hasBackground ? 'border-transparent hover:bg-white/10' : 'border-transparent hover:bg-white/10 dark:hover:bg-white/5',
-                        isActive
-                          ? (hasBackground
-                            ? 'bg-white/15 text-white border-white/20'
-                            : 'bg-default-100 dark:bg-white/15 text-foreground dark:text-white font-medium shadow-sm border-default-200 dark:border-white/10')
-                          : (hasBackground ? 'text-white/70 hover:text-white' : 'text-default-600 dark:text-white/70 hover:text-default-900 dark:hover:text-white')
+                        'rounded-xl border p-2 transition',
+                        isSelected
+                          ? 'border-primary/40 bg-primary/10'
+                          : 'border-white/20 bg-white/40 hover:bg-white/65 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10'
                       )}
                     >
-                      <span className={clsx(
-                        'text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-sm',
-                        isActive
-                          ? 'bg-success/20 text-success'
-                          : 'opacity-60 bg-default-200/50 dark:bg-white/10'
-                      )}
-                      >POST
-                      </span>
-                      <span className='text-xs truncate flex-1'>{item?.description || api}</span>
-                      <div
-                        className={clsx(
-                          'p-0.5 rounded-sm hover:bg-black/10 dark:hover:bg-white/20 transition-opacity',
-                          isActive ? 'opacity-40 hover:opacity-100' : 'opacity-0 group-hover:opacity-40'
-                        )}
-                        onClick={(e) => handleCloseTab(e, api)}
+                      <button
+                        type='button'
+                        className='w-full text-left'
+                        onClick={() => setSelectedProviderId(provider.id)}
                       >
-                        <IoClose size={12} />
+                        <div className='truncate text-sm font-semibold text-default-700 dark:text-default-100'>
+                          {provider.label || provider.id}
+                        </div>
+                        <div className='truncate text-xs text-default-400'>
+                          {provider.baseUrl || '未设置 baseUrl'}
+                        </div>
+                      </button>
+                      <div className='mt-2 flex items-center justify-between'>
+                        <Button
+                          size='sm'
+                          variant={isActive ? 'solid' : 'flat'}
+                          color={isActive ? 'primary' : 'default'}
+                          onPress={() => setActiveProviderId(provider.id)}
+                        >
+                          {isActive ? 'Active' : '设为 Active'}
+                        </Button>
+                        <Button
+                          isIconOnly
+                          size='sm'
+                          color='danger'
+                          variant='light'
+                          onPress={() => handleDeleteProvider(provider.id)}
+                        >
+                          <LuTrash2 />
+                        </Button>
                       </div>
                     </div>
                   );
                 })}
               </div>
+            </aside>
 
-              {/* Actions */}
-              <div className='flex items-center gap-2 pl-2 border-l border-white/5 flex-shrink-0'>
-                <Button
-                  isIconOnly
-                  size='sm'
-                  radius='sm'
-                  variant='light'
-                  className='text-default-500 hover:text-primary w-10 h-10 min-w-10'
-                  onClick={() => setPaletteOpen(true)}
-                  onPress={() => setPaletteOpen(true)}
-                >
-                  <TbSearch size={18} />
-                </Button>
+            <section className='flex min-h-0 flex-1 flex-col'>
+              <div className='border-b border-white/20 p-3 dark:border-white/10'>
+                <div className='flex flex-wrap items-center justify-between gap-2'>
+                  <div>
+                    <div className='text-base font-semibold text-default-700 dark:text-default-100'>模型管理</div>
+                    <div className='text-xs text-default-400'>配置路径: {configPath || '-'}</div>
+                  </div>
+                  <div className='flex items-center gap-2'>
+                    <Button
+                      variant='flat'
+                      startContent={<LuRefreshCw />}
+                      onPress={() => void loadManagerState()}
+                      isLoading={loading}
+                    >
+                      刷新
+                    </Button>
+                    <Button
+                      color='primary'
+                      startContent={<LuSave />}
+                      onPress={() => void handleSave()}
+                      isLoading={saving}
+                    >
+                      保存
+                    </Button>
+                  </div>
+                </div>
               </div>
-            </div>
 
-            {/* Content Panels */}
-            <div className='flex-1 relative overflow-hidden'>
-              {activeApi === null && (
-                <div className='h-full flex items-center justify-center text-default-400 text-sm opacity-50 select-none'>
-                  使用命令面板选择接口（Ctrl/Cmd + K）
-                </div>
-              )}
+              <div className='grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]'>
+                <div className='space-y-3'>
+                  <div className='rounded-xl border border-white/20 bg-white/40 p-3 dark:border-white/10 dark:bg-white/5'>
+                    <div className='mb-2 text-sm font-semibold text-default-700 dark:text-default-100'>Provider 配置</div>
+                    {!selectedProvider
+                      ? (
+                        <div className='text-sm text-default-400'>暂无 provider</div>
+                        )
+                      : (
+                        <div className='grid gap-3'>
+                          <Input
+                            label='id'
+                            value={selectedProvider.id}
+                            onChange={(event) => handleProviderIdChange(event.target.value)}
+                            variant='bordered'
+                          />
+                          <Input
+                            label='label'
+                            value={selectedProvider.label}
+                            onChange={(event) => updateSelectedProvider((provider) => ({
+                              ...provider,
+                              label: event.target.value,
+                            }))}
+                            variant='bordered'
+                          />
+                          <Select
+                            label='供应商'
+                            variant='bordered'
+                            selectedKeys={selectedProvider.providerId ? [selectedProvider.providerId] : []}
+                            onSelectionChange={(keys) => {
+                              const nextProviderId = Array.from(keys)[0];
+                              if (typeof nextProviderId !== 'string') {
+                                return;
+                              }
+                              const catalogItem = getProviderCatalogItem(nextProviderId, providerCatalog);
+                              updateSelectedProvider((provider) => ({
+                                ...provider,
+                                providerId: nextProviderId,
+                                providerLabel: catalogItem?.label ?? provider.providerLabel,
+                                baseUrl: getDefaultBaseUrl(catalogItem),
+                              }));
+                            }}
+                          >
+                            {providerCatalog.map((item) => (
+                              <SelectItem key={item.id}>{item.label}</SelectItem>
+                            ))}
+                          </Select>
+                          <Select
+                            label='端点预设'
+                            variant='bordered'
+                            placeholder='可手动覆盖为自定义地址'
+                            selectedKeys={
+                              selectedCatalogProvider?.baseUrls.some((item) => item.url === selectedProvider.baseUrl)
+                                ? [selectedProvider.baseUrl]
+                                : []
+                            }
+                            onSelectionChange={(keys) => {
+                              const nextBaseUrl = Array.from(keys)[0];
+                              if (typeof nextBaseUrl !== 'string') {
+                                return;
+                              }
+                              updateSelectedProvider((provider) => ({
+                                ...provider,
+                                baseUrl: nextBaseUrl,
+                              }));
+                            }}
+                          >
+                            {(selectedCatalogProvider?.baseUrls ?? []).map((item) => (
+                              <SelectItem key={item.url}>
+                                {item.region ? `${item.label} (${item.region})` : item.label}
+                              </SelectItem>
+                            ))}
+                          </Select>
+                          <Input
+                            label='baseUrl'
+                            value={selectedProvider.baseUrl}
+                            onChange={(event) => updateSelectedProvider((provider) => ({
+                              ...provider,
+                              baseUrl: event.target.value,
+                            }))}
+                            variant='bordered'
+                          />
+                          <Input
+                            label='apiKey'
+                            value={selectedProvider.apiKey}
+                            onChange={(event) => updateSelectedProvider((provider) => ({
+                              ...provider,
+                              apiKey: event.target.value,
+                            }))}
+                            variant='bordered'
+                            type='password'
+                          />
+                          <Input
+                            label='timeoutSeconds'
+                            value={String(selectedProvider.timeoutSeconds || DEFAULT_TIMEOUT_SECONDS)}
+                            onChange={(event) => {
+                              const parsed = Number.parseInt(event.target.value, 10);
+                              updateSelectedProvider((provider) => ({
+                                ...provider,
+                                timeoutSeconds: Number.isFinite(parsed) && parsed > 0
+                                  ? parsed
+                                  : DEFAULT_TIMEOUT_SECONDS,
+                              }));
+                            }}
+                            variant='bordered'
+                            type='number'
+                            min={1}
+                          />
+                          <Textarea
+                            label='headers'
+                            value={headersDraft}
+                            onChange={(event) => setHeadersDraft(event.target.value)}
+                            onBlur={() => {
+                              if (!selectedProvider) {
+                                return;
+                              }
+                              const parsed = parseHeadersText(headersDraft);
+                              updateSelectedProvider((provider) => ({
+                                ...provider,
+                                headers: parsed,
+                              }));
+                            }}
+                            minRows={3}
+                            variant='bordered'
+                            placeholder='Header-Name: value'
+                          />
+                          <div className='text-xs text-default-400'>
+                            providerId: {selectedProvider.providerId}
+                          </div>
+                        </div>
+                        )}
+                  </div>
 
-              {openApis.map((api) => (
-                <div
-                  key={api}
-                  className={clsx(
-                    'h-full w-full absolute top-0 left-0 transition-opacity duration-200',
-                    api === activeApi ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
-                  )}
-                >
-                  <OneBotApiDebug
-                    ref={(node) => {
-                      if (!node) {
-                        debugRefs.current.delete(api);
-                        return;
-                      }
-                      debugRefs.current.set(api, node);
-                    }}
-                    path={api}
-                    data={oneBotHttpApi[api]}
-                    adapterName={adapterName}
-                  />
+                  <div className='rounded-xl border border-white/20 bg-white/40 p-3 dark:border-white/10 dark:bg-white/5'>
+                    <div className='mb-2 flex items-center justify-between'>
+                      <div className='text-sm font-semibold text-default-700 dark:text-default-100'>模型列表</div>
+                      <div className='flex items-center gap-2'>
+                        <Button
+                          size='sm'
+                          variant='flat'
+                          startContent={fetchingModels ? <LuLoaderCircle className='animate-spin' /> : <LuWandSparkles />}
+                          isLoading={fetchingModels}
+                          onPress={() => void handleFetchModels()}
+                        >
+                          获取模型
+                        </Button>
+                        <Button
+                          size='sm'
+                          variant='flat'
+                          color='secondary'
+                          startContent={<LuFlaskConical />}
+                          isLoading={testingAll}
+                          onPress={() => void handleTestAll()}
+                        >
+                          批量测试
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className='mb-3 flex items-center gap-2'>
+                      <Input
+                        value={newModelId}
+                        onChange={(event) => setNewModelId(event.target.value)}
+                        placeholder='输入模型 ID'
+                        variant='bordered'
+                        size='sm'
+                      />
+                      <Button size='sm' color='primary' variant='flat' onPress={handleAddModel}>
+                        添加
+                      </Button>
+                    </div>
+
+                    <div className='space-y-2'>
+                      {selectedProvider?.models.length
+                        ? selectedProvider.models.map((model) => (
+                          <div
+                            key={model.id}
+                            className='flex items-center justify-between rounded-lg border border-white/20 bg-white/50 px-3 py-2 dark:border-white/10 dark:bg-white/5'
+                          >
+                            <div className='min-w-0 flex-1 pr-3'>
+                              <div className='truncate text-sm font-medium text-default-700 dark:text-default-100'>
+                                {model.id}
+                              </div>
+                            </div>
+                            <div className='flex items-center gap-2'>
+                              <Switch
+                                isSelected={model.enabled}
+                                onValueChange={(value) => handleToggleModel(model.id, value)}
+                                size='sm'
+                              />
+                              <Button
+                                size='sm'
+                                variant='flat'
+                                isLoading={runningModelId === model.id}
+                                onPress={() => void handleTestSingle(model.id)}
+                                startContent={runningModelId === model.id ? undefined : <LuFlaskConical />}
+                              >
+                                单测
+                              </Button>
+                              <Button
+                                isIconOnly
+                                size='sm'
+                                color='danger'
+                                variant='light'
+                                onPress={() => handleRemoveModel(model.id)}
+                              >
+                                <LuTrash2 />
+                              </Button>
+                            </div>
+                          </div>
+                        ))
+                        : (
+                          <div className='rounded-lg border border-dashed border-white/25 p-4 text-center text-sm text-default-400 dark:border-white/10'>
+                            暂无模型
+                          </div>
+                          )}
+                    </div>
+                  </div>
                 </div>
-              ))}
-            </div>
+
+                <div className='space-y-3'>
+                  <div className='rounded-xl border border-white/20 bg-white/40 p-3 dark:border-white/10 dark:bg-white/5'>
+                    <div className='mb-2 flex items-center justify-between'>
+                      <div className='text-sm font-semibold text-default-700 dark:text-default-100'>请求体预览</div>
+                      <div className='flex items-center gap-2'>
+                        <Select
+                          size='sm'
+                          variant='bordered'
+                          className='w-56'
+                          selectedKeys={previewModelId ? [previewModelId] : []}
+                          onSelectionChange={(keys) => {
+                            const selected = Array.from(keys)[0];
+                            if (typeof selected === 'string') {
+                              setPreviewModelId(selected);
+                            }
+                          }}
+                          placeholder='选择模型'
+                        >
+                          {(selectedProvider?.models ?? []).map((model) => (
+                            <SelectItem key={model.id}>{model.id}</SelectItem>
+                          ))}
+                        </Select>
+                        <Button
+                          size='sm'
+                          color='primary'
+                          variant='flat'
+                          isLoading={previewing}
+                          onPress={() => void handlePreview()}
+                        >
+                          预览
+                        </Button>
+                      </div>
+                    </div>
+
+                    {previewData
+                      ? (
+                        <div className='space-y-2'>
+                          <div className='rounded-lg border border-white/20 bg-white/55 px-3 py-2 text-xs text-default-500 dark:border-white/10 dark:bg-black/20'>
+                            <div>model: {previewData.modelId}</div>
+                            <div>method: {previewData.method}</div>
+                            <div className='break-all'>endpoint: {previewData.endpoint}</div>
+                          </div>
+                          <Textarea
+                            value={previewData.bodyText}
+                            minRows={16}
+                            variant='bordered'
+                            readOnly
+                          />
+                          <Button
+                            size='sm'
+                            variant='flat'
+                            startContent={<LuCopy />}
+                            onPress={async () => {
+                              try {
+                                await navigator.clipboard.writeText(previewData.bodyText);
+                                toast.success('预览内容已复制');
+                              } catch (error) {
+                                toast.error(`复制失败: ${(error as Error).message}`);
+                              }
+                            }}
+                          >
+                            复制预览
+                          </Button>
+                        </div>
+                        )
+                      : (
+                        <div className='rounded-lg border border-dashed border-white/25 p-4 text-center text-sm text-default-400 dark:border-white/10'>
+                          尚未生成预览
+                        </div>
+                        )}
+                  </div>
+
+                  <div className='rounded-xl border border-white/20 bg-white/40 p-3 dark:border-white/10 dark:bg-white/5'>
+                    <div className='mb-2 text-sm font-semibold text-default-700 dark:text-default-100'>测试反馈</div>
+                    <div className='flex items-center gap-2 text-sm text-default-500'>
+                      <LuCircleCheck className='text-success' />
+                      <span>成功/失败与 latency 会通过 toast 提示</span>
+                    </div>
+                    <div className='mt-2 flex items-center gap-2 text-sm text-default-500'>
+                      <LuCircleX className='text-danger' />
+                      <span>批量测试会逐条输出结果</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
           </div>
         </div>
       </div>
-
-      <CommandPalette
-        isOpen={paletteOpen}
-        onOpenChange={setPaletteOpen}
-        commands={commands}
-        onExecute={executeCommand}
-      />
     </>
   );
 }

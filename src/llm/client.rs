@@ -41,6 +41,10 @@ pub trait OpenAiRuntimeConfig {
     fn reasoning_effort(&self) -> Option<&str> {
         None
     }
+
+    fn default_headers(&self) -> Option<&HashMap<String, String>> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +60,7 @@ pub struct OpenAiResponsesClient {
     top_k: Option<u32>,
     parallel_tool_calls: bool,
     reasoning_effort: Option<String>,
+    default_headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +240,7 @@ impl OpenAiResponsesClient {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string),
+            default_headers: config.default_headers().cloned().unwrap_or_default(),
         })
     }
 
@@ -452,9 +458,7 @@ impl OpenAiResponsesClient {
     ) -> Result<ProviderTurn, LlmClientError> {
         log_outbound_llm_request("responses", endpoint, &request);
         let response = self
-            .client
-            .post(endpoint)
-            .bearer_auth(&self.api_key)
+            .apply_default_headers(self.client.post(endpoint).bearer_auth(&self.api_key))
             .json(&request)
             .send()
             .await
@@ -619,9 +623,7 @@ impl OpenAiResponsesClient {
     ) -> Result<ProviderTurn, LlmClientError> {
         log_outbound_llm_request("chat.completions", endpoint, &request);
         let response = self
-            .client
-            .post(endpoint)
-            .bearer_auth(&self.api_key)
+            .apply_default_headers(self.client.post(endpoint).bearer_auth(&self.api_key))
             .json(&request)
             .send()
             .await
@@ -690,9 +692,7 @@ impl OpenAiResponsesClient {
         };
         log_outbound_llm_request(request_kind, endpoint, request);
         let response = self
-            .client
-            .post(endpoint)
-            .bearer_auth(&self.api_key)
+            .apply_default_headers(self.client.post(endpoint).bearer_auth(&self.api_key))
             .json(request)
             .send()
             .await
@@ -711,6 +711,16 @@ impl OpenAiResponsesClient {
         }
 
         serde_json::from_str(&body).map_err(|err| LlmClientError::InvalidResponse(err.to_string()))
+    }
+
+    fn apply_default_headers(
+        &self,
+        mut request: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        for (name, value) in &self.default_headers {
+            request = request.header(name, value);
+        }
+        request
     }
 
     fn build_responses_request(

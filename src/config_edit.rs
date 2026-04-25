@@ -2,6 +2,8 @@ use std::path::Path;
 
 use liteyukibot_core::{LogLevel, emit_console_log};
 
+use crate::app_config::{LlmManagedModelConfig, LlmManagedProviderConfig};
+
 pub fn persist_onebot_v11_whitelist(path: &Path, entries: &[String]) -> Result<(), String> {
     let content = std::fs::read_to_string(path)
         .map_err(|err| format!("failed to read config {}: {err}", path.display()))?;
@@ -118,6 +120,10 @@ pub struct LlmConfigPatch {
     pub provider_urls: Option<Vec<String>>,
     pub model: Option<String>,
     pub api_keys: Option<Vec<String>>,
+    pub timeout_seconds: Option<u64>,
+    pub headers: Option<std::collections::HashMap<String, String>>,
+    pub active_provider_id: Option<String>,
+    pub providers: Option<Vec<LlmManagedProviderConfig>>,
 }
 
 pub fn persist_llm_config(path: &Path, patch: &LlmConfigPatch) -> Result<(), String> {
@@ -210,6 +216,18 @@ fn describe_llm_patch(patch: &LlmConfigPatch) -> String {
     if let Some(api_keys) = patch.api_keys.as_ref() {
         fields.push(format!("api_keys=<updated:{}>", api_keys.len()));
     }
+    if let Some(timeout_seconds) = patch.timeout_seconds {
+        fields.push(format!("timeout_seconds={timeout_seconds}"));
+    }
+    if let Some(headers) = patch.headers.as_ref() {
+        fields.push(format!("headers={}", headers.len()));
+    }
+    if let Some(active_provider_id) = patch.active_provider_id.as_deref() {
+        fields.push(format!("active_provider_id={active_provider_id}"));
+    }
+    if let Some(providers) = patch.providers.as_ref() {
+        fields.push(format!("providers={}", providers.len()));
+    }
 
     if fields.is_empty() {
         "fields=none".to_string()
@@ -250,8 +268,25 @@ fn normalize_llm_patch(patch: &LlmConfigPatch) -> LlmConfigPatch {
     let api_keys = patch
         .api_keys
         .as_ref()
-        .map(|keys| normalize_entries_preserve_order(keys))
-        .filter(|keys| !keys.is_empty());
+        .map(|keys| normalize_entries_preserve_order(keys));
+    let headers = patch.headers.as_ref().map(normalize_headers_map);
+    let timeout_seconds = patch.timeout_seconds.filter(|value| *value > 0);
+    let active_provider_id = patch
+        .active_provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let providers = patch
+        .providers
+        .as_ref()
+        .map(|providers| normalize_managed_providers(providers.as_slice()))
+        .map(|providers: Vec<LlmManagedProviderConfig>| {
+            providers
+                .into_iter()
+                .filter(|provider| provider.id.is_some() || provider.base_url.is_some())
+                .collect::<Vec<_>>()
+        });
 
     LlmConfigPatch {
         enabled: patch.enabled,
@@ -260,6 +295,10 @@ fn normalize_llm_patch(patch: &LlmConfigPatch) -> LlmConfigPatch {
         provider_urls,
         model,
         api_keys,
+        timeout_seconds,
+        headers,
+        active_provider_id,
+        providers,
     }
 }
 
@@ -296,6 +335,96 @@ fn normalize_entries_preserve_order(entries: &[String]) -> Vec<String> {
         }
     }
     normalized
+}
+
+fn normalize_headers_map(
+    headers: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    headers
+        .iter()
+        .filter_map(|(key, value)| {
+            let key = key.trim().to_string();
+            let value = value.trim().to_string();
+            if key.is_empty() || value.is_empty() {
+                None
+            } else {
+                Some((key, value))
+            }
+        })
+        .collect()
+}
+
+fn normalize_managed_providers(
+    providers: &[LlmManagedProviderConfig],
+) -> Vec<LlmManagedProviderConfig> {
+    providers
+        .iter()
+        .map(|provider| {
+            let id = provider
+                .id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+            let label = provider
+                .label
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+            let provider_id = provider
+                .provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_ascii_lowercase());
+            let base_url = provider
+                .base_url
+                .as_deref()
+                .and_then(normalize_provider_url);
+            let api_key = provider
+                .api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+            let timeout_seconds = provider.timeout_seconds.filter(|value| *value > 0);
+            let headers = provider.headers.as_ref().map(normalize_headers_map);
+            let models = provider
+                .models
+                .as_ref()
+                .map(|models| normalize_managed_models(models.as_slice()));
+
+            LlmManagedProviderConfig {
+                id,
+                label,
+                provider: provider_id,
+                base_url,
+                api_key,
+                timeout_seconds,
+                headers,
+                models,
+            }
+        })
+        .collect()
+}
+
+fn normalize_managed_models(models: &[LlmManagedModelConfig]) -> Vec<LlmManagedModelConfig> {
+    models
+        .iter()
+        .filter_map(|model| {
+            let id = model
+                .id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+            id.map(|id| LlmManagedModelConfig {
+                id: Some(id),
+                enabled: Some(model.enabled.unwrap_or(false)),
+            })
+        })
+        .collect()
 }
 
 fn update_yaml_document(content: &str, entries: &[String]) -> String {
@@ -626,6 +755,43 @@ fn update_yaml_llm_document(content: &str, patch: &LlmConfigPatch) -> String {
             api_keys,
         );
     }
+    if let Some(timeout_seconds) = patch.timeout_seconds {
+        upsert_yaml_scalar(
+            &mut lines,
+            section_start,
+            section_indent,
+            "timeout_seconds",
+            &timeout_seconds.to_string(),
+        );
+    }
+    if let Some(headers) = patch.headers.as_ref() {
+        upsert_yaml_block(
+            &mut lines,
+            section_start,
+            section_indent,
+            "headers",
+            render_yaml_string_map(section_indent + 2, "headers", headers),
+        );
+    }
+    if let Some(active_provider_id) = patch.active_provider_id.as_deref() {
+        let escaped = active_provider_id.replace('\'', "''");
+        upsert_yaml_scalar(
+            &mut lines,
+            section_start,
+            section_indent,
+            "active_provider_id",
+            &format!("'{escaped}'"),
+        );
+    }
+    if let Some(providers) = patch.providers.as_ref() {
+        upsert_yaml_block(
+            &mut lines,
+            section_start,
+            section_indent,
+            "providers",
+            render_yaml_managed_providers(section_indent + 2, "providers", providers),
+        );
+    }
 
     join_lines(&lines, newline, trailing_newline)
 }
@@ -676,6 +842,28 @@ fn upsert_yaml_list(
     }
 }
 
+fn upsert_yaml_block(
+    lines: &mut Vec<String>,
+    section_start: usize,
+    section_indent: usize,
+    key: &str,
+    rendered: Vec<String>,
+) {
+    let section_end = find_yaml_section_end(lines, section_start, section_indent);
+    let key_indent = section_indent + 2;
+    let key_index = (section_start + 1..section_end).find(|&idx| {
+        let line = lines[idx].as_str();
+        leading_spaces(line) == key_indent && line.trim_start().starts_with(&format!("{key}:"))
+    });
+
+    if let Some(index) = key_index {
+        let block_end = find_yaml_key_block_end(lines, index, section_end);
+        lines.splice(index..block_end, rendered);
+    } else {
+        lines.splice(section_end..section_end, rendered);
+    }
+}
+
 fn find_yaml_key_block_end(lines: &[String], key_index: usize, section_end: usize) -> usize {
     let key_indent = leading_spaces(lines[key_index].as_str());
     let mut block_end = key_index + 1;
@@ -706,6 +894,120 @@ fn render_yaml_string_list(indent: usize, key: &str, entries: &[String]) -> Vec<
         lines.push(format!("{prefix}  - '{escaped}'"));
     }
     lines
+}
+
+fn render_yaml_string_map(
+    indent: usize,
+    key: &str,
+    entries: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    let prefix = " ".repeat(indent);
+    if entries.is_empty() {
+        return vec![format!("{prefix}{key}: {{}}")];
+    }
+
+    let mut rendered = vec![format!("{prefix}{key}:")];
+    let mut keys = entries.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    for key_name in keys {
+        let value = entries
+            .get(key_name.as_str())
+            .cloned()
+            .unwrap_or_default()
+            .replace('\'', "''");
+        let escaped_key = key_name.replace('\'', "''");
+        rendered.push(format!("{prefix}  '{escaped_key}': '{value}'"));
+    }
+    rendered
+}
+
+fn render_yaml_managed_providers(
+    indent: usize,
+    key: &str,
+    providers: &[LlmManagedProviderConfig],
+) -> Vec<String> {
+    let prefix = " ".repeat(indent);
+    if providers.is_empty() {
+        return vec![format!("{prefix}{key}: []")];
+    }
+
+    let mut rendered = vec![format!("{prefix}{key}:")];
+    for provider in providers {
+        let item_prefix = format!("{prefix}  -");
+        let nested_prefix = format!("{prefix}    ");
+        rendered.push(format!(
+            "{item_prefix} id: '{}'",
+            provider.id.as_deref().unwrap_or("").replace('\'', "''")
+        ));
+
+        if let Some(label) = provider.label.as_deref() {
+            rendered.push(format!(
+                "{nested_prefix}label: '{}'",
+                label.replace('\'', "''")
+            ));
+        }
+        if let Some(provider_id) = provider.provider.as_deref() {
+            rendered.push(format!(
+                "{nested_prefix}provider: '{}'",
+                provider_id.replace('\'', "''")
+            ));
+        }
+        if let Some(base_url) = provider.base_url.as_deref() {
+            rendered.push(format!(
+                "{nested_prefix}base_url: '{}'",
+                base_url.replace('\'', "''")
+            ));
+        }
+        if let Some(api_key) = provider.api_key.as_deref() {
+            rendered.push(format!(
+                "{nested_prefix}api_key: '{}'",
+                api_key.replace('\'', "''")
+            ));
+        }
+        if let Some(timeout_seconds) = provider.timeout_seconds {
+            rendered.push(format!("{nested_prefix}timeout_seconds: {timeout_seconds}"));
+        }
+        if let Some(headers) = provider.headers.as_ref() {
+            let mut keys = headers.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            if keys.is_empty() {
+                rendered.push(format!("{nested_prefix}headers: {{}}"));
+            } else {
+                rendered.push(format!("{nested_prefix}headers:"));
+                for key_name in keys {
+                    let value = headers
+                        .get(key_name.as_str())
+                        .cloned()
+                        .unwrap_or_default()
+                        .replace('\'', "''");
+                    rendered.push(format!(
+                        "{nested_prefix}  '{}': '{}'",
+                        key_name.replace('\'', "''"),
+                        value
+                    ));
+                }
+            }
+        }
+        if let Some(models) = provider.models.as_ref() {
+            if models.is_empty() {
+                rendered.push(format!("{nested_prefix}models: []"));
+            } else {
+                rendered.push(format!("{nested_prefix}models:"));
+                for model in models {
+                    rendered.push(format!(
+                        "{nested_prefix}  - id: '{}'",
+                        model.id.as_deref().unwrap_or("").replace('\'', "''")
+                    ));
+                    rendered.push(format!(
+                        "{nested_prefix}    enabled: {}",
+                        model.enabled.unwrap_or(false)
+                    ));
+                }
+            }
+        }
+    }
+
+    rendered
 }
 
 fn update_toml_llm_document(content: &str, patch: &LlmConfigPatch) -> String {
@@ -757,6 +1059,32 @@ fn update_toml_llm_document(content: &str, patch: &LlmConfigPatch) -> String {
         let value = render_toml_string_list(api_keys);
         upsert_toml_llm_key(&mut lines, table_start, "api_keys", &value);
     }
+    if let Some(timeout_seconds) = patch.timeout_seconds {
+        upsert_toml_llm_key(
+            &mut lines,
+            table_start,
+            "timeout_seconds",
+            &timeout_seconds.to_string(),
+        );
+    }
+    if let Some(headers) = patch.headers.as_ref() {
+        let value = render_toml_string_map(headers);
+        upsert_toml_llm_key(&mut lines, table_start, "headers", &value);
+    }
+    if let Some(active_provider_id) = patch.active_provider_id.as_deref() {
+        let escaped = active_provider_id
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        upsert_toml_llm_key(
+            &mut lines,
+            table_start,
+            "active_provider_id",
+            &format!("\"{escaped}\""),
+        );
+    }
+    if let Some(providers) = patch.providers.as_ref() {
+        replace_toml_llm_provider_blocks(&mut lines, table_start, providers);
+    }
 
     join_lines(&lines, newline, trailing_newline)
 }
@@ -788,6 +1116,132 @@ fn render_toml_string_list(entries: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{rendered}]")
+}
+
+fn render_toml_string_map(entries: &std::collections::HashMap<String, String>) -> String {
+    if entries.is_empty() {
+        return "{}".to_string();
+    }
+
+    let mut keys = entries.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    let rendered = keys
+        .into_iter()
+        .map(|key| {
+            let escaped_key = key.replace('\\', "\\\\").replace('"', "\\\"");
+            let escaped_value = entries
+                .get(key.as_str())
+                .cloned()
+                .unwrap_or_default()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            format!("\"{escaped_key}\" = \"{escaped_value}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{ {rendered} }}")
+}
+
+fn render_toml_managed_models(models: &[LlmManagedModelConfig]) -> String {
+    if models.is_empty() {
+        return "[]".to_string();
+    }
+
+    let rendered = models
+        .iter()
+        .map(|model| {
+            let id = model
+                .id
+                .as_deref()
+                .unwrap_or("")
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            let enabled = model.enabled.unwrap_or(false);
+            format!("{{ id = \"{id}\", enabled = {enabled} }}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{rendered}]")
+}
+
+fn render_toml_managed_provider_block(provider: &LlmManagedProviderConfig) -> Vec<String> {
+    let mut lines = vec!["[[llm.providers]]".to_string()];
+
+    if let Some(id) = provider.id.as_deref() {
+        let escaped = id.replace('\\', "\\\\").replace('"', "\\\"");
+        lines.push(format!("id = \"{escaped}\""));
+    }
+    if let Some(label) = provider.label.as_deref() {
+        let escaped = label.replace('\\', "\\\\").replace('"', "\\\"");
+        lines.push(format!("label = \"{escaped}\""));
+    }
+    if let Some(provider_id) = provider.provider.as_deref() {
+        let escaped = provider_id.replace('\\', "\\\\").replace('"', "\\\"");
+        lines.push(format!("provider = \"{escaped}\""));
+    }
+    if let Some(base_url) = provider.base_url.as_deref() {
+        let escaped = base_url.replace('\\', "\\\\").replace('"', "\\\"");
+        lines.push(format!("base_url = \"{escaped}\""));
+    }
+    if let Some(api_key) = provider.api_key.as_deref() {
+        let escaped = api_key.replace('\\', "\\\\").replace('"', "\\\"");
+        lines.push(format!("api_key = \"{escaped}\""));
+    }
+    if let Some(timeout_seconds) = provider.timeout_seconds {
+        lines.push(format!("timeout_seconds = {timeout_seconds}"));
+    }
+    if let Some(headers) = provider.headers.as_ref() {
+        lines.push(format!("headers = {}", render_toml_string_map(headers)));
+    }
+    if let Some(models) = provider.models.as_ref() {
+        lines.push(format!("models = {}", render_toml_managed_models(models)));
+    }
+
+    lines
+}
+
+fn replace_toml_llm_provider_blocks(
+    lines: &mut Vec<String>,
+    table_start: usize,
+    providers: &[LlmManagedProviderConfig],
+) {
+    let existing_start = lines
+        .iter()
+        .enumerate()
+        .skip(table_start + 1)
+        .find_map(|(idx, line)| (line.trim() == "[[llm.providers]]").then_some(idx));
+
+    if let Some(existing_start) = existing_start {
+        let mut existing_end = existing_start;
+        while existing_end < lines.len() {
+            let trimmed = lines[existing_end].trim();
+            if existing_end > existing_start
+                && trimmed.starts_with('[')
+                && trimmed != "[[llm.providers]]"
+            {
+                break;
+            }
+            existing_end += 1;
+        }
+        lines.splice(existing_start..existing_end, Vec::<String>::new());
+    }
+
+    if providers.is_empty() {
+        return;
+    }
+
+    let insert_at = find_toml_table_end(lines, table_start);
+    let mut rendered = Vec::new();
+    if insert_at > 0 && !lines[insert_at - 1].trim().is_empty() {
+        rendered.push(String::new());
+    }
+    for (index, provider) in providers.iter().enumerate() {
+        if index > 0 {
+            rendered.push(String::new());
+        }
+        rendered.extend(render_toml_managed_provider_block(provider));
+    }
+    lines.splice(insert_at..insert_at, rendered);
 }
 
 fn find_toml_table_end(lines: &[String], table_start: usize) -> usize {
@@ -951,6 +1405,7 @@ mod tests {
             ]),
             model: Some("gpt-4.1-mini".to_string()),
             api_keys: Some(vec!["k1".to_string(), "k2".to_string()]),
+            ..Default::default()
         };
         let updated = update_yaml_llm_document(source, &patch);
         assert!(updated.contains("llm:"));
@@ -974,6 +1429,7 @@ mod tests {
             provider_urls: Some(vec!["https://api.openai.com".to_string()]),
             model: Some("gpt-4.1-mini".to_string()),
             api_keys: Some(vec!["k1".to_string()]),
+            ..Default::default()
         };
         let updated = update_toml_llm_document(source, &patch);
         assert!(updated.contains("[llm]"));
@@ -994,6 +1450,77 @@ mod tests {
         };
         let updated = update_yaml_llm_document(source, &patch);
         assert!(updated.contains("provider_urls: []"));
+    }
+
+    #[test]
+    fn update_yaml_llm_writes_managed_provider_blocks() {
+        let source = "llm:\n  enabled: false\n";
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("x-title".to_string(), "Liteyuki".to_string());
+        let patch = LlmConfigPatch {
+            timeout_seconds: Some(120),
+            headers: Some(headers.clone()),
+            active_provider_id: Some("grok".to_string()),
+            providers: Some(vec![LlmManagedProviderConfig {
+                id: Some("grok".to_string()),
+                label: Some("grok".to_string()),
+                provider: Some("openai-compatible".to_string()),
+                base_url: Some("https://tokenflux.dev/v1".to_string()),
+                api_key: Some("sk-demo".to_string()),
+                timeout_seconds: Some(120),
+                headers: Some(headers),
+                models: Some(vec![LlmManagedModelConfig {
+                    id: Some("grok-4".to_string()),
+                    enabled: Some(true),
+                }]),
+            }]),
+            ..Default::default()
+        };
+
+        let updated = update_yaml_llm_document(source, &patch);
+        assert!(updated.contains("timeout_seconds: 120"));
+        assert!(updated.contains("active_provider_id: 'grok'"));
+        assert!(updated.contains("headers:\n    'x-title': 'Liteyuki'"));
+        assert!(updated.contains("providers:"));
+        assert!(updated.contains("- id: 'grok'"));
+        assert!(updated.contains("provider: 'openai-compatible'"));
+        assert!(updated.contains("models:"));
+        assert!(updated.contains("- id: 'grok-4'"));
+        assert!(updated.contains("enabled: true"));
+    }
+
+    #[test]
+    fn update_toml_llm_writes_managed_provider_blocks() {
+        let source = "[llm]\nenabled = false\n";
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("x-title".to_string(), "Liteyuki".to_string());
+        let patch = LlmConfigPatch {
+            timeout_seconds: Some(120),
+            headers: Some(headers.clone()),
+            active_provider_id: Some("grok".to_string()),
+            providers: Some(vec![LlmManagedProviderConfig {
+                id: Some("grok".to_string()),
+                label: Some("grok".to_string()),
+                provider: Some("openai-compatible".to_string()),
+                base_url: Some("https://tokenflux.dev/v1".to_string()),
+                api_key: Some("sk-demo".to_string()),
+                timeout_seconds: Some(120),
+                headers: Some(headers),
+                models: Some(vec![LlmManagedModelConfig {
+                    id: Some("grok-4".to_string()),
+                    enabled: Some(true),
+                }]),
+            }]),
+            ..Default::default()
+        };
+
+        let updated = update_toml_llm_document(source, &patch);
+        assert!(updated.contains("timeout_seconds = 120"));
+        assert!(updated.contains("active_provider_id = \"grok\""));
+        assert!(updated.contains("headers = { \"x-title\" = \"Liteyuki\" }"));
+        assert!(updated.contains("[[llm.providers]]"));
+        assert!(updated.contains("provider = \"openai-compatible\""));
+        assert!(updated.contains("models = [{ id = \"grok-4\", enabled = true }]"));
     }
 
     #[test]

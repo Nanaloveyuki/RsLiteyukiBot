@@ -913,6 +913,7 @@ fn resolve_llm_config_reads_values_from_config() {
             parallel_tool_calls: Some(false),
             system_prompt: Some("system".to_string()),
             command_prefix: Some("/ask".to_string()),
+            ..Default::default()
         }),
         commands: None,
         plugins: None,
@@ -962,6 +963,7 @@ fn resolve_llm_config_falls_back_to_provider_urls_when_base_url_missing() {
             parallel_tool_calls: None,
             system_prompt: None,
             command_prefix: Some("/ask".to_string()),
+            ..Default::default()
         }),
         commands: None,
         plugins: None,
@@ -998,6 +1000,7 @@ fn validate_app_config_warns_when_llm_is_enabled_without_api_key() {
             parallel_tool_calls: None,
             system_prompt: None,
             command_prefix: Some(" ".to_string()),
+            ..Default::default()
         }),
         commands: None,
         plugins: None,
@@ -1049,6 +1052,7 @@ fn validate_app_config_warns_llm_base_url_in_main_config() {
             parallel_tool_calls: None,
             system_prompt: None,
             command_prefix: Some("/ask".to_string()),
+            ..Default::default()
         }),
         commands: None,
         plugins: None,
@@ -1089,6 +1093,7 @@ fn validate_app_config_warns_invalid_llm_sampling_ranges() {
             parallel_tool_calls: Some(true),
             system_prompt: None,
             command_prefix: Some("/ask".to_string()),
+            ..Default::default()
         }),
         commands: None,
         plugins: None,

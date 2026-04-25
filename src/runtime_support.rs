@@ -582,6 +582,9 @@ pub(crate) fn merge_llm_config_sections(
     if overlay.api_key.is_some() {
         merged.api_key = overlay.api_key;
     }
+    if overlay.headers.is_some() {
+        merged.headers = overlay.headers;
+    }
     if overlay.model.is_some() {
         merged.model = overlay.model;
     }
@@ -605,6 +608,12 @@ pub(crate) fn merge_llm_config_sections(
     }
     if overlay.command_prefix.is_some() {
         merged.command_prefix = overlay.command_prefix;
+    }
+    if overlay.active_provider_id.is_some() {
+        merged.active_provider_id = overlay.active_provider_id;
+    }
+    if overlay.providers.is_some() {
+        merged.providers = overlay.providers;
     }
     merged
 }
