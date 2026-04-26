@@ -145,8 +145,16 @@ Copyright © 2024 Mlikiowa
   - 部分代码(二次创作后部分)采用 [`LSO-Common.zh-CN v1.4 Modified`](./LICENSE)
 - 后端部分:
   - 采用 [`LSO-Common.zh-CN v1.4 Modified`](./LICENSE)
+- 插件兼容层实现:
+  - 按照各插件本体平台协议进行二次许可
 
 未涉及或未明晰内容, 如字体等版权由提供方许给的许可进行授权, 受制于篇幅不再详细描述.
+
+## 友情项目
+
+- [NapcatQQ](https://github.com/NapNeko/NapCatQQ): ~~一只猫~~非常完善的 Onebot v11 实现端
+- [Astrbot](https://github.com/AstrBotDevs/AstrBot): 本项目的参考对象, 非常感谢 Astrbot 提供的 LLM 思路
+- [Neo-Mofox](https://github.com/MoFox-Studio/Neo-MoFox): 插件兼容层的实现对象之一, 一个新兴的 Bot 框架
 
 
 [Liteyuki6.0]: https://img.shields.io/badge/Liteyuki-6.0-blue?style=for-the-badge
