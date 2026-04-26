@@ -1,0 +1,37 @@
+{
+  "astrbot": {
+    "label": "AB",
+    "color": "secondary",
+    "match": ["astrbot", "astrbot-compatible"]
+  },
+  "liteyukibot": {
+    "label": "LY",
+    "color": "primary",
+    "match": ["liteyuki", "liteyukibot", "rsliteyuki", "liteyuki-native", "liteyuki-python-bridge"]
+  },
+  "nonebot": {
+    "label": "NB",
+    "color": "success",
+    "match": ["nonebot", "nonebot2"]
+  },
+  "maibot": {
+    "label": "MB",
+    "color": "warning",
+    "match": ["maibot", "mai-bot", "mai_bot"]
+  },
+  "neo-mofox": {
+    "label": "NM",
+    "color": "warning",
+    "match": ["neo-mofox", "neo_mofox", "neomofox"]
+  },
+  "mofox": {
+    "label": "MF",
+    "color": "default",
+    "match": ["mofox"]
+  },
+  "melobot": {
+    "label": "ML",
+    "color": "default",
+    "match": ["melobot", "melo-bot", "melo_bot"]
+  }
+}

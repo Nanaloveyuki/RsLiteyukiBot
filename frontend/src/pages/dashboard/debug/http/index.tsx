@@ -1,4 +1,5 @@
 import { Button } from '@heroui/button';
+import { Chip } from '@heroui/chip';
 import { Input, Textarea } from '@heroui/input';
 import { Select, SelectItem } from '@heroui/select';
 import { Switch } from '@heroui/switch';
@@ -335,15 +336,19 @@ export default function LlmManagerPage () {
     }
   };
 
-  const handleSave = async () => {
-    const providersToSave = applyHeadersDraft(providers).map((provider) => (
+  const persistManagerState = async (
+    nextActiveProviderId: string | undefined,
+    nextProviders: LlmManagedProvider[],
+    successMessage: string
+  ) => {
+    const providersToSave = applyHeadersDraft(nextProviders).map((provider) => (
       buildProviderPayload(provider, providerCatalog)
     ));
     setProviders(providersToSave);
     setSaving(true);
     try {
       const state = await LlmManager.saveManagerState({
-        activeProviderId,
+        activeProviderId: nextActiveProviderId,
         providers: providersToSave,
       });
       const normalized = normalizeManagerState(state, state.providerCatalog);
@@ -357,12 +362,26 @@ export default function LlmManagerPage () {
         }
         return normalized.activeProviderId ?? normalized.providers[0]?.id;
       });
-      toast.success('模型管理配置已保存');
+      toast.success(successMessage);
     } catch (error) {
       toast.error(`保存失败: ${(error as Error).message}`);
+      await loadManagerState();
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleSave = async () => {
+    await persistManagerState(activeProviderId, providers, '模型管理配置已保存');
+  };
+
+  const handleSetActiveProvider = async (providerId: string) => {
+    if (providerId === activeProviderId || saving) {
+      return;
+    }
+    setActiveProviderId(providerId);
+    setSelectedProviderId(providerId);
+    await persistManagerState(providerId, providers, 'Active Provider 已切换');
   };
 
   const handleFetchModels = async () => {
@@ -568,14 +587,23 @@ export default function LlmManagerPage () {
                         </div>
                       </button>
                       <div className='mt-2 flex items-center justify-between'>
-                        <Button
-                          size='sm'
-                          variant={isActive ? 'solid' : 'flat'}
-                          color={isActive ? 'primary' : 'default'}
-                          onPress={() => setActiveProviderId(provider.id)}
-                        >
-                          {isActive ? 'Active' : '设为 Active'}
-                        </Button>
+                        {isActive
+                          ? (
+                            <Chip size='sm' color='primary' variant='flat'>
+                              Active
+                            </Chip>
+                            )
+                          : (
+                            <Button
+                              size='sm'
+                              variant='flat'
+                              color='default'
+                              onPress={() => void handleSetActiveProvider(provider.id)}
+                              isLoading={saving && provider.id === selectedProviderId}
+                            >
+                              设为 Active
+                            </Button>
+                            )}
                         <Button
                           isIconOnly
                           size='sm'

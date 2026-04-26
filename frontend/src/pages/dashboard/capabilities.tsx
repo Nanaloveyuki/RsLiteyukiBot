@@ -8,9 +8,11 @@ import toast from 'react-hot-toast';
 import {
   LuBookOpen,
   LuBraces,
+  LuChevronRight,
   LuPlus,
   LuRefreshCw,
   LuSave,
+  LuSearch,
   LuServer,
   LuTrash2,
   LuUpload,
@@ -57,9 +59,97 @@ function WarningList ({ warnings }: { warnings: string[]; }) {
 
 function JsonPreview ({ value }: { value: unknown; }) {
   return (
-    <pre className='max-h-56 overflow-auto rounded-lg border border-white/20 bg-white/50 p-3 text-xs text-default-600 dark:border-white/10 dark:bg-black/20 dark:text-default-300'>
-      {JSON.stringify(value ?? {}, null, 2)}
-    </pre>
+    <details className='group rounded-lg border border-white/20 bg-white/50 dark:border-white/10 dark:bg-black/20'>
+      <summary className='flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-medium text-default-600 dark:text-default-300'>
+        <LuChevronRight className='transition-transform group-open:rotate-90' />
+        <span>详细信息 JSON</span>
+      </summary>
+      <pre className='max-h-56 overflow-auto border-t border-white/20 p-3 text-xs text-default-600 dark:border-white/10 dark:text-default-300'>
+        {JSON.stringify(value ?? {}, null, 2)}
+      </pre>
+    </details>
+  );
+}
+
+function normalizeSearchText (value: string) {
+  return value.trim().toLowerCase();
+}
+
+function matchesQuery (query: string, parts: Array<string | undefined>) {
+  const normalized = normalizeSearchText(query);
+  if (!normalized) {
+    return true;
+  }
+  return parts.some((part) => part?.toLowerCase().includes(normalized));
+}
+
+function uniqueTags (values: Array<string | undefined>) {
+  return Array.from(new Set(values
+    .map((value) => value?.trim())
+    .filter((value): value is string => !!value)))
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function FilterToolbar ({
+  query,
+  onQueryChange,
+  tags,
+  activeTag,
+  onTagChange,
+  placeholder,
+  total,
+  shown,
+}: {
+  query: string;
+  onQueryChange: (value: string) => void;
+  tags?: string[];
+  activeTag?: string;
+  onTagChange?: (value: string) => void;
+  placeholder: string;
+  total: number;
+  shown: number;
+}) {
+  return (
+    <div className='mt-3 rounded-xl border border-white/20 bg-white/35 p-3 dark:border-white/10 dark:bg-white/5'>
+      <div className='flex flex-col gap-2 md:flex-row md:items-center'>
+        <Input
+          size='sm'
+          variant='bordered'
+          value={query}
+          onChange={(event) => onQueryChange(event.target.value)}
+          placeholder={placeholder}
+          startContent={<LuSearch className='text-default-400' />}
+        />
+        <div className='shrink-0 text-xs text-default-400'>
+          {shown}/{total}
+        </div>
+      </div>
+      {tags && tags.length > 0 && onTagChange && (
+        <div className='mt-2 flex flex-wrap gap-1.5'>
+          <Chip
+            size='sm'
+            variant={!activeTag ? 'solid' : 'flat'}
+            color={!activeTag ? 'primary' : 'default'}
+            className='cursor-pointer'
+            onClick={() => onTagChange('')}
+          >
+            全部
+          </Chip>
+          {tags.map((tag) => (
+            <Chip
+              key={tag}
+              size='sm'
+              variant={activeTag === tag ? 'solid' : 'flat'}
+              color={activeTag === tag ? 'primary' : 'default'}
+              className='cursor-pointer'
+              onClick={() => onTagChange(tag)}
+            >
+              {tag}
+            </Chip>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -144,6 +234,8 @@ function ToolsPanel () {
   const [loading, setLoading] = useState(true);
   const [tools, setTools] = useState<ToolInventoryItem[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [query, setQuery] = useState('');
+  const [tag, setTag] = useState('');
 
   const load = async () => {
     setLoading(true);
@@ -174,6 +266,24 @@ function ToolsPanel () {
     }
   };
 
+  const tags = useMemo(
+    () => uniqueTags(tools.flatMap((tool) => [tool.category, tool.origin])),
+    [tools]
+  );
+  const filteredTools = useMemo(
+    () => tools.filter((tool) => {
+      const tagMatched = !tag || tool.category === tag || tool.origin === tag;
+      return tagMatched && matchesQuery(query, [
+        tool.name,
+        tool.description,
+        tool.category,
+        tool.origin,
+        tool.whenToUse,
+      ]);
+    }),
+    [query, tag, tools]
+  );
+
   return (
     <div className='relative'>
       <PageLoading loading={loading} />
@@ -187,13 +297,23 @@ function ToolsPanel () {
         )}
       />
       <WarningList warnings={warnings} />
+      <FilterToolbar
+        query={query}
+        onQueryChange={setQuery}
+        tags={tags}
+        activeTag={tag}
+        onTagChange={setTag}
+        placeholder='搜索工具名称、描述、类别或来源'
+        total={tools.length}
+        shown={filteredTools.length}
+      />
       <div className='mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2'>
-        {tools.map((tool) => (
+        {filteredTools.map((tool) => (
           <ToolCard key={`${tool.origin ?? 'local'}:${tool.name}`} tool={tool} onToggle={handleToggle} />
         ))}
-        {!tools.length && !loading && (
+        {!filteredTools.length && !loading && (
           <div className='rounded-xl border border-dashed border-white/25 p-6 text-center text-sm text-default-400 dark:border-white/10'>
-            暂无工具
+            {tools.length ? '没有匹配的工具' : '暂无工具'}
           </div>
         )}
       </div>
@@ -218,6 +338,8 @@ function McpPanel () {
   const [servers, setServers] = useState<McpServerItem[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [configPath, setConfigPath] = useState('');
+  const [query, setQuery] = useState('');
+  const [tag, setTag] = useState('');
 
   const load = async () => {
     setLoading(true);
@@ -283,6 +405,28 @@ function McpPanel () {
     }
   };
 
+  const tags = useMemo(
+    () => uniqueTags(servers.flatMap((server) => [
+      server.active ? 'active' : 'disabled',
+      server.transport,
+    ])),
+    [servers]
+  );
+  const filteredServers = useMemo(
+    () => servers.filter((server) => {
+      const statusTag = server.active ? 'active' : 'disabled';
+      const tagMatched = !tag || server.transport === tag || statusTag === tag;
+      return tagMatched && matchesQuery(query, [
+        server.name,
+        server.transport,
+        server.url,
+        ...(server.toolNames ?? []),
+        ...(server.warnings ?? []),
+      ]);
+    }),
+    [query, servers, tag]
+  );
+
   return (
     <div className='relative'>
       <PageLoading loading={loading} />
@@ -309,8 +453,20 @@ function McpPanel () {
         </div>
       )}
       <WarningList warnings={warnings} />
+      <FilterToolbar
+        query={query}
+        onQueryChange={setQuery}
+        tags={tags}
+        activeTag={tag}
+        onTagChange={setTag}
+        placeholder='搜索 MCP 名称、URL、transport 或 tool'
+        total={servers.length}
+        shown={filteredServers.length}
+      />
       <div className='mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2'>
-        {servers.map((server, index) => (
+        {filteredServers.map((server) => {
+          const index = servers.indexOf(server);
+          return (
           <div key={`${server.name || 'new'}-${index}`} className='rounded-xl border border-white/20 bg-white/45 p-3 dark:border-white/10 dark:bg-white/5'>
             <div className='mb-3 flex items-center justify-between gap-3'>
               <div className='flex min-w-0 items-center gap-2'>
@@ -379,7 +535,13 @@ function McpPanel () {
               </Button>
             </div>
           </div>
-        ))}
+          );
+        })}
+        {!filteredServers.length && !loading && (
+          <div className='rounded-xl border border-dashed border-white/25 p-6 text-center text-sm text-default-400 dark:border-white/10'>
+            {servers.length ? '没有匹配的 MCP Server' : '暂无 MCP Server'}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -425,6 +587,7 @@ function SkillsPanel () {
   const [uploadName, setUploadName] = useState('');
   const [uploadContent, setUploadContent] = useState('');
   const [overwrite, setOverwrite] = useState(false);
+  const [query, setQuery] = useState('');
 
   const load = async () => {
     setLoading(true);
@@ -484,6 +647,14 @@ function SkillsPanel () {
     () => selectedName ? skills.some((skill) => skill.name === selectedName) : false,
     [selectedName, skills]
   );
+  const filteredSkills = useMemo(
+    () => skills.filter((skill) => matchesQuery(query, [
+      skill.name,
+      skill.description,
+      skill.path,
+    ])),
+    [query, skills]
+  );
 
   return (
     <div className='relative'>
@@ -498,9 +669,16 @@ function SkillsPanel () {
         )}
       />
       <WarningList warnings={warnings} />
+      <FilterToolbar
+        query={query}
+        onQueryChange={setQuery}
+        placeholder='搜索 Skill 名称、描述或路径'
+        total={skills.length}
+        shown={filteredSkills.length}
+      />
       <div className='mt-3 grid min-h-[32rem] grid-cols-1 gap-3 xl:grid-cols-[20rem_minmax(0,1fr)_22rem]'>
         <div className='space-y-2 overflow-y-auto'>
-          {skills.map((skill) => (
+          {filteredSkills.map((skill) => (
             <SkillCard
               key={skill.name}
               skill={skill}
@@ -508,9 +686,9 @@ function SkillsPanel () {
               onRead={(name) => void read(name)}
             />
           ))}
-          {!skills.length && !loading && (
+          {!filteredSkills.length && !loading && (
             <div className='rounded-xl border border-dashed border-white/25 p-6 text-center text-sm text-default-400 dark:border-white/10'>
-              暂无 Skill
+              {skills.length ? '没有匹配的 Skill' : '暂无 Skill'}
             </div>
           )}
         </div>

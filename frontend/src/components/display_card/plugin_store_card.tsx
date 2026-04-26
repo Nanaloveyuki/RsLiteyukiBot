@@ -12,45 +12,9 @@ import { useState } from 'react';
 
 import key from '@/const/key';
 import { PluginStoreItem } from '@/types/plugin-store';
+import { resolvePluginIconFallback } from '@/utils/plugin_icon';
 
 export type InstallStatus = 'not-installed' | 'installed' | 'update-available';
-
-/** 提取作者头像 URL */
-function getAuthorAvatar (homepage?: string, downloadUrl?: string): string | undefined {
-  // 1. 尝试从 downloadUrl 提取 GitHub 用户名 (通常是最准确的源码仓库所有者)
-  if (downloadUrl) {
-    try {
-      const url = new URL(downloadUrl);
-      if (url.hostname === 'github.com' || url.hostname === 'www.github.com') {
-        const parts = url.pathname.split('/').filter(Boolean);
-        if (parts.length >= 1) {
-          return `https://github.com/${parts[0]}.png`;
-        }
-      }
-    } catch {
-      // 忽略解析错误
-    }
-  }
-
-  // 2. 尝试从 homepage 提取
-  if (homepage) {
-    try {
-      const url = new URL(homepage);
-      if (url.hostname === 'github.com' || url.hostname === 'www.github.com') {
-        const parts = url.pathname.split('/').filter(Boolean);
-        if (parts.length >= 1) {
-          return `https://github.com/${parts[0]}.png`;
-        }
-      } else {
-        // 如果是自定义域名，尝试获取 favicon。使用主流的镜像服务以保证国内访问速度
-        return `https://api.iowen.cn/favicon/${url.hostname}.png`;
-      }
-    } catch {
-      // 忽略解析错误
-    }
-  }
-  return undefined;
-}
 
 export interface PluginStoreCardProps {
   data: PluginStoreItem;
@@ -67,13 +31,12 @@ const PluginStoreCard: React.FC<PluginStoreCardProps> = ({
   installStatus = 'not-installed',
   installedVersion,
 }) => {
-  const { name, version, author, description, tags, homepage, downloadUrl } = data;
+  const { name, version, author, description, tags, homepage, icon } = data;
   const [backgroundImage] = useLocalStorage<string>(key.backgroundImage, '');
   const [isExpanded, setIsExpanded] = useState(false);
   const hasBackground = !!backgroundImage;
 
-  // 综合尝试提取头像，最后兜底使用 Vercel 风格头像
-  const avatarUrl = getAuthorAvatar(homepage, downloadUrl) || `https://avatar.vercel.sh/${encodeURIComponent(name)}`;
+  const fallbackIcon = resolvePluginIconFallback(data);
 
   // 作者链接组件
   const AuthorComponent = (
@@ -100,11 +63,11 @@ const PluginStoreCard: React.FC<PluginStoreCardProps> = ({
         {/* Header: Avatar + Name + Author */}
         <div className='flex items-start gap-3'>
           <Avatar
-            src={avatarUrl}
-            name={author || '?'}
+            src={icon}
+            name={fallbackIcon.label}
             size='md'
             isBordered
-            color='default'
+            color={fallbackIcon.color}
             radius='full' // 圆形头像
             className='flex-shrink-0 transition-transform group-hover:scale-105'
           />

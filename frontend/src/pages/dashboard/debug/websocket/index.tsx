@@ -535,8 +535,8 @@ export default function LlmChatPage () {
       return {
         ...DEFAULT_PREFERENCES,
         ...base,
-        baseUrl: base.baseUrl || settings.baseUrl,
-        model: base.model || settings.model,
+        baseUrl: settings.baseUrl,
+        model: settings.model,
       };
     });
   }, [settings, setStoredConfig]);
@@ -579,6 +579,10 @@ export default function LlmChatPage () {
   );
   const currentBaseUrl = config.baseUrl || settings?.baseUrl || '';
   const currentModel = config.model || settings?.model || '';
+  const selectedProviderOption = useMemo(
+    () => providerOptions.find((option) => option.baseUrl === currentBaseUrl),
+    [currentBaseUrl, providerOptions]
+  );
   const selectedProviderId = useMemo(
     () => detectProviderId(currentBaseUrl),
     [currentBaseUrl]
@@ -588,12 +592,14 @@ export default function LlmChatPage () {
     [providerCatalog, selectedProviderId]
   );
   const modelOptions = useMemo(() => {
-    const catalogModels = modelOptionsForProvider(selectedProviderId, providerCatalog);
-    if (catalogModels.length > 0) {
-      return catalogModels;
+    if (selectedProviderOption?.modelOptions?.length) {
+      return selectedProviderOption.modelOptions;
     }
-    return settings?.modelOptions ?? [];
-  }, [providerCatalog, selectedProviderId, settings]);
+    if (settings?.baseUrl === currentBaseUrl && settings.modelOptions?.length) {
+      return settings.modelOptions;
+    }
+    return modelOptionsForProvider(selectedProviderId, providerCatalog);
+  }, [currentBaseUrl, providerCatalog, selectedProviderId, selectedProviderOption, settings]);
   const reasoningOptions = useMemo(() => {
     return settings?.reasoningOptions ?? [];
   }, [settings]);
@@ -1252,8 +1258,11 @@ export default function LlmChatPage () {
                           const selected = Array.from(keys)[0];
                           if (typeof selected === 'string') {
                             setConfigField('baseUrl', selected);
+                            const selectedOption = providerOptions.find((option) => option.baseUrl === selected);
                             const nextProviderId = detectProviderId(selected);
-                            const nextModels = modelOptionsForProvider(nextProviderId, providerCatalog);
+                            const nextModels = selectedOption?.modelOptions?.length
+                              ? selectedOption.modelOptions
+                              : modelOptionsForProvider(nextProviderId, providerCatalog);
                             if (nextModels.length > 0 && !nextModels.includes(currentModel)) {
                               setConfigField('model', nextModels[0]);
                             }

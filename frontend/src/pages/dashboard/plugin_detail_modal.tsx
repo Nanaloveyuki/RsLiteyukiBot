@@ -12,6 +12,7 @@ import { PluginStoreItem } from '@/types/plugin-store';
 import { InstallStatus } from '@/components/display_card/plugin_store_card';
 import TailwindMarkdown from '@/components/tailwind_markdown';
 import { serverRequest } from '@/utils/request';
+import { resolvePluginIconFallback } from '@/utils/plugin_icon';
 
 interface PluginDetailModalProps {
   isOpen: boolean;
@@ -20,42 +21,6 @@ interface PluginDetailModalProps {
   installStatus?: InstallStatus;
   installedVersion?: string;
   onInstall?: () => void;
-}
-
-/** 提取作者头像 URL */
-function getAuthorAvatar (homepage?: string, downloadUrl?: string): string | undefined {
-  // 1. 尝试从 downloadUrl 提取 GitHub 用户名
-  if (downloadUrl) {
-    try {
-      const url = new URL(downloadUrl);
-      if (url.hostname === 'github.com' || url.hostname === 'www.github.com') {
-        const parts = url.pathname.split('/').filter(Boolean);
-        if (parts.length >= 1) {
-          return `https://github.com/${parts[0]}.png`;
-        }
-      }
-    } catch {
-      // 忽略解析错误
-    }
-  }
-
-  // 2. 尝试从 homepage 提取
-  if (homepage) {
-    try {
-      const url = new URL(homepage);
-      if (url.hostname === 'github.com' || url.hostname === 'www.github.com') {
-        const parts = url.pathname.split('/').filter(Boolean);
-        if (parts.length >= 1) {
-          return `https://github.com/${parts[0]}.png`;
-        }
-      } else {
-        return `https://api.iowen.cn/favicon/${url.hostname}.png`;
-      }
-    } catch {
-      // 忽略解析错误
-    }
-  }
-  return undefined;
 }
 
 /** 提取 GitHub 仓库信息 */
@@ -151,8 +116,8 @@ export default function PluginDetailModal ({
 
   if (!plugin) return null;
 
-  const { name, version, author, description, tags, homepage, downloadUrl, minVersion } = plugin;
-  const avatarUrl = getAuthorAvatar(homepage, downloadUrl) || `https://avatar.vercel.sh/${encodeURIComponent(name)}`;
+  const { name, version, author, description, tags, homepage, downloadUrl, minVersion, icon } = plugin;
+  const fallbackIcon = resolvePluginIconFallback(plugin);
 
   return (
     <Modal
@@ -172,11 +137,11 @@ export default function PluginDetailModal ({
               {/* 插件头部信息 */}
               <div className='flex items-start gap-4'>
                 <Avatar
-                  src={avatarUrl}
-                  name={author || '?'}
+                  src={icon}
+                  name={fallbackIcon.label}
                   size='lg'
                   isBordered
-                  color='primary'
+                  color={fallbackIcon.color}
                   radius='lg'
                   className='flex-shrink-0'
                 />

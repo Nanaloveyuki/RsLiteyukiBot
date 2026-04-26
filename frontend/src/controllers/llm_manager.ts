@@ -5,6 +5,7 @@ export interface LlmProviderOption {
   label: string;
   baseUrl: string;
   active: boolean;
+  modelOptions?: string[];
 }
 
 export type LlmParameterSupportState =
@@ -84,6 +85,7 @@ export interface LlmChatSettings {
   provider: string;
   model: string;
   baseUrl: string;
+  activeProviderId?: string;
   providerOptions: LlmProviderOption[];
   modelOptions?: string[];
   reasoningOptions?: string[];

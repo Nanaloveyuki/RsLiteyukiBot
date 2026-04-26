@@ -11,6 +11,7 @@ import { useState } from 'react';
 
 import key from '@/const/key';
 import { PluginItem } from '@/controllers/plugin_manager';
+import { resolvePluginIconFallback } from '@/utils/plugin_icon';
 import { resolveRuntimeAssetUrl } from '@/utils/runtime';
 
 function getPluginIconUrl (iconPath?: string): string | undefined {
@@ -51,8 +52,8 @@ const PluginDisplayCard: React.FC<PluginDisplayCardProps> = ({
   const [backgroundImage] = useLocalStorage<string>(key.backgroundImage, '');
   const hasBackground = !!backgroundImage;
 
-  // 后端已处理 icon，前端只需拼接 token；无 icon 时兜底 Vercel 风格头像
-  const avatarUrl = getPluginIconUrl(icon) || `https://avatar.vercel.sh/${encodeURIComponent(name)}`;
+  const avatarUrl = getPluginIconUrl(icon);
+  const fallbackIcon = resolvePluginIconFallback(data);
 
   const handleToggle = () => {
     setProcessing(true);
@@ -80,12 +81,12 @@ const PluginDisplayCard: React.FC<PluginDisplayCardProps> = ({
           <div className='flex items-center gap-3 min-w-0'>
             <Avatar
               src={avatarUrl}
-              name={author || '?'}
+              name={fallbackIcon.label}
               className='flex-shrink-0'
               size='md'
               isBordered
               radius='full'
-              color='default'
+              color={fallbackIcon.color}
             />
             <div className='min-w-0'>
               <h3 className='text-base font-bold text-default-900 truncate' title={name}>

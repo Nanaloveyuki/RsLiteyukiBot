@@ -7,6 +7,7 @@ export interface PluginStoreItem {
   description: string; // 插件描述
   author: string; // 作者
   homepage?: string; // 主页链接
+  icon?: string; // 插件声明图标
   downloadUrl: string; // 下载地址
   tags?: string[]; // 标签
   minVersion?: string; // 最低版本要求
