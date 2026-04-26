@@ -56,7 +56,8 @@ pub(crate) struct McpManager {
     config_path: std::path::PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct McpServerConfig {
     pub(crate) name: String,
     pub(crate) url: String,
@@ -66,7 +67,7 @@ pub(crate) struct McpServerConfig {
     pub(crate) transport: Option<String>,
     #[serde(default)]
     pub(crate) headers: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, alias = "timeout_seconds")]
     pub(crate) timeout_seconds: Option<u64>,
 }
 

@@ -61,16 +61,16 @@ pub use observability::{
 };
 pub use plugin::{
     LoadedPlugin, LuaRuntimeAdapter, NativeRuntimeAdapter, Plugin, PluginAbiContract,
-    PluginAbiMethod, PluginCallEnvelope, PluginCallResult, PluginCatalogEntry, PluginContext,
-    PluginDescriptor, PluginErrorCode, PluginFuture, PluginHandshakeRequest,
-    PluginHandshakeResponse, PluginHostApi, PluginHostBridge, PluginLoadError, PluginLoadPlan,
-    PluginLoadState, PluginManager, PluginManifest, PluginManifestError, PluginManifestLoader,
-    PluginMetadata, PluginRegisteredCronJob, PluginRegisteredTask, PluginRegisteredTool,
-    PluginRegisteredWebApi, PluginRuntimeDiagnostics, PluginRuntimeKind, PluginRuntimeSpec,
-    PluginScopedCommand, PluginSdk, PluginSdkError, PluginSdkFuture, PluginSdkSpec,
-    PluginToolResult, PluginTuiCommand, PluginType, PluginWebApiRequest, PluginWebApiResponse,
-    PluginCapabilitySnapshot, PluginCapabilitySource, PluginExecutionRecord,
-    PythonRuntimeAdapter, RuntimeAdapter, RuntimeAdapterRegistry,
+    PluginAbiMethod, PluginCallEnvelope, PluginCallResult, PluginCapabilitySnapshot,
+    PluginCapabilitySource, PluginCatalogEntry, PluginContext, PluginDescriptor, PluginErrorCode,
+    PluginExecutionRecord, PluginFuture, PluginHandshakeRequest, PluginHandshakeResponse,
+    PluginHostApi, PluginHostBridge, PluginLoadError, PluginLoadPlan, PluginLoadState,
+    PluginManager, PluginManifest, PluginManifestError, PluginManifestLoader, PluginMetadata,
+    PluginRegisteredCronJob, PluginRegisteredTask, PluginRegisteredTool, PluginRegisteredWebApi,
+    PluginRuntimeDiagnostics, PluginRuntimeKind, PluginRuntimeSpec, PluginScopedCommand, PluginSdk,
+    PluginSdkError, PluginSdkFuture, PluginSdkSpec, PluginToolResult, PluginTuiCommand, PluginType,
+    PluginWebApiRequest, PluginWebApiResponse, PythonRuntimeAdapter, RuntimeAdapter,
+    RuntimeAdapterRegistry,
 };
 pub use session::{
     Matcher, MatcherReport, Rule, SessionDispatchReport, SessionEvent, SessionRouter, SessionScope,

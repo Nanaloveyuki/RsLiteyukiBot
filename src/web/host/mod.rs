@@ -825,9 +825,13 @@ fn plugin_declared_config_path(descriptor: &crate::PluginDescriptor) -> Option<&
         .filter(|path| !path.is_empty())
 }
 
+fn descriptor_has_config(descriptor: &crate::PluginDescriptor) -> bool {
+    plugin_declared_config_path(descriptor).is_some()
+        && (plugin_can_read_config(descriptor) || plugin_can_write_config(descriptor))
+}
+
 fn plugin_has_config(entry: &crate::PluginCatalogEntry) -> bool {
-    plugin_declared_config_path(&entry.descriptor).is_some()
-        && (plugin_can_read_config(&entry.descriptor) || plugin_can_write_config(&entry.descriptor))
+    descriptor_has_config(&entry.descriptor)
 }
 
 fn plugin_extension_pages(entry: &crate::PluginCatalogEntry) -> Vec<Value> {
@@ -980,11 +984,26 @@ fn resolve_plugin_descriptor(
         .or_else(|| discover_plugin_descriptor(plugin_id))
 }
 
-fn build_runtime_plugin_payload(snapshot: AppHostPluginCatalogSnapshot) -> Value {
+fn build_runtime_plugin_payload(
+    runtime_host: &EmbeddedAppHost,
+    snapshot: AppHostPluginCatalogSnapshot,
+) -> Value {
     let disabled = snapshot
         .disabled_plugin_ids
         .into_iter()
         .collect::<std::collections::HashSet<_>>();
+    let capability_snapshots = snapshot
+        .entries
+        .iter()
+        .map(|entry| {
+            let plugin_id = entry.descriptor.metadata.id.clone();
+            let snapshot =
+                run_async_for_web_host(runtime_host.plugin_capability_snapshot(plugin_id.as_str()))
+                    .ok()
+                    .flatten();
+            (plugin_id, snapshot)
+        })
+        .collect::<HashMap<_, _>>();
     let mut extension_pages = Vec::new();
     let mut plugins = Vec::new();
 
@@ -997,6 +1016,11 @@ fn build_runtime_plugin_payload(snapshot: AppHostPluginCatalogSnapshot) -> Value
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
         let pages = plugin_extension_pages(&entry);
+        let capability_snapshot = capability_snapshots
+            .get(metadata.id.as_str())
+            .and_then(|snapshot| snapshot.as_ref());
+        let compat_kind = plugin_compat_kind(entry.descriptor.runtime.kind, capability_snapshot);
+        let source_kind = plugin_source_kind(entry.descriptor.runtime.kind, compat_kind);
         let status = if disabled.contains(metadata.id.as_str()) {
             "disabled"
         } else if entry.loaded && entry.load_state != Some(PluginLoadState::Deferred) {
@@ -1021,12 +1045,34 @@ fn build_runtime_plugin_payload(snapshot: AppHostPluginCatalogSnapshot) -> Value
             Value::String(localized_text(metadata.description.as_str())),
         );
         plugin.insert("author".to_string(), Value::String(metadata.author.clone()));
+        plugin.insert(
+            "runtimeKind".to_string(),
+            serde_json::to_value(entry.descriptor.runtime.kind)
+                .unwrap_or_else(|_| Value::String("native".to_string())),
+        );
+        plugin.insert(
+            "pluginType".to_string(),
+            serde_json::to_value(metadata.plugin_type)
+                .unwrap_or_else(|_| Value::String("unclassified".to_string())),
+        );
+        plugin.insert(
+            "sourceKind".to_string(),
+            Value::String(source_kind.to_string()),
+        );
+        plugin.insert(
+            "compatKind".to_string(),
+            Value::String(compat_kind.to_string()),
+        );
         plugin.insert("status".to_string(), Value::String(status.to_string()));
         plugin.insert(
             "hasConfig".to_string(),
             Value::Bool(plugin_has_config(&entry)),
         );
         plugin.insert("hasPages".to_string(), Value::Bool(!pages.is_empty()));
+        plugin.insert(
+            "hasCapabilities".to_string(),
+            plugin_capability_flags(capability_snapshot),
+        );
         if !metadata.homepage.trim().is_empty() {
             plugin.insert(
                 "homepage".to_string(),
@@ -1061,9 +1107,22 @@ fn discover_plugins() -> Vec<Value> {
     manifests
         .into_iter()
         .map(|manifest| {
-            let id = manifest.descriptor.metadata.id.clone();
-            let description = localized_text(manifest.descriptor.metadata.description.as_str());
-            let name = localized_text(manifest.descriptor.metadata.name.as_str());
+            let descriptor = manifest.descriptor;
+            let id = descriptor.metadata.id.clone();
+            let description = localized_text(descriptor.metadata.description.as_str());
+            let name = localized_text(descriptor.metadata.name.as_str());
+            let version = descriptor
+                .metadata
+                .extra
+                .get("version")
+                .and_then(Value::as_str)
+                .unwrap_or("builtin")
+                .to_string();
+            let author = descriptor.metadata.author.clone();
+            let homepage = descriptor.metadata.homepage.clone();
+            let pages = plugin_declared_page_paths(&descriptor);
+            let compat_kind = plugin_compat_kind(descriptor.runtime.kind, None);
+            let source_kind = plugin_source_kind(descriptor.runtime.kind, compat_kind);
             let status = if disabled.iter().any(|entry| entry == &id) {
                 "disabled"
             } else {
@@ -1072,34 +1131,86 @@ fn discover_plugins() -> Vec<Value> {
             Value::Object(Map::from_iter([
                 ("name".to_string(), Value::String(name)),
                 ("id".to_string(), Value::String(id.clone())),
-                (
-                    "version".to_string(),
-                    Value::String(
-                        manifest
-                            .descriptor
-                            .metadata
-                            .extra
-                            .get("version")
-                            .and_then(Value::as_str)
-                            .unwrap_or("builtin")
-                            .to_string(),
-                    ),
-                ),
+                ("version".to_string(), Value::String(version)),
                 ("description".to_string(), Value::String(description)),
+                ("author".to_string(), Value::String(author)),
                 (
-                    "author".to_string(),
-                    Value::String(manifest.descriptor.metadata.author),
+                    "runtimeKind".to_string(),
+                    serde_json::to_value(descriptor.runtime.kind)
+                        .unwrap_or_else(|_| Value::String("native".to_string())),
+                ),
+                (
+                    "pluginType".to_string(),
+                    serde_json::to_value(descriptor.metadata.plugin_type)
+                        .unwrap_or_else(|_| Value::String("unclassified".to_string())),
+                ),
+                (
+                    "sourceKind".to_string(),
+                    Value::String(source_kind.to_string()),
+                ),
+                (
+                    "compatKind".to_string(),
+                    Value::String(compat_kind.to_string()),
                 ),
                 ("status".to_string(), Value::String(status.to_string())),
-                ("hasConfig".to_string(), Value::Bool(false)),
-                ("hasPages".to_string(), Value::Bool(false)),
                 (
-                    "homepage".to_string(),
-                    Value::String(manifest.descriptor.metadata.homepage),
+                    "hasConfig".to_string(),
+                    Value::Bool(descriptor_has_config(&descriptor)),
                 ),
+                ("hasPages".to_string(), Value::Bool(!pages.is_empty())),
+                ("hasCapabilities".to_string(), plugin_capability_flags(None)),
+                ("homepage".to_string(), Value::String(homepage)),
             ]))
         })
         .collect()
+}
+
+fn plugin_snapshot_has_runtime_capabilities(snapshot: &crate::PluginCapabilitySnapshot) -> bool {
+    !snapshot.tools.is_empty()
+        || !snapshot.web_apis.is_empty()
+        || !snapshot.cron_jobs.is_empty()
+        || !snapshot.tasks.is_empty()
+}
+
+fn plugin_capability_flags(snapshot: Option<&crate::PluginCapabilitySnapshot>) -> Value {
+    let tools = snapshot.is_some_and(|snapshot| !snapshot.tools.is_empty());
+    let web_apis = snapshot.is_some_and(|snapshot| !snapshot.web_apis.is_empty());
+    let cron_jobs = snapshot.is_some_and(|snapshot| !snapshot.cron_jobs.is_empty());
+    let tasks = snapshot.is_some_and(|snapshot| !snapshot.tasks.is_empty());
+
+    Value::Object(Map::from_iter([
+        (
+            "any".to_string(),
+            Value::Bool(tools || web_apis || cron_jobs || tasks),
+        ),
+        ("tools".to_string(), Value::Bool(tools)),
+        ("webApis".to_string(), Value::Bool(web_apis)),
+        ("cronJobs".to_string(), Value::Bool(cron_jobs)),
+        ("tasks".to_string(), Value::Bool(tasks)),
+    ]))
+}
+
+fn plugin_compat_kind(
+    runtime_kind: crate::PluginRuntimeKind,
+    snapshot: Option<&crate::PluginCapabilitySnapshot>,
+) -> &'static str {
+    if runtime_kind == crate::PluginRuntimeKind::Python
+        && snapshot.is_some_and(plugin_snapshot_has_runtime_capabilities)
+    {
+        "astrbot"
+    } else {
+        "none"
+    }
+}
+
+fn plugin_source_kind(runtime_kind: crate::PluginRuntimeKind, compat_kind: &str) -> &'static str {
+    match runtime_kind {
+        crate::PluginRuntimeKind::Native => "liteyuki-native",
+        crate::PluginRuntimeKind::Python if compat_kind == "astrbot" => "astrbot-compatible",
+        crate::PluginRuntimeKind::Python => "liteyuki-python-bridge",
+        crate::PluginRuntimeKind::Lua => "runtime-lua",
+        crate::PluginRuntimeKind::External => "runtime-external",
+    }
 }
 
 fn update_disabled_plugins(plugin_id: &str, enable: bool) -> Result<(), String> {
@@ -2325,9 +2436,9 @@ class CapabilityRoutePlugin(star.Star):
                     .json
                     .get("tools")
                     .and_then(Value::as_array)
-                    .is_some_and(|tools| tools.iter().any(|tool| {
-                        tool["name"].as_str() == Some(tool_name)
-                    })),
+                    .is_some_and(|tools| tools
+                        .iter()
+                        .any(|tool| { tool["name"].as_str() == Some(tool_name) })),
                 "first request should advertise plugin runtime tools: {}",
                 first_request.json
             );
@@ -2357,7 +2468,10 @@ class CapabilityRoutePlugin(star.Star):
                 .expect("second request should parse");
             assert_eq!(second_request.method, "POST");
             assert_eq!(second_request.path, "/v1/responses");
-            assert_eq!(second_request.json["previous_response_id"], "resp_plugin_tool_1");
+            assert_eq!(
+                second_request.json["previous_response_id"],
+                "resp_plugin_tool_1"
+            );
             assert!(
                 second_request
                     .json
@@ -2710,6 +2824,118 @@ class CapabilityRoutePlugin(star.Star):
         assert!(llm_config.contains("api_key: 'anthropic-test-key'"));
     }
 
+    #[test]
+    fn llm_prompt_profile_routes_support_full_management_cycle() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let env = LlmManagerRouteTestEnv::new();
+        let server = test_server();
+
+        let initial_response = route_json_api(&server, "GET", "/api/LLM/PromptProfiles", None);
+        assert_eq!(initial_response["code"], 0);
+        assert_eq!(initial_response["data"]["activeProfile"], "default");
+        assert_eq!(
+            initial_response["data"]["profiles"]
+                .as_array()
+                .map(|profiles| profiles.len()),
+            Some(1)
+        );
+        assert_eq!(initial_response["data"]["profiles"][0]["name"], "default");
+        assert_eq!(initial_response["data"]["profiles"][0]["active"], true);
+        assert_eq!(initial_response["data"]["profiles"][0]["canDelete"], false);
+
+        let save_response = route_json_api(
+            &server,
+            "POST",
+            "/api/LLM/PromptProfiles/Save",
+            Some(&serde_json::json!({
+                "name": " roleplay ",
+                "soul": " answer tersely ",
+                "active": true,
+            })),
+        );
+        assert_eq!(save_response["code"], 0);
+        assert_eq!(save_response["data"]["activeProfile"], "roleplay");
+        assert!(
+            save_response["data"]["profiles"]
+                .as_array()
+                .is_some_and(|profiles| profiles.iter().any(|profile| {
+                    profile["name"] == "roleplay"
+                        && profile["soul"] == "answer tersely"
+                        && profile["active"] == true
+                        && profile["canDelete"] == true
+                }))
+        );
+
+        let preview_response = route_json_api(
+            &server,
+            "POST",
+            "/api/LLM/PromptProfiles/Preview",
+            Some(&serde_json::json!({
+                "name": "roleplay",
+                "userPrompt": "hello",
+            })),
+        );
+        assert_eq!(preview_response["code"], 0);
+        assert_eq!(preview_response["data"]["profile"]["name"], "roleplay");
+        assert_eq!(
+            preview_response["data"]["preview"]["composedUserPrompt"],
+            "answer tersely\n\nhello"
+        );
+        assert!(
+            preview_response["data"]["preview"]["combinedPrompt"]
+                .as_str()
+                .is_some_and(|value| value.contains("answer tersely\n\nhello"))
+        );
+
+        let use_response = route_json_api(
+            &server,
+            "POST",
+            "/api/LLM/PromptProfiles/Use",
+            Some(&serde_json::json!({
+                "name": "default",
+            })),
+        );
+        assert_eq!(use_response["code"], 0);
+        assert_eq!(use_response["data"]["activeProfile"], "default");
+
+        let delete_response = route_json_api(
+            &server,
+            "POST",
+            "/api/LLM/PromptProfiles/Delete",
+            Some(&serde_json::json!({
+                "name": "roleplay",
+            })),
+        );
+        assert_eq!(delete_response["code"], 0);
+        assert_eq!(delete_response["data"]["activeProfile"], "default");
+        assert_eq!(
+            delete_response["data"]["profiles"]
+                .as_array()
+                .map(|profiles| profiles.len()),
+            Some(1)
+        );
+
+        let delete_default_response = route_json_api(
+            &server,
+            "POST",
+            "/api/LLM/PromptProfiles/Delete",
+            Some(&serde_json::json!({
+                "name": "default",
+            })),
+        );
+        assert_eq!(delete_default_response["code"], -1);
+        assert!(
+            delete_default_response["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("default profile cannot be removed"))
+        );
+
+        let prompt_store = fs::read_to_string(env.root.join("llm-prompts.json"))
+            .expect("prompt profile routes should persist llm-prompts.json");
+        assert!(prompt_store.contains("\"active_profile\": \"default\""));
+        assert!(prompt_store.contains("\"name\": \"default\""));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn capability_routes_list_tools_skills_and_mcp_servers() {
         let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
@@ -2766,6 +2992,102 @@ class CapabilityRoutePlugin(star.Star):
         assert_eq!(
             mcp_response["data"]["servers"][0]["toolNames"][0],
             "lookup_weather"
+        );
+
+        server_task.await.expect("mock server should finish");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capability_routes_support_mcp_save_test_and_skill_read_upload() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let env = CapabilityRouteTestEnv::new();
+        let (url, server_task) = spawn_mock_capability_mcp_server()
+            .await
+            .expect("mock server should start");
+        let _mcp_guard = EnvVarGuard::set("LY_MCP_CONFIG_PATH", env.mcp_config_path().as_path());
+        let server = test_server();
+
+        let save_response = route_json_api(
+            &server,
+            "POST",
+            "/api/mcp/save",
+            Some(&serde_json::json!({
+                "servers": [
+                    {
+                        "name": "mock",
+                        "url": url,
+                        "active": true,
+                        "transport": "streamable_http"
+                    }
+                ]
+            })),
+        );
+        assert_eq!(save_response["code"], 0);
+        assert_eq!(save_response["data"]["servers"][0]["toolCount"], 1);
+        let mcp_config = fs::read_to_string(env.mcp_config_path())
+            .expect("mcp/save should persist the MCP config file");
+        assert!(mcp_config.contains("\"transport\": \"streamable_http\""));
+
+        let test_response = route_json_api(
+            &server,
+            "POST",
+            "/api/mcp/test",
+            Some(&serde_json::json!({
+                "server": {
+                    "name": "mock-test",
+                    "url": save_response["data"]["servers"][0]["url"],
+                    "active": true,
+                    "transport": "streamable_http"
+                }
+            })),
+        );
+        assert_eq!(test_response["code"], 0);
+        assert_eq!(test_response["data"]["servers"][0]["toolCount"], 1);
+        assert_eq!(
+            test_response["data"]["servers"][0]["toolNames"][0],
+            "lookup_weather"
+        );
+
+        let read_response = route_json_api(&server, "GET", "/api/skills/read?name=demo", None);
+        assert_eq!(read_response["code"], 0);
+        assert_eq!(read_response["data"]["name"], "demo");
+        assert_eq!(read_response["data"]["path"], "skills/demo/SKILL.md");
+        assert!(
+            read_response["data"]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("# Demo"))
+        );
+
+        let upload_response = route_json_api(
+            &server,
+            "POST",
+            "/api/skills/upload",
+            Some(&serde_json::json!({
+                "name": "uploaded-skill",
+                "content": "---\ndescription: Uploaded skill\n---\n# Uploaded"
+            })),
+        );
+        assert_eq!(upload_response["code"], 0);
+        assert_eq!(upload_response["data"]["name"], "uploaded-skill");
+        assert_eq!(
+            upload_response["data"]["path"],
+            "skills/uploaded-skill/SKILL.md"
+        );
+        let uploaded_skill = fs::read_to_string(
+            env.root
+                .join("skills")
+                .join("uploaded-skill")
+                .join("SKILL.md"),
+        )
+        .expect("skills/upload should persist the SKILL.md file");
+        assert!(uploaded_skill.contains("description: Uploaded skill"));
+
+        let skills_response = route_json_api(&server, "GET", "/api/skills", None);
+        assert_eq!(skills_response["code"], 0);
+        assert!(
+            skills_response["data"]["skills"]
+                .as_array()
+                .is_some_and(|skills| skills.iter().any(|skill| skill["name"] == "uploaded-skill"))
         );
 
         server_task.await.expect("mock server should finish");
@@ -2867,13 +3189,11 @@ class CapabilityRoutePlugin(star.Star):
 
         let all_response = route_json_api(&server, "GET", "/api/Plugin/Capabilities/All", None);
         assert_eq!(all_response["code"], 0);
-        assert!(
-            all_response["data"]
-                .as_array()
-                .is_some_and(|items| items
-                    .iter()
-                    .any(|item| item["pluginId"] == "capability-route-plugin"))
-        );
+        assert!(all_response["data"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item["pluginId"] == "capability-route-plugin")
+        }));
 
         runtime_host
             .shutdown()
@@ -2992,6 +3312,46 @@ class CapabilityRoutePlugin(star.Star):
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plugin_list_route_includes_runtime_source_and_capability_flags() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let env = PluginCapabilityRouteTestEnv::new();
+        let runtime_host = EmbeddedAppHost::start_for_target(RuntimeTarget::Tauri2)
+            .await
+            .expect("embedded host should start for plugin list route test");
+        let server = test_server().with_runtime_host(runtime_host.clone());
+
+        let list_response = route_json_api(&server, "GET", "/api/Plugin/List", None);
+        assert_eq!(list_response["code"], 0);
+
+        let plugin = list_response["data"]["plugins"]
+            .as_array()
+            .and_then(|plugins| {
+                plugins
+                    .iter()
+                    .find(|plugin| plugin["id"] == "capability-route-plugin")
+            })
+            .cloned()
+            .expect("capability route plugin should appear in plugin list");
+        assert_eq!(plugin["runtimeKind"], "python");
+        assert_eq!(plugin["pluginType"], "service");
+        assert_eq!(plugin["sourceKind"], "astrbot-compatible");
+        assert_eq!(plugin["compatKind"], "astrbot");
+        assert_eq!(plugin["hasCapabilities"]["any"], true);
+        assert_eq!(plugin["hasCapabilities"]["tools"], true);
+        assert_eq!(plugin["hasCapabilities"]["webApis"], true);
+        assert_eq!(plugin["hasCapabilities"]["cronJobs"], true);
+        assert_eq!(plugin["hasCapabilities"]["tasks"], true);
+        assert_eq!(plugin["hasPages"], false);
+        assert_eq!(plugin["hasConfig"], false);
+
+        runtime_host
+            .shutdown()
+            .await
+            .expect("embedded host should shutdown cleanly");
+        drop(env);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn llm_chat_routes_include_plugin_runtime_tools() {
         let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let env = PluginCapabilityRouteTestEnv::new();
@@ -3039,7 +3399,10 @@ class CapabilityRoutePlugin(star.Star):
             })),
         );
         assert_eq!(chat_response["code"], 0);
-        assert_eq!(chat_response["data"]["message"], "plugin tool loop complete");
+        assert_eq!(
+            chat_response["data"]["message"],
+            "plugin tool loop complete"
+        );
         assert_eq!(chat_response["data"]["baseUrl"], base_url);
         assert_eq!(chat_response["data"]["model"], "gpt-test");
 
@@ -3076,7 +3439,8 @@ class CapabilityRoutePlugin(star.Star):
         let response =
             server.route_http_request(request.as_bytes(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         let (headers, body) = split_response(response);
-        let body_text = String::from_utf8(body).expect("plugin runtime web api body should be utf8");
+        let body_text =
+            String::from_utf8(body).expect("plugin runtime web api body should be utf8");
         let payload: serde_json::Value = serde_json::from_str(body_text.as_str()).unwrap_or_else(|err| {
             panic!("plugin runtime web api body should be json: {err}; headers={headers}; body={body_text}")
         });
@@ -3095,7 +3459,10 @@ class CapabilityRoutePlugin(star.Star):
                 .is_some_and(|text| text.contains("\"mode\":\"echo\"")),
             "bodyText should contain the serialized request payload: {payload}"
         );
-        assert_eq!(payload["bodyBytesBase64"], "eyJtb2RlIjoiZWNobyIsInZhbHVlIjoiZGVtbyJ9");
+        assert_eq!(
+            payload["bodyBytesBase64"],
+            "eyJtb2RlIjoiZWNobyIsInZhbHVlIjoiZGVtbyJ9"
+        );
 
         let quart_request_body = serde_json::json!({
             "value": "quart-demo"
@@ -3197,10 +3564,8 @@ class CapabilityRoutePlugin(star.Star):
             "POST /api/Plugin/Runtime/WebApi/capability-route-plugin/cap-route HTTP/1.1\r\nHost: localhost\r\n{}\r\nContent-Length: 0\r\n\r\n",
             local_auth_header(&server)
         );
-        let disabled_response = server.route_http_request(
-            disabled_request.as_bytes(),
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-        );
+        let disabled_response =
+            server.route_http_request(disabled_request.as_bytes(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         let (disabled_headers, disabled_body) = split_response(disabled_response);
         let disabled_body = String::from_utf8(disabled_body).expect("404 body should be utf8");
         assert!(disabled_headers.starts_with("HTTP/1.1 404 Not Found\r\n"));

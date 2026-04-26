@@ -1895,7 +1895,10 @@ class AstrCompatContextTools(star.Star):
         .sdk
         .load_manifest_plugin(&manifest.descriptor, &context.host)
         .expect("python runtime should load");
-    assert!(activated, "python runtime should activate during direct load");
+    assert!(
+        activated,
+        "python runtime should activate during direct load"
+    );
     context
         .sdk
         .start_manifest_plugin(&manifest.descriptor)
@@ -1927,7 +1930,10 @@ class AstrCompatContextTools(star.Star):
                 && tool.source == liteyukibot_core::PluginCapabilitySource::AstrbotContext)
     );
     assert_eq!(snapshot.web_apis[0].route, "/compat-tools");
-    assert_eq!(snapshot.web_apis[0].source, liteyukibot_core::PluginCapabilitySource::AstrbotContext);
+    assert_eq!(
+        snapshot.web_apis[0].source,
+        liteyukibot_core::PluginCapabilitySource::AstrbotContext
+    );
     assert_eq!(snapshot.cron_jobs[0].job_type, "active_agent");
     assert_eq!(snapshot.tasks[0].task_id, "legacy-task-token");
 
@@ -1946,7 +1952,10 @@ class AstrCompatContextTools(star.Star):
     );
     assert_eq!(plugin["decorated_query_type"], json!("string"));
     assert_eq!(plugin["decorated_required"], json!(["query"]));
-    assert_eq!(plugin["decorated_handler_module_path"], json!("astr_context_tools"));
+    assert_eq!(
+        plugin["decorated_handler_module_path"],
+        json!("astr_context_tools")
+    );
     assert_eq!(plugin["decorated_inactive"], json!(false));
     assert_eq!(plugin["decorated_active"], json!(true));
     assert_eq!(plugin["web_api_route"], json!("/compat-tools"));
@@ -2016,7 +2025,10 @@ class AstrCompatGroupAliases(star.Star):
         .sdk
         .load_manifest_plugin(&manifest.descriptor, &context.host)
         .expect("python runtime should load");
-    assert!(activated, "python runtime should activate during direct load");
+    assert!(
+        activated,
+        "python runtime should activate during direct load"
+    );
 
     context.sdk.dispatch_event(
         &BotEvent::new(

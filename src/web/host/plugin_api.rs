@@ -95,7 +95,7 @@ pub(super) fn route_plugin_runtime_web_api(
                 "text/plain; charset=utf-8",
                 b"plugin runtime host is unavailable",
                 is_head,
-            ))
+            ));
         }
     };
 
@@ -126,7 +126,8 @@ pub(super) fn route_plugin_runtime_web_api(
     }
 
     let registered_route = normalize_registered_web_api_route(route_rest);
-    let snapshot = match run_async_for_web_host(runtime_host.plugin_capability_snapshot(plugin_id)) {
+    let snapshot = match run_async_for_web_host(runtime_host.plugin_capability_snapshot(plugin_id))
+    {
         Ok(snapshot) => snapshot,
         Err(err) => {
             return Some(build_response(
@@ -134,7 +135,7 @@ pub(super) fn route_plugin_runtime_web_api(
                 "text/plain; charset=utf-8",
                 format!("failed to read plugin capability snapshot: {err}").as_bytes(),
                 is_head,
-            ))
+            ));
         }
     };
     let Some(snapshot) = snapshot else {
@@ -204,7 +205,7 @@ pub(super) fn route_plugin_runtime_web_api(
                 "text/plain; charset=utf-8",
                 b"plugin runtime web api not found",
                 is_head,
-            ))
+            ));
         }
         Err(err) => {
             return Some(build_response(
@@ -212,7 +213,7 @@ pub(super) fn route_plugin_runtime_web_api(
                 "text/plain; charset=utf-8",
                 format!("plugin runtime web api execution failed: {err}").as_bytes(),
                 is_head,
-            ))
+            ));
         }
     };
 
@@ -386,11 +387,9 @@ pub(super) fn route_plugin_api(
                 return Some(napcat_response(body, is_head));
             }
         };
-        let body = match run_async_for_web_host(runtime_host.execute_plugin_tool(
-            plugin_id,
-            tool_name,
-            &arguments,
-        )) {
+        let body = match run_async_for_web_host(
+            runtime_host.execute_plugin_tool(plugin_id, tool_name, &arguments),
+        ) {
             Ok(Some(output)) => napcat_ok(&serde_json::json!({
                 "pluginId": plugin_id,
                 "toolName": tool_name,
@@ -441,9 +440,10 @@ pub(super) fn route_plugin_api(
 
     if api_path == "/Plugin/List" {
         let payload = if let Some(runtime_host) = &service.runtime_host {
-            build_runtime_plugin_payload(run_async_for_web_host(
-                runtime_host.plugin_catalog_snapshot(),
-            ))
+            build_runtime_plugin_payload(
+                runtime_host,
+                run_async_for_web_host(runtime_host.plugin_catalog_snapshot()),
+            )
         } else {
             serde_json::json!({
                 "plugins": discover_plugins(),
@@ -699,7 +699,9 @@ fn plugin_capabilities_payload(
     })
 }
 
-fn all_plugin_capabilities_payload(service: &WebHostService) -> Result<Vec<PluginCapabilitiesPayload>, String> {
+fn all_plugin_capabilities_payload(
+    service: &WebHostService,
+) -> Result<Vec<PluginCapabilitiesPayload>, String> {
     let runtime_host = service
         .runtime_host
         .as_ref()
@@ -709,10 +711,10 @@ fn all_plugin_capabilities_payload(service: &WebHostService) -> Result<Vec<Plugi
         .map_err(|err| format!("failed to read plugin capability snapshots: {err}"))?;
     let snapshot_map: std::collections::HashMap<String, crate::PluginCapabilitySnapshot> =
         std::collections::HashMap::from_iter(
-        snapshots
-            .into_iter()
-            .map(|snapshot| (snapshot.plugin_id.clone(), snapshot)),
-    );
+            snapshots
+                .into_iter()
+                .map(|snapshot| (snapshot.plugin_id.clone(), snapshot)),
+        );
 
     let disabled_ids = catalog.disabled_plugin_ids;
     let mut payloads = catalog
@@ -725,7 +727,9 @@ fn all_plugin_capabilities_payload(service: &WebHostService) -> Result<Vec<Plugi
             let snapshot = snapshot_map
                 .get(plugin_id.as_str())
                 .cloned()
-                .unwrap_or_else(|| empty_plugin_capability_snapshot(plugin_id.as_str(), runtime_kind));
+                .unwrap_or_else(|| {
+                    empty_plugin_capability_snapshot(plugin_id.as_str(), runtime_kind)
+                });
             PluginCapabilitiesPayload {
                 plugin_id: plugin_id.clone(),
                 runtime_kind,
@@ -760,8 +764,14 @@ fn build_plugin_capability_support(
     PluginCapabilitySupportSummary {
         tools: build_tool_capability_support(snapshot, plugin_active),
         web_apis: build_web_api_capability_support(snapshot, plugin_active),
-        cron_jobs: build_registration_only_capability_support(!snapshot.cron_jobs.is_empty(), plugin_active),
-        tasks: build_registration_only_capability_support(!snapshot.tasks.is_empty(), plugin_active),
+        cron_jobs: build_registration_only_capability_support(
+            !snapshot.cron_jobs.is_empty(),
+            plugin_active,
+        ),
+        tasks: build_registration_only_capability_support(
+            !snapshot.tasks.is_empty(),
+            plugin_active,
+        ),
     }
 }
 

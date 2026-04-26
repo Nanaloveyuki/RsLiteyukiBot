@@ -141,7 +141,9 @@ pub(super) fn route_napcat_api(
         return response;
     }
 
-    if let Some(response) = capability_api::route_capability_api(method, api_path, is_head) {
+    if let Some(response) =
+        capability_api::route_capability_api(method, api_path, raw_path, request, is_head)
+    {
         return response;
     }
 

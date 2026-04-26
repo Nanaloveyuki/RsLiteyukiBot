@@ -10,17 +10,12 @@ use serde_json::Value;
 
 use crate::core::BotEvent;
 use crate::observability::Logger;
-use crate::plugin::{
-    PluginCapabilitySnapshot, PluginDescriptor, PluginRegisteredCronJob, PluginRegisteredTask,
-    PluginExecutionRecord, PluginRegisteredTool, PluginRegisteredWebApi,
-    PluginRuntimeDiagnostics, PluginToolResult, PluginWebApiRequest, PluginWebApiResponse,
-};
 use crate::plugin::sdk::python::bridge::{
     PyPluginSdk, await_python_result, bind_astrbot_plugin_runtime,
-    cleanup_astrbot_plugin_runtime,
-    call_python_callable_with_fallback, capture_plugin_module_names, install_python_sdk_bridge,
-    json_to_pyobject, plugin_runtime_error, py_any_to_json, remove_python_modules,
-    remove_python_search_paths, render_python_command_result,
+    call_python_callable_with_fallback, capture_plugin_module_names,
+    cleanup_astrbot_plugin_runtime, install_python_sdk_bridge, json_to_pyobject,
+    plugin_runtime_error, py_any_to_json, remove_python_modules, remove_python_search_paths,
+    render_python_command_result,
 };
 use crate::plugin::sdk::python::commands::{
     disabled_declared_command_for_plugin, is_scope_command_disabled, normalize_tui_command_name,
@@ -31,6 +26,11 @@ use crate::plugin::sdk::python::probe::{
     probe_python_plugin_compatibility,
 };
 use crate::plugin::sdk::{PluginHostBridge, PluginPermissionSet, PluginSdkError};
+use crate::plugin::{
+    PluginCapabilitySnapshot, PluginDescriptor, PluginExecutionRecord, PluginRegisteredCronJob,
+    PluginRegisteredTask, PluginRegisteredTool, PluginRegisteredWebApi, PluginRuntimeDiagnostics,
+    PluginToolResult, PluginWebApiRequest, PluginWebApiResponse,
+};
 
 const PYTHON_EVENT_HANDLER_ATTRS: [&str; 3] = ["on_event", "handle_event", "liteyuki_handle_event"];
 const PYTHON_START_HANDLER_ATTRS: [&str; 3] = ["on_start", "start", "liteyuki_start"];
@@ -419,12 +419,14 @@ pub(crate) fn get_python_plugin_capability_snapshot(
                     plugin_id, err
                 ))
             })?;
-        let result = snapshotter.call1((runtime_module.as_str(),)).map_err(|err| {
-            PluginSdkError::Runtime(format!(
-                "python plugin '{}' capability snapshot call failed: {}",
-                plugin_id, err
-            ))
-        })?;
+        let result = snapshotter
+            .call1((runtime_module.as_str(),))
+            .map_err(|err| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' capability snapshot call failed: {}",
+                    plugin_id, err
+                ))
+            })?;
         if result.is_none() {
             return Ok(None);
         }
@@ -439,12 +441,13 @@ pub(crate) fn get_python_plugin_capability_snapshot(
     let Some(payload) = payload else {
         return Ok(None);
     };
-    let mut document: PythonCapabilitySnapshotDoc = serde_json::from_value(payload).map_err(|err| {
-        PluginSdkError::Runtime(format!(
-            "python plugin '{}' capability snapshot decode failed: {}",
-            plugin_id, err
-        ))
-    })?;
+    let mut document: PythonCapabilitySnapshotDoc =
+        serde_json::from_value(payload).map_err(|err| {
+            PluginSdkError::Runtime(format!(
+                "python plugin '{}' capability snapshot decode failed: {}",
+                plugin_id, err
+            ))
+        })?;
     for tool in &mut document.tools {
         if tool.plugin_id.is_empty() {
             tool.plugin_id = plugin_id.to_string();
@@ -525,127 +528,139 @@ pub(crate) fn execute_python_registered_web_api(
 
     let request_context = build_plugin_web_api_request_context(request);
     let normalized_route = normalize_python_web_api_route(route);
-    let response = Python::with_gil(|py| -> Result<Option<PluginWebApiResponse>, PluginSdkError> {
-        let liteyuki = PyModule::import(py, "liteyuki").map_err(|err| {
-            PluginSdkError::Runtime(format!(
-                "python plugin '{}' runtime import failed: {}",
-                plugin_id, err
-            ))
-        })?;
-        let runtime_getter = liteyuki.getattr("_get_astrbot_plugin_runtime").map_err(|err| {
-            PluginSdkError::Runtime(format!(
-                "python plugin '{}' runtime getter is unavailable: {}",
-                plugin_id, err
-            ))
-        })?;
-        let runtime = runtime_getter
-            .call1((runtime_module.as_str(),))
-            .map_err(|err| {
+    let response = Python::with_gil(
+        |py| -> Result<Option<PluginWebApiResponse>, PluginSdkError> {
+            let liteyuki = PyModule::import(py, "liteyuki").map_err(|err| {
                 PluginSdkError::Runtime(format!(
-                    "python plugin '{}' runtime lookup failed: {}",
+                    "python plugin '{}' runtime import failed: {}",
                     plugin_id, err
                 ))
             })?;
-        let runtime = runtime.downcast_into::<pyo3::types::PyDict>().map_err(|err| {
-            PluginSdkError::Runtime(format!(
-                "python plugin '{}' runtime state shape is invalid: {}",
-                plugin_id, err
-            ))
-        })?;
-        let registrations = runtime
-            .get_item("registered_web_apis")
-            .map_err(|err| {
-                PluginSdkError::Runtime(format!(
-                    "python plugin '{}' runtime web api lookup failed: {}",
-                    plugin_id, err
-                ))
-            })?
-            .ok_or_else(|| {
-                PluginSdkError::Runtime(format!(
-                    "python plugin '{}' runtime web api registry is missing",
-                    plugin_id
-                ))
-            })?
-            .downcast_into::<PyList>()
-            .map_err(|err| {
-                PluginSdkError::Runtime(format!(
-                    "python plugin '{}' runtime web api registry is invalid: {}",
-                    plugin_id, err
-                ))
-            })?;
-
-        let mut matched_response = None;
-        for item in registrations.iter() {
-            let tuple = item.downcast_into::<PyTuple>().map_err(|err| {
-                PluginSdkError::Runtime(format!(
-                    "python plugin '{}' web api registration is invalid: {}",
-                    plugin_id, err
-                ))
-            })?;
-            let registration =
-                decode_web_api_registration_tuple(plugin_id, &tuple).map_err(PluginSdkError::Runtime)?;
-            if registration.route != normalized_route {
-                continue;
-            }
-            if !registration
-                .methods
-                .iter()
-                .any(|method| method.eq_ignore_ascii_case(request.method.as_str()))
-            {
-                continue;
-            }
-
-            let handler = tuple.get_item(1).map_err(|err| {
-                PluginSdkError::Runtime(format!(
-                    "python plugin '{}' web api handler lookup failed: {}",
-                    plugin_id, err
-                ))
-            })?;
-            let request_payload = json_to_pyobject(py, &request_context).map_err(|err| {
-                PluginSdkError::Runtime(format!(
-                    "python plugin '{}' web api request serialization failed: {}",
-                    plugin_id, err
-                ))
-            })?;
-            let handler_invoker = liteyuki
-                .getattr("_invoke_astrbot_web_handler")
+            let runtime_getter =
+                liteyuki
+                    .getattr("_get_astrbot_plugin_runtime")
+                    .map_err(|err| {
+                        PluginSdkError::Runtime(format!(
+                            "python plugin '{}' runtime getter is unavailable: {}",
+                            plugin_id, err
+                        ))
+                    })?;
+            let runtime = runtime_getter
+                .call1((runtime_module.as_str(),))
                 .map_err(|err| {
                     PluginSdkError::Runtime(format!(
-                        "python plugin '{}' web api handler invoker is unavailable: {}",
+                        "python plugin '{}' runtime lookup failed: {}",
                         plugin_id, err
                     ))
                 })?;
-            let result = handler_invoker.call1((handler, request_payload)).map_err(|err| {
-                PluginSdkError::Runtime(format!(
-                    "python plugin '{}' web api handler invocation failed: {}",
-                    plugin_id, err
-                ))
-            })?;
-            let awaited = await_python_result(py, result.unbind()).map_err(|err| {
-                PluginSdkError::Runtime(format!(
-                    "python plugin '{}' web api handler await failed: {}",
-                    plugin_id, err
-                ))
-            });
-            let parsed = parse_python_web_api_response(awaited?.bind(py)).map_err(|err| {
-                PluginSdkError::Runtime(format!(
-                    "python plugin '{}' web api response decode failed: {}",
-                    plugin_id, err
-                ))
-            })?;
-            if matched_response.replace(parsed).is_some() {
-                return Err(PluginSdkError::Runtime(format!(
-                    "python plugin '{}' has conflicting web api registrations for route '{}' and method '{}'",
-                    plugin_id, normalized_route, request.method
-                )));
-            }
-        }
+            let runtime = runtime
+                .downcast_into::<pyo3::types::PyDict>()
+                .map_err(|err| {
+                    PluginSdkError::Runtime(format!(
+                        "python plugin '{}' runtime state shape is invalid: {}",
+                        plugin_id, err
+                    ))
+                })?;
+            let registrations = runtime
+                .get_item("registered_web_apis")
+                .map_err(|err| {
+                    PluginSdkError::Runtime(format!(
+                        "python plugin '{}' runtime web api lookup failed: {}",
+                        plugin_id, err
+                    ))
+                })?
+                .ok_or_else(|| {
+                    PluginSdkError::Runtime(format!(
+                        "python plugin '{}' runtime web api registry is missing",
+                        plugin_id
+                    ))
+                })?
+                .downcast_into::<PyList>()
+                .map_err(|err| {
+                    PluginSdkError::Runtime(format!(
+                        "python plugin '{}' runtime web api registry is invalid: {}",
+                        plugin_id, err
+                    ))
+                })?;
 
-        Ok(matched_response)
-    });
+            let mut matched_response = None;
+            for item in registrations.iter() {
+                let tuple = item.downcast_into::<PyTuple>().map_err(|err| {
+                    PluginSdkError::Runtime(format!(
+                        "python plugin '{}' web api registration is invalid: {}",
+                        plugin_id, err
+                    ))
+                })?;
+                let registration = decode_web_api_registration_tuple(plugin_id, &tuple)
+                    .map_err(PluginSdkError::Runtime)?;
+                if registration.route != normalized_route {
+                    continue;
+                }
+                if !registration
+                    .methods
+                    .iter()
+                    .any(|method| method.eq_ignore_ascii_case(request.method.as_str()))
+                {
+                    continue;
+                }
+
+                let handler = tuple.get_item(1).map_err(|err| {
+                    PluginSdkError::Runtime(format!(
+                        "python plugin '{}' web api handler lookup failed: {}",
+                        plugin_id, err
+                    ))
+                })?;
+                let request_payload = json_to_pyobject(py, &request_context).map_err(|err| {
+                    PluginSdkError::Runtime(format!(
+                        "python plugin '{}' web api request serialization failed: {}",
+                        plugin_id, err
+                    ))
+                })?;
+                let handler_invoker =
+                    liteyuki
+                        .getattr("_invoke_astrbot_web_handler")
+                        .map_err(|err| {
+                            PluginSdkError::Runtime(format!(
+                                "python plugin '{}' web api handler invoker is unavailable: {}",
+                                plugin_id, err
+                            ))
+                        })?;
+                let result = handler_invoker
+                    .call1((handler, request_payload))
+                    .map_err(|err| {
+                        PluginSdkError::Runtime(format!(
+                            "python plugin '{}' web api handler invocation failed: {}",
+                            plugin_id, err
+                        ))
+                    })?;
+                let awaited = await_python_result(py, result.unbind()).map_err(|err| {
+                    PluginSdkError::Runtime(format!(
+                        "python plugin '{}' web api handler await failed: {}",
+                        plugin_id, err
+                    ))
+                });
+                let parsed = parse_python_web_api_response(awaited?.bind(py)).map_err(|err| {
+                    PluginSdkError::Runtime(format!(
+                        "python plugin '{}' web api response decode failed: {}",
+                        plugin_id, err
+                    ))
+                })?;
+                if matched_response.replace(parsed).is_some() {
+                    return Err(PluginSdkError::Runtime(format!(
+                        "python plugin '{}' has conflicting web api registrations for route '{}' and method '{}'",
+                        plugin_id, normalized_route, request.method
+                    )));
+                }
+            }
+
+            Ok(matched_response)
+        },
+    );
 
     match &response {
-        Ok(Some(_)) => record_plugin_execution_success(state, plugin_id, PluginExecutionKind::WebApi),
+        Ok(Some(_)) => {
+            record_plugin_execution_success(state, plugin_id, PluginExecutionKind::WebApi)
+        }
         Err(err) => record_plugin_execution_error(
             state,
             plugin_id,
@@ -683,12 +698,14 @@ pub(crate) fn execute_python_registered_tool(
                 plugin_id, err
             ))
         })?;
-        let runtime_getter = liteyuki.getattr("_get_astrbot_plugin_runtime").map_err(|err| {
-            PluginSdkError::Runtime(format!(
-                "python plugin '{}' tool runtime getter is unavailable: {}",
-                plugin_id, err
-            ))
-        })?;
+        let runtime_getter = liteyuki
+            .getattr("_get_astrbot_plugin_runtime")
+            .map_err(|err| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' tool runtime getter is unavailable: {}",
+                    plugin_id, err
+                ))
+            })?;
         let runtime = runtime_getter
             .call1((runtime_module.as_str(),))
             .map_err(|err| {
@@ -769,14 +786,12 @@ pub(crate) fn execute_python_registered_tool(
                     plugin_id, err
                 ))
             })?;
-            let result = item
-                .call_method("call", (), Some(kwargs))
-                .map_err(|err| {
-                    PluginSdkError::Runtime(format!(
-                        "python plugin '{}' tool '{}' invocation failed: {}",
-                        plugin_id, normalized_tool_name, err
-                    ))
-                })?;
+            let result = item.call_method("call", (), Some(kwargs)).map_err(|err| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' tool '{}' invocation failed: {}",
+                    plugin_id, normalized_tool_name, err
+                ))
+            })?;
             let awaited = await_python_result(py, result.unbind()).map_err(|err| {
                 PluginSdkError::Runtime(format!(
                     "python plugin '{}' tool '{}' await failed: {}",

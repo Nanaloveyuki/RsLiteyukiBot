@@ -14,11 +14,15 @@ use crate::config_paths::resolve_default_llm_config_path;
 use crate::llm::client::extract_output_text;
 use crate::llm::service::{
     LlmProviderApiFamily, current_active_prompt_profile, current_llm_runtime_config,
-    detect_provider_id_from_base_url, load_current_app_config_doc, provider_api_family,
+    detect_provider_id_from_base_url, load_current_app_config_doc, load_llm_prompt_store,
+    persist_llm_prompt_store, provider_api_family, resolve_llm_prompt_store_path,
     resolve_provider_id,
 };
 use crate::llm::tools::{ToolManager, merge_system_prompt_sections};
-use crate::llm::{LlmClientError, OpenAiResponsesClient, OpenAiRuntimeConfig};
+use crate::llm::{
+    LlmClientError, LlmPromptPreview, LlmPromptProfile, LlmPromptStore, OpenAiResponsesClient,
+    OpenAiRuntimeConfig, build_prompt_preview,
+};
 use crate::runtime_support::{
     ensure_llm_config_file, next_llm_api_key_index, resolve_llm_config_path,
 };
@@ -104,6 +108,70 @@ pub(super) fn route_llm_api(
         }
 
         let body = match llm_preview_request_payload(request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/LLM/PromptProfiles" {
+        if !method.eq_ignore_ascii_case("GET") {
+            let body = napcat_err(-1, "LLM/PromptProfiles only accepts GET");
+            return Some(napcat_response(body, is_head));
+        }
+
+        let body = match llm_prompt_profiles_payload() {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/LLM/PromptProfiles/Save" {
+        if let Some(response) = reject_non_post_method(method, "LLM/PromptProfiles/Save", is_head) {
+            return Some(response);
+        }
+
+        let body = match save_llm_prompt_profile(request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/LLM/PromptProfiles/Delete" {
+        if let Some(response) = reject_non_post_method(method, "LLM/PromptProfiles/Delete", is_head)
+        {
+            return Some(response);
+        }
+
+        let body = match delete_llm_prompt_profile(request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/LLM/PromptProfiles/Use" {
+        if let Some(response) = reject_non_post_method(method, "LLM/PromptProfiles/Use", is_head) {
+            return Some(response);
+        }
+
+        let body = match use_llm_prompt_profile(request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/LLM/PromptProfiles/Preview" {
+        if let Some(response) =
+            reject_non_post_method(method, "LLM/PromptProfiles/Preview", is_head)
+        {
+            return Some(response);
+        }
+
+        let body = match preview_llm_prompt_profile(request) {
             Ok(payload) => napcat_ok(&payload),
             Err(err) => napcat_err(-1, err.as_str()),
         };
@@ -312,6 +380,128 @@ fn llm_preview_request_payload(request: &[u8]) -> Result<Value, String> {
         "bodyText": serde_json::to_string_pretty(&preview_body)
             .unwrap_or_else(|err| format!("<failed to render request body: {err}>")),
     }))
+}
+
+fn llm_prompt_profiles_payload() -> Result<Value, String> {
+    let store = load_llm_prompt_store()?;
+    Ok(serialize_prompt_store_payload(&store))
+}
+
+fn save_llm_prompt_profile(request: &[u8]) -> Result<Value, String> {
+    let request_body = parse_json_body(request);
+    let payload: WebLlmPromptProfileSaveRequest = serde_json::from_value(request_body)
+        .map_err(|err| format!("invalid prompt profile save payload: {err}"))?;
+    let mut store = load_llm_prompt_store()?;
+    store.upsert_profile(payload.name.as_str(), payload.soul.as_str())?;
+    if payload.active.unwrap_or(false) {
+        store.set_active_profile(payload.name.as_str())?;
+    }
+    persist_llm_prompt_store(&store)?;
+    Ok(serialize_prompt_store_payload(&store))
+}
+
+fn delete_llm_prompt_profile(request: &[u8]) -> Result<Value, String> {
+    let request_body = parse_json_body(request);
+    let payload: WebLlmPromptProfileNameRequest = serde_json::from_value(request_body)
+        .map_err(|err| format!("invalid prompt profile delete payload: {err}"))?;
+    let mut store = load_llm_prompt_store()?;
+    store.remove_profile(payload.name.as_str())?;
+    persist_llm_prompt_store(&store)?;
+    Ok(serialize_prompt_store_payload(&store))
+}
+
+fn use_llm_prompt_profile(request: &[u8]) -> Result<Value, String> {
+    let request_body = parse_json_body(request);
+    let payload: WebLlmPromptProfileNameRequest = serde_json::from_value(request_body)
+        .map_err(|err| format!("invalid prompt profile use payload: {err}"))?;
+    let mut store = load_llm_prompt_store()?;
+    store.set_active_profile(payload.name.as_str())?;
+    persist_llm_prompt_store(&store)?;
+    Ok(serialize_prompt_store_payload(&store))
+}
+
+fn preview_llm_prompt_profile(request: &[u8]) -> Result<Value, String> {
+    let request_body = parse_json_body(request);
+    let payload: WebLlmPromptProfilePreviewRequest = serde_json::from_value(request_body)
+        .map_err(|err| format!("invalid prompt profile preview payload: {err}"))?;
+    let store = load_llm_prompt_store()?;
+    let profile = resolve_prompt_profile_for_preview(&store, payload.name.as_deref())?;
+    let llm_config = current_llm_runtime_config()?;
+    let preview = build_prompt_preview(
+        payload
+            .system_prompt
+            .as_deref()
+            .or(llm_config.system_prompt.as_deref()),
+        payload.user_prompt.unwrap_or_default().as_str(),
+        profile.soul.as_str(),
+    );
+
+    Ok(serialize_prompt_preview_payload(&store, &profile, &preview))
+}
+
+fn serialize_prompt_store_payload(store: &LlmPromptStore) -> Value {
+    let store = store.normalized();
+    let mut profiles = store
+        .profiles
+        .iter()
+        .map(|profile| serialize_prompt_profile(profile, store.active_profile.as_str()))
+        .collect::<Vec<_>>();
+    profiles.sort_by(|left, right| {
+        left["name"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["name"].as_str().unwrap_or_default())
+    });
+
+    json!({
+        "configPath": resolve_llm_prompt_store_path().display().to_string(),
+        "activeProfile": store.active_profile,
+        "profiles": profiles,
+    })
+}
+
+fn serialize_prompt_preview_payload(
+    store: &LlmPromptStore,
+    profile: &LlmPromptProfile,
+    preview: &LlmPromptPreview,
+) -> Value {
+    json!({
+        "configPath": resolve_llm_prompt_store_path().display().to_string(),
+        "activeProfile": store.normalized().active_profile,
+        "profile": serialize_prompt_profile(profile, store.active_profile.as_str()),
+        "preview": {
+            "systemPrompt": preview.system_prompt,
+            "composedUserPrompt": preview.composed_user_prompt,
+            "combinedPrompt": preview.combined_prompt,
+        }
+    })
+}
+
+fn serialize_prompt_profile(profile: &LlmPromptProfile, active_profile: &str) -> Value {
+    json!({
+        "name": profile.name,
+        "soul": profile.soul,
+        "active": profile.name == active_profile,
+        "canDelete": profile.name != "default",
+    })
+}
+
+fn resolve_prompt_profile_for_preview(
+    store: &LlmPromptStore,
+    requested_name: Option<&str>,
+) -> Result<LlmPromptProfile, String> {
+    let normalized_name = requested_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(name) = normalized_name {
+        return store
+            .normalized()
+            .profiles
+            .into_iter()
+            .find(|profile| profile.name == name)
+            .ok_or_else(|| format!("prompt profile not found: {name}"));
+    }
+    Ok(store.active_profile())
 }
 
 fn llm_chat_payload(service: &WebHostService, request: &[u8]) -> Result<Value, String> {
@@ -1750,6 +1940,35 @@ struct WebLlmManagerSaveRequest {
     active_provider_id: Option<String>,
     #[serde(default)]
     providers: Vec<WebLlmManagedProviderPayload>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WebLlmPromptProfileSaveRequest {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    soul: String,
+    #[serde(default)]
+    active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WebLlmPromptProfileNameRequest {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WebLlmPromptProfilePreviewRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    user_prompt: Option<String>,
+    #[serde(default)]
+    system_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
