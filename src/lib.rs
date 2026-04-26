@@ -38,6 +38,9 @@ pub use adapter::{
     WebSocketAdapterHandle, decode_sse_event, encode_sse_event, sink_from_fn,
     start_forward_adapter, start_reverse_adapter,
 };
+pub use app_config::{
+    DesktopCloseBehavior, persist_desktop_close_to_tray_preference, resolve_desktop_close_behavior,
+};
 pub use bootstrap::{
     ConfigError, ConfigManager, ConfigSetting, RuntimeSettings, RuntimeSettingsSpec,
 };

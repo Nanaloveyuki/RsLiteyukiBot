@@ -16,6 +16,7 @@ import WebUIConfigCard from './webui';
 import BackupConfigCard from './backup';
 import BypassConfigCard from './bypass';
 import CoreConfigCard from './core';
+import DesktopConfigCard from './desktop';
 
 export interface ConfigPageProps {
   children?: React.ReactNode;
@@ -120,6 +121,11 @@ export default function ConfigPage () {
         <Tab title='核心配置' key='core'>
           <ConfigPageItem>
             <CoreConfigCard />
+          </ConfigPageItem>
+        </Tab>
+        <Tab title='桌面配置' key='desktop'>
+          <ConfigPageItem>
+            <DesktopConfigCard />
           </ConfigPageItem>
         </Tab>
         <Tab title='反检测' key='bypass'>

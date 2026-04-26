@@ -25,6 +25,7 @@ pub(crate) enum SourcePluginFamily {
     Native,
     LiteyukiPy,
     Astrbot,
+    Neomofox,
     Nonebot,
 }
 
@@ -34,6 +35,7 @@ pub(crate) enum SourceAdapterFamily {
     Native,
     LiteyukiPythonBridge,
     AstrbotPythonBridge,
+    NeomofoxPythonBridge,
     NonebotExternal,
 }
 

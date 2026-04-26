@@ -13,9 +13,9 @@ use crate::observability::Logger;
 use crate::plugin::sdk::python::bridge::{
     PyPluginSdk, await_python_result, bind_astrbot_plugin_runtime,
     call_python_callable_with_fallback, capture_plugin_module_names,
-    cleanup_astrbot_plugin_runtime, install_python_sdk_bridge, json_to_pyobject,
-    plugin_runtime_error, py_any_to_json, remove_python_modules, remove_python_search_paths,
-    render_python_command_result,
+    cleanup_astrbot_plugin_runtime, import_python_entrypoint_module, install_python_sdk_bridge,
+    json_to_pyobject, plugin_runtime_error, py_any_to_json, remove_python_modules,
+    remove_python_search_paths, remove_stale_entrypoint_modules, render_python_command_result,
 };
 use crate::plugin::sdk::python::commands::{
     disabled_declared_command_for_plugin, is_scope_command_disabled, normalize_tui_command_name,
@@ -309,6 +309,11 @@ pub(crate) fn load_python_manifest_plugin(
 
     Python::with_gil(|py| -> PyResult<()> {
         ensure_python_search_paths(py, probe.search_paths.as_slice())?;
+        remove_stale_entrypoint_modules(
+            py,
+            probe.entrypoint.module.as_str(),
+            probe.search_paths.as_slice(),
+        )?;
 
         let sdk = Py::new(
             py,
@@ -321,7 +326,11 @@ pub(crate) fn load_python_manifest_plugin(
             ),
         )?;
         install_python_sdk_bridge(py, Some(&sdk))?;
-        let module = PyModule::import(py, probe.entrypoint.module.as_str())?;
+        let module = import_python_entrypoint_module(
+            py,
+            probe.entrypoint.module.as_str(),
+            probe.search_paths.as_slice(),
+        )?;
         inspect_python_legacy_metadata(&module);
 
         {

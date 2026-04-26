@@ -232,14 +232,12 @@ fn install_local_plugin_archive(
     let install_result = (|| {
         unpack_zip_archive(upload.data.as_slice(), extracted_root.as_path())?;
         let install_summary = match find_plugin_root_in_extracted_dir(extracted_root.as_path())? {
-            ExtractedPluginArchive::NativeManifest { root } => {
-                install_native_plugin_archive(
-                    plugin_root.as_path(),
-                    install_root.as_path(),
-                    &root,
-                    runtime_host,
-                )?
-            }
+            ExtractedPluginArchive::NativeManifest { root } => install_native_plugin_archive(
+                plugin_root.as_path(),
+                install_root.as_path(),
+                &root,
+                runtime_host,
+            )?,
             ExtractedPluginArchive::SourceAdapterBundle { root } => install_source_adapter_bundle(
                 plugin_root.as_path(),
                 install_root.as_path(),
@@ -345,8 +343,9 @@ fn install_source_adapter_bundle(
     let manifests =
         discover_plugin_manifests_in_dirs([bundle_root]).map_err(|err| err.to_string())?;
     if manifests.is_empty() {
-        return Err("plugin archive does not contain any source-adapter override manifests"
-            .to_string());
+        return Err(
+            "plugin archive does not contain any source-adapter override manifests".to_string(),
+        );
     }
 
     let mut plugin_ids = manifests
@@ -396,12 +395,16 @@ fn install_source_adapter_bundle(
         .collect::<HashSet<_>>();
     let expected_plugin_ids = plugin_ids.iter().cloned().collect::<HashSet<_>>();
     if staged_plugin_ids != expected_plugin_ids {
-        return Err("staged source-adapter plugin bundle did not round-trip through discovery"
-            .to_string());
+        return Err(
+            "staged source-adapter plugin bundle did not round-trip through discovery".to_string(),
+        );
     }
 
-    let install_targets =
-        finalize_source_adapter_install(plugin_root, install_root, install_relative_paths.as_slice())?;
+    let install_targets = finalize_source_adapter_install(
+        plugin_root,
+        install_root,
+        install_relative_paths.as_slice(),
+    )?;
     plugin_ids.sort();
 
     Ok(InstalledPluginArchive {
@@ -482,10 +485,10 @@ fn find_plugin_root_in_extracted_dir(root: &Path) -> Result<ExtractedPluginArchi
         (0, 1) => Ok(ExtractedPluginArchive::SourceAdapterBundle {
             root: source_bundle_candidates.remove(0),
         }),
-        (0, 0) => {
-            Err("plugin.json or source-adapter manifests were not found in the archive root"
-                .to_string())
-        }
+        (0, 0) => Err(
+            "plugin.json or source-adapter manifests were not found in the archive root"
+                .to_string(),
+        ),
         _ => Err("plugin archive contains multiple plugin roots".to_string()),
     }
 }
@@ -596,8 +599,11 @@ fn install_relative_paths_from_source_bundle(
             manifest.path.as_path(),
         )?;
         for key in ["sourcePath", "overrideManifestPath"] {
-            let relative_path =
-                descriptor_relative_install_path(&manifest.descriptor, key, manifest.path.as_path())?;
+            let relative_path = descriptor_relative_install_path(
+                &manifest.descriptor,
+                key,
+                manifest.path.as_path(),
+            )?;
             if seen.insert(relative_path.clone()) {
                 paths.push(relative_path);
             }
@@ -3143,12 +3149,12 @@ class CapabilityRoutePlugin(star.Star):
             .iter()
             .find(|provider| provider["baseUrl"] == "http://127.0.0.1:9/v1")
             .expect("openai provider option should be returned");
-        assert_eq!(openai_option["label"], "OpenAI");
+        assert_eq!(openai_option["label"], "OpenAI Main");
         let anthropic_option = provider_options
             .iter()
             .find(|provider| provider["baseUrl"] == "http://127.0.0.1:9")
             .expect("anthropic provider option should be returned");
-        assert_eq!(anthropic_option["label"], "Anthropic");
+        assert_eq!(anthropic_option["label"], "Anthropic Main");
 
         let state_response = route_json_api(&server, "GET", "/api/LLM/GetManagerState", None);
         assert_eq!(state_response["code"], 0);
@@ -3167,6 +3173,8 @@ class CapabilityRoutePlugin(star.Star):
             .find(|provider| provider["id"] == "anthropic-main")
             .expect("active provider should be returned")
             .clone();
+        assert_eq!(active_provider["label"], "Anthropic Main");
+        assert_eq!(active_provider["providerLabel"], "Anthropic");
 
         let fetch_response = route_json_api(
             &server,
@@ -4235,11 +4243,11 @@ class CapabilityRoutePlugin(star.Star):
 
         let settings_response = route_json_api(&server, "GET", "/api/LLM/GetSettings", None);
         assert_eq!(settings_response["code"], 0);
-        assert_eq!(settings_response["data"]["provider"], "Anthropic");
+        assert_eq!(settings_response["data"]["provider"], "Anthropic Gateway");
         assert_eq!(settings_response["data"]["baseUrl"], base_url);
         assert_eq!(
             settings_response["data"]["providerOptions"][0]["label"],
-            "Anthropic"
+            "Anthropic Gateway"
         );
         assert_eq!(
             settings_response["data"]["providerOptions"][0]["baseUrl"],
@@ -4799,10 +4807,7 @@ class CapabilityRoutePlugin(star.Star):
                 "bundle/astrbot_plugin/hello_world/_conf_schema.json",
                 br#"{"token":{"type":"string"}}"#,
             ),
-            (
-                "bundle/shared/plugin-doc.yaml",
-                b"title: plugin-doc\n",
-            ),
+            ("bundle/shared/plugin-doc.yaml", b"title: plugin-doc\n"),
         ]);
 
         let response = install_local_plugin_archive(
@@ -4852,12 +4857,8 @@ class CapabilityRoutePlugin(star.Star):
         let root = temp_dir_path("source-adapter-finalize-rollback");
         let plugin_root = root.join("plugins");
         let install_root = root.join("install");
-        fs::create_dir_all(
-            install_root
-                .join("astrbot_plugin")
-                .join("hello_world"),
-        )
-        .expect("staged source dir should be created");
+        fs::create_dir_all(install_root.join("astrbot_plugin").join("hello_world"))
+            .expect("staged source dir should be created");
         fs::create_dir_all(install_root.join("shared")).expect("staged shared dir should exist");
         fs::write(
             install_root

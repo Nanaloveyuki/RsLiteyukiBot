@@ -80,10 +80,7 @@ pub(crate) fn descriptor_allows_metadata_only_health_check_skip(
             .get("source_root")
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty())
-        && descriptor
-            .metadata
-            .extra
-            .contains_key(EXTRA_SOURCE_PATH)
+        && descriptor.metadata.extra.contains_key(EXTRA_SOURCE_PATH)
         && descriptor
             .metadata
             .extra
@@ -98,6 +95,7 @@ pub(crate) fn descriptor_source_kind(
         Some(SourcePluginFamily::Native) => "liteyuki-native",
         Some(SourcePluginFamily::LiteyukiPy) => "liteyuki-python-bridge",
         Some(SourcePluginFamily::Astrbot) => "astrbot-compatible",
+        Some(SourcePluginFamily::Neomofox) => "neomofox-compatible",
         Some(SourcePluginFamily::Nonebot) => "nonebot-plugin",
         None => legacy_source_kind(
             descriptor.runtime.kind,
@@ -114,6 +112,7 @@ pub(crate) fn descriptor_compat_kind(
         Some(SourceAdapterFamily::Native) => "native",
         Some(SourceAdapterFamily::LiteyukiPythonBridge) => "liteyuki",
         Some(SourceAdapterFamily::AstrbotPythonBridge) => "astrbot",
+        Some(SourceAdapterFamily::NeomofoxPythonBridge) => "neomofox",
         Some(SourceAdapterFamily::NonebotExternal) => match descriptor_compat_level(descriptor) {
             Some(SourceCompatLevel::MetadataOnly) => "metadata-only",
             _ => "nonebot",

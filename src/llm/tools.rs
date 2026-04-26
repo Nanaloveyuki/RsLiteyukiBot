@@ -305,14 +305,16 @@ fn read_tool_state_document(path: &Path) -> Result<Option<ToolStateDocument>, St
 
     serde_json::from_str::<ToolStateDocument>(&content)
         .map(Some)
-        .map_err(|err| format!("tool state file '{}' is invalid json: {err}", path.display()))
+        .map_err(|err| {
+            format!(
+                "tool state file '{}' is invalid json: {err}",
+                path.display()
+            )
+        })
 }
 
 fn tool_state_temp_path(path: &Path) -> PathBuf {
-    let suffix = format!(
-        "{}.tmp",
-        std::process::id()
-    );
+    let suffix = format!("{}.tmp", std::process::id());
     path.with_extension(suffix)
 }
 
@@ -1316,8 +1318,8 @@ mod tests {
                 .any(|tool| tool.name == "workspace_read_file" && !tool.active)
         );
 
-        let persisted = fs::read_to_string(&tool_state_path)
-            .expect("tool state file should be written");
+        let persisted =
+            fs::read_to_string(&tool_state_path).expect("tool state file should be written");
         assert!(persisted.contains("\"workspace_read_file\": false"));
 
         let _ = fs::remove_file(tool_state_path);

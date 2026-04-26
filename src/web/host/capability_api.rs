@@ -149,8 +149,13 @@ fn toggle_tool_payload(request: &[u8]) -> Result<serde_json::Value, String> {
     if name.is_empty() {
         return Err("tool name should not be empty".to_string());
     }
-    if NON_TOGGLEABLE_TOOLS.iter().any(|tool_name| tool_name == &name) {
-        return Err(format!("tool '{name}' is a required discovery helper and cannot be toggled"));
+    if NON_TOGGLEABLE_TOOLS
+        .iter()
+        .any(|tool_name| tool_name == &name)
+    {
+        return Err(format!(
+            "tool '{name}' is a required discovery helper and cannot be toggled"
+        ));
     }
 
     let _guard = tool_toggle_lock()

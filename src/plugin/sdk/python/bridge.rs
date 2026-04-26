@@ -23,7 +23,16 @@ const PERMISSION_CONFIG_READ: &str = "config.read";
 const PERMISSION_CONFIG_WRITE: &str = "config.write";
 const PERMISSION_COMMAND_TUI_READ: &str = "command.tui.read";
 const PERMISSION_COMMAND_TUI_MANAGE: &str = "command.tui.manage";
-const PYTHON_COMPAT_RUNTIME: &str = include_str!("compat_runtime.py");
+const PYTHON_COMPAT_RUNTIME: &str = concat!(
+    include_str!("compat_runtime.py"),
+    "\n",
+    include_str!("../liteyukibot/compat_runtime.py"),
+    "\n",
+    include_str!("../astrbot/compat_runtime.py"),
+    "\n",
+    include_str!("../neomofox/compat_runtime.py"),
+    "\n_install_python_compat_modules(globals().get(\"__bridge_sdk__\"))\n",
+);
 
 #[pyclass]
 #[derive(Clone)]
@@ -418,6 +427,120 @@ pub(super) fn capture_plugin_module_names(
     let mut modules = names.into_iter().collect::<Vec<_>>();
     modules.sort();
     Ok(modules)
+}
+
+pub(super) fn remove_stale_entrypoint_modules(
+    py: Python<'_>,
+    entry_module: &str,
+    search_paths: &[PathBuf],
+) -> PyResult<()> {
+    let sys = py.import("sys")?;
+    let modules = sys.getattr("modules")?.downcast_into::<PyDict>()?;
+    let builtins = py.import("builtins")?;
+    let items = builtins
+        .getattr("list")?
+        .call1((modules.items(),))?
+        .downcast_into::<PyList>()?;
+    let entry_prefix = format!("{entry_module}.");
+    let mut stale_names = Vec::new();
+
+    for entry in items.iter() {
+        let tuple = entry.downcast_into::<PyTuple>()?;
+        let Some(key) = tuple.get_item(0).ok() else {
+            continue;
+        };
+        let Some(value) = tuple.get_item(1).ok() else {
+            continue;
+        };
+        let Ok(name) = key.extract::<String>() else {
+            continue;
+        };
+        if (name == entry_module || name.starts_with(entry_prefix.as_str()))
+            && !module_matches_search_paths(&value, search_paths)?
+        {
+            stale_names.push(name);
+        }
+    }
+
+    for name in stale_names {
+        let contains = modules
+            .call_method1("__contains__", (name.as_str(),))?
+            .is_truthy()?;
+        if contains {
+            modules.del_item(name.as_str())?;
+        }
+    }
+
+    Ok(())
+}
+
+pub(super) fn import_python_entrypoint_module<'py>(
+    py: Python<'py>,
+    entry_module: &str,
+    search_paths: &[PathBuf],
+) -> PyResult<pyo3::Bound<'py, PyModule>> {
+    let Some((entry_path, package_dir)) = resolve_entrypoint_path(entry_module, search_paths)
+    else {
+        return PyModule::import(py, entry_module);
+    };
+
+    let importlib_util = py.import("importlib.util")?;
+    let sys = py.import("sys")?;
+    let modules = sys.getattr("modules")?.downcast_into::<PyDict>()?;
+    let entry_path = entry_path.to_string_lossy().into_owned();
+    let spec = if let Some(package_dir) = package_dir {
+        let kwargs = PyDict::new(py);
+        let locations = PyList::new(py, [package_dir.to_string_lossy().into_owned()])?;
+        kwargs.set_item("submodule_search_locations", locations)?;
+        importlib_util.call_method(
+            "spec_from_file_location",
+            (entry_module, entry_path.as_str()),
+            Some(&kwargs),
+        )?
+    } else {
+        importlib_util.call_method1(
+            "spec_from_file_location",
+            (entry_module, entry_path.as_str()),
+        )?
+    };
+    if spec.is_none() {
+        return Err(PyRuntimeError::new_err(format!(
+            "python entrypoint module '{}' could not be loaded from {}",
+            entry_module, entry_path
+        )));
+    }
+
+    let module = importlib_util.call_method1("module_from_spec", (&spec,))?;
+    modules.set_item(entry_module, &module)?;
+    let loader = spec.getattr("loader")?;
+    if let Err(err) = loader.call_method1("exec_module", (&module,)) {
+        let _ = modules.del_item(entry_module);
+        return Err(err);
+    }
+    Ok(module.downcast_into::<PyModule>()?)
+}
+
+fn resolve_entrypoint_path(
+    entry_module: &str,
+    search_paths: &[PathBuf],
+) -> Option<(PathBuf, Option<PathBuf>)> {
+    let module_relative = entry_module.replace('.', std::path::MAIN_SEPARATOR_STR);
+    let file_candidate = format!("{module_relative}.py");
+    let package_candidate = PathBuf::from(&module_relative).join("__init__.py");
+
+    for base in search_paths {
+        let file_path = base.join(file_candidate.as_str());
+        if file_path.exists() {
+            return Some((file_path, None));
+        }
+        let package_path = base.join(&package_candidate);
+        if package_path.exists() {
+            let package_dir = package_path.parent().map(Path::to_path_buf);
+            return Some((package_path, package_dir));
+        }
+    }
+
+    None
 }
 
 fn module_matches_search_paths(

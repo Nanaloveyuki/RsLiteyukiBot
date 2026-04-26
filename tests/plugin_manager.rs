@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use liteyukibot_core::{
@@ -216,6 +217,37 @@ fn plugin_context() -> PluginContext {
         sdk: PluginSdk::default(),
         host,
     }
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set_path(key: &'static str, value: &Path) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -640,7 +672,10 @@ async fn plugin_manager_metadata_only_external_manifest_runtime_skips_health_che
         .await
         .expect("metadata-only manifest should load");
     assert_eq!(loaded[0].load_plan.state, PluginLoadState::Deferred);
-    assert_eq!(loaded[0].load_plan.runtime_kind, PluginRuntimeKind::External);
+    assert_eq!(
+        loaded[0].load_plan.runtime_kind,
+        PluginRuntimeKind::External
+    );
 
     manager
         .health_check_loaded_plugins(context.clone())
@@ -693,7 +728,10 @@ async fn plugin_manager_nonebot_override_with_runtime_override_still_fails_healt
         .await
         .expect("overridden metadata-only manifest should still load");
     assert_eq!(loaded[0].load_plan.state, PluginLoadState::Deferred);
-    assert_eq!(loaded[0].load_plan.runtime_kind, PluginRuntimeKind::External);
+    assert_eq!(
+        loaded[0].load_plan.runtime_kind,
+        PluginRuntimeKind::External
+    );
 
     let err = manager
         .health_check_loaded_plugins(context.clone())
@@ -1980,6 +2018,107 @@ class AstrCompatEcho(star.Star):
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn plugin_manager_loads_neomofox_style_python_plugin_entrypoint() {
+    if !python_command_available() {
+        return;
+    }
+
+    let manager = PluginManager::new();
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("neomofox_style_plugin");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+
+    std::fs::write(
+        plugin_dir.join("neo_plugin.py"),
+        r#"from src.core.components import BasePlugin, BaseTool, register_plugin
+
+
+class NeoEchoTool(BaseTool):
+    tool_name = "neo_echo_tool"
+    tool_description = "Neo echo tool"
+
+    async def execute(self, value: str):
+        return True, f"neo:{value}"
+
+
+@register_plugin
+class NeoDemoPlugin(BasePlugin):
+    plugin_name = "neo_demo"
+    plugin_description = "Neo-MoFox style demo"
+    plugin_version = "1.0.0"
+
+    def get_components(self):
+        return [NeoEchoTool]
+"#,
+    )
+    .expect("python module should be written");
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "id": "neomofox-style-demo",
+  "name": "Neo-MoFox Style Demo",
+  "type": "service",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "neo_plugin",
+    "options": {
+      "compat_family": "neomofox"
+    }
+  }
+}"#,
+    )
+    .expect("manifest should be written");
+
+    let _env_lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let _cron_state_guard = EnvVarGuard::set_path(
+        "LY_PLUGIN_CRON_STATE_PATH",
+        dir.path.join("neomofox-cron-state.json").as_path(),
+    );
+    let context = plugin_context();
+    let discovered = manager
+        .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+        .expect("manifest discovery should succeed");
+    assert_eq!(discovered, vec!["neomofox-style-demo".to_string()]);
+
+    manager
+        .load_plugins(discovered, context.clone())
+        .await
+        .expect("Neo-MoFox style plugin should import and load");
+
+    let loaded = manager.loaded_plugins();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].descriptor.metadata.id, "neomofox-style-demo");
+    assert_eq!(loaded[0].load_plan.runtime_kind, PluginRuntimeKind::Python);
+    assert_eq!(loaded[0].load_plan.state, PluginLoadState::Ready);
+
+    let snapshot = context
+        .sdk
+        .get_plugin_capabilities("neomofox-style-demo")
+        .expect("capability snapshot query should succeed")
+        .expect("Neo-MoFox capability snapshot should exist");
+    assert!(
+        snapshot
+            .tools
+            .iter()
+            .any(|tool| tool.name == "neo_echo_tool"
+                && tool.source == liteyukibot_core::PluginCapabilitySource::NeomofoxComponent)
+    );
+    let output = context
+        .sdk
+        .execute_plugin_tool(
+            "neomofox-style-demo",
+            "neo_echo_tool",
+            &json!({ "value": "ok" }),
+        )
+        .expect("Neo-MoFox tool execution should succeed")
+        .expect("Neo-MoFox tool should exist");
+    assert_eq!(
+        output,
+        liteyukibot_core::PluginToolResult::Json(json!([true, "neo:ok"]))
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_manager_astrbot_message_event_result_replies_and_injects_command_args() {
     if !python_command_available() {
@@ -2215,6 +2354,11 @@ class AstrCompatContextTools(star.Star):
 
     let manifest = PluginManifestLoader::load_manifest(plugin_dir.join("plugin.json").as_path())
         .expect("manifest should load");
+    let _env_lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let _cron_state_guard = EnvVarGuard::set_path(
+        "LY_PLUGIN_CRON_STATE_PATH",
+        dir.path.join("astrbot-context-cron-state.json").as_path(),
+    );
     let context = plugin_context();
 
     let activated = context

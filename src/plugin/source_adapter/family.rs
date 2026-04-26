@@ -17,6 +17,7 @@ pub(crate) fn build_family_seed(
         SourcePluginFamily::Native => build_native_seed(source_root),
         SourcePluginFamily::LiteyukiPy => build_liteyuki_py_seed(plugin_id, source_root),
         SourcePluginFamily::Astrbot => build_astrbot_seed(plugin_id, source_root),
+        SourcePluginFamily::Neomofox => build_neomofox_seed(plugin_id, source_root),
         SourcePluginFamily::Nonebot => Ok(build_nonebot_seed(plugin_id, source_root)),
     }
 }
@@ -43,6 +44,26 @@ struct AstrbotMetadataDoc {
     support_platforms: Option<Vec<String>>,
     #[serde(default)]
     astrbot_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct NeomofoxManifestDoc {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    author: Option<String>,
+    #[serde(default)]
+    entry_point: Option<String>,
+    #[serde(default)]
+    min_core_version: Option<String>,
+    #[serde(default)]
+    python_dependencies: Option<Vec<String>>,
+    #[serde(default)]
+    include: Option<Vec<Value>>,
 }
 
 fn build_native_seed(source_root: &Path) -> Result<FamilyDescriptorSeed, String> {
@@ -224,6 +245,101 @@ fn build_astrbot_seed(plugin_id: &str, source_root: &Path) -> Result<FamilyDescr
     })
 }
 
+fn build_neomofox_seed(
+    plugin_id: &str,
+    source_root: &Path,
+) -> Result<FamilyDescriptorSeed, String> {
+    let manifest_file = source_root.join("manifest.json");
+    let content = std::fs::read_to_string(&manifest_file).map_err(|err| {
+        format!(
+            "failed to read Neo-MoFox manifest {}: {err}",
+            manifest_file.display()
+        )
+    })?;
+    let metadata: NeomofoxManifestDoc = serde_json::from_str(content.as_str()).map_err(|err| {
+        format!(
+            "failed to parse Neo-MoFox manifest {}: {err}",
+            manifest_file.display()
+        )
+    })?;
+
+    let entrypoint =
+        neomofox_entrypoint_from_manifest(source_root, metadata.entry_point.as_deref());
+    let mut runtime = PluginRuntimeSpec {
+        kind: PluginRuntimeKind::Python,
+        entrypoint,
+        abi: "liteyuki-python-bridge".to_string(),
+        ..PluginRuntimeSpec::default()
+    };
+    runtime.options.insert(
+        "compat_family".to_string(),
+        Value::String("neomofox".to_string()),
+    );
+
+    let mut extra = HashMap::new();
+    if let Some(version) = metadata
+        .version
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        extra.insert("version".to_string(), Value::String(version.to_string()));
+    }
+    if let Some(version_range) = metadata
+        .min_core_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        extra.insert(
+            "neomofoxMinCoreVersion".to_string(),
+            Value::String(version_range.to_string()),
+        );
+    }
+    if let Some(dependencies) = metadata
+        .python_dependencies
+        .filter(|items| !items.is_empty())
+    {
+        extra.insert(
+            "pythonDependencies".to_string(),
+            Value::Array(dependencies.into_iter().map(Value::String).collect()),
+        );
+    }
+    if let Some(include) = metadata.include.filter(|items| !items.is_empty()) {
+        extra.insert("neomofoxComponents".to_string(), Value::Array(include));
+    }
+
+    Ok(FamilyDescriptorSeed {
+        plugin_id_hint: metadata
+            .name
+            .as_deref()
+            .map(host_plugin_id_hint)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                source_root
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(host_plugin_id_hint)
+            }),
+        name: metadata
+            .name
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| Some(plugin_id.to_string())),
+        description: metadata
+            .description
+            .filter(|value| !value.trim().is_empty()),
+        plugin_type: Some(PluginType::Service),
+        author: metadata.author.filter(|value| !value.trim().is_empty()),
+        homepage: None,
+        runtime,
+        sdk: PluginSdkSpec::default(),
+        permissions: Vec::new(),
+        commands: Vec::new(),
+        extra,
+        source_manifest_name: Some("manifest.json".to_string()),
+    })
+}
+
 fn build_nonebot_seed(plugin_id: &str, source_root: &Path) -> FamilyDescriptorSeed {
     let mut runtime = PluginRuntimeSpec {
         kind: PluginRuntimeKind::External,
@@ -261,6 +377,32 @@ fn build_nonebot_seed(plugin_id: &str, source_root: &Path) -> FamilyDescriptorSe
         commands: Vec::new(),
         extra,
         source_manifest_name: None,
+    }
+}
+
+fn neomofox_entrypoint_from_manifest(source_root: &Path, entry_point: Option<&str>) -> String {
+    let package = source_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("plugin");
+    let raw = entry_point
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("plugin.py")
+        .replace('\\', "/");
+    let module = raw
+        .trim_end_matches(".py")
+        .split('/')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(".");
+    if module.is_empty() || module == "__init__" {
+        package.to_string()
+    } else {
+        format!("{package}.{module}")
     }
 }
 

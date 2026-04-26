@@ -198,3 +198,9 @@ interface WebUIConfig {
   ipBlacklist: string[];
   enableXForwardedFor: boolean;
 }
+
+interface DesktopSettings {
+  closeToTray: boolean;
+  configured: boolean;
+  configPath?: string | null;
+}

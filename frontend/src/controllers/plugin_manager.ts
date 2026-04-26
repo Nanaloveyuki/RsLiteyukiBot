@@ -8,6 +8,7 @@ export type PluginSourceKind =
   | 'liteyuki-native'
   | 'liteyuki-python-bridge'
   | 'astrbot-compatible'
+  | 'neomofox-compatible'
   | 'runtime-lua'
   | 'runtime-external';
 

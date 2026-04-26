@@ -6,6 +6,9 @@ mod app_config;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/command_registry.rs"]
 mod command_registry;
+#[allow(dead_code, unused_imports)]
+#[path = "../src/config_edit.rs"]
+mod config_edit;
 #[allow(dead_code)]
 #[path = "../src/config_paths.rs"]
 mod config_paths;
@@ -413,6 +416,7 @@ fn validate_app_config_reports_invalid_values() {
         llm: None,
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -449,6 +453,7 @@ fn runtime_reload_warnings_detect_low_level_runtime_fields() {
         llm: None,
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -492,6 +497,7 @@ fn runtime_reload_warnings_skip_when_sensitive_fields_unchanged() {
         llm: None,
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -535,6 +541,7 @@ fn connect_websocket_both_mode_generates_forward_and_reverse_adapters() {
         llm: None,
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -586,6 +593,7 @@ fn connect_websocket_port_without_mode_defaults_to_reverse() {
         llm: None,
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -634,6 +642,7 @@ fn connect_websocket_urls_expand_to_multiple_adapters() {
         llm: None,
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -680,6 +689,7 @@ fn connect_http_urls_expand_to_multiple_adapters() {
         llm: None,
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -721,6 +731,7 @@ fn resolve_help_whitelist_accepts_numeric_and_prefixed_entries() {
         llm: None,
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: Some(OnebotV11ConfigSection {
             whitelist: vec![
                 OnebotWhitelistEntry::UInt(3541766758),
@@ -749,6 +760,7 @@ fn validate_app_config_warns_empty_onebot_whitelist_entry() {
         llm: None,
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: Some(OnebotV11ConfigSection {
             whitelist: vec![OnebotWhitelistEntry::Text("  ".to_string())],
         }),
@@ -789,6 +801,7 @@ fn resolve_disabled_scope_commands_normalizes_and_deduplicates_entries() {
         llm: None,
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -817,6 +830,7 @@ fn validate_app_config_warns_invalid_disabled_command_entry() {
             disabled: vec!["adapter:discord ping".to_string()],
         }),
         plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -840,6 +854,7 @@ fn resolve_disabled_plugins_normalizes_and_deduplicates_entries() {
         i18n: None,
         llm: None,
         commands: None,
+        desktop: None,
         plugins: Some(PluginConfigSection {
             disabled: vec![
                 " builtin-liteecho ".to_string(),
@@ -870,6 +885,7 @@ fn validate_app_config_warns_invalid_disabled_plugin_entry() {
         i18n: None,
         llm: None,
         commands: None,
+        desktop: None,
         plugins: Some(PluginConfigSection {
             disabled: vec!["   ".to_string()],
         }),
@@ -917,6 +933,7 @@ fn resolve_llm_config_reads_values_from_config() {
         }),
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -967,6 +984,7 @@ fn resolve_llm_config_falls_back_to_provider_urls_when_base_url_missing() {
         }),
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -1004,6 +1022,7 @@ fn validate_app_config_warns_when_llm_is_enabled_without_api_key() {
         }),
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -1056,6 +1075,7 @@ fn validate_app_config_warns_llm_base_url_in_main_config() {
         }),
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -1097,6 +1117,7 @@ fn validate_app_config_warns_invalid_llm_sampling_ranges() {
         }),
         commands: None,
         plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 

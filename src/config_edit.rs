@@ -112,6 +112,46 @@ pub fn persist_disabled_plugins(path: &Path, entries: &[String]) -> Result<(), S
     Ok(())
 }
 
+#[allow(dead_code)]
+pub fn persist_desktop_close_to_tray(path: &Path, close_to_tray: bool) -> Result<(), String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read config {}: {err}", path.display()))?;
+    let ext = path
+        .extension()
+        .and_then(|raw| raw.to_str())
+        .map(|raw| raw.to_ascii_lowercase());
+
+    let updated = match ext.as_deref() {
+        Some("yaml") | Some("yml") => {
+            update_yaml_bool_section_document(&content, "desktop", "close_to_tray", close_to_tray)
+        }
+        Some("toml") => {
+            update_toml_bool_section_document(&content, "desktop", "close_to_tray", close_to_tray)
+        }
+        _ => {
+            let err = format!(
+                "unsupported config extension for {} (expected .yaml/.yml/.toml)",
+                path.display()
+            );
+            log_config_persist_failure(
+                "desktop close behavior",
+                path,
+                format!("close_to_tray={close_to_tray}").as_str(),
+                err.as_str(),
+            );
+            return Err(err);
+        }
+    };
+
+    persist_rendered_config(
+        "desktop close behavior",
+        path,
+        format!("close_to_tray={close_to_tray}").as_str(),
+        updated,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct LlmConfigPatch {
     pub enabled: Option<bool>,
@@ -496,6 +536,49 @@ fn update_yaml_plugins_document(content: &str, entries: &[String]) -> String {
     update_yaml_disabled_list_section(content, "plugins", entries)
 }
 
+#[allow(dead_code)]
+fn update_yaml_bool_section_document(
+    content: &str,
+    section_name: &str,
+    key: &str,
+    value: bool,
+) -> String {
+    let newline = detect_newline(content);
+    let trailing_newline = content.ends_with('\n');
+    let mut lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
+
+    let section_index = lines.iter().position(|line| {
+        let trimmed = line.trim();
+        trimmed == format!("{section_name}:")
+            || trimmed == format!("'{section_name}':")
+            || trimmed == format!("\"{section_name}\":")
+    });
+
+    if let Some(section_start) = section_index {
+        let section_indent = leading_spaces(lines[section_start].as_str());
+        let section_end = find_yaml_section_end(&lines, section_start, section_indent);
+        let key_index = (section_start + 1..section_end).find(|&idx| {
+            let trimmed = lines[idx].trim_start();
+            trimmed.starts_with(key) && trimmed.contains(':')
+        });
+        let rendered = render_yaml_bool_key(section_indent + 2, key, value);
+
+        if let Some(index) = key_index {
+            lines[index] = render_yaml_bool_key(leading_spaces(lines[index].as_str()), key, value);
+        } else {
+            lines.splice(section_end..section_end, vec![rendered]);
+        }
+    } else {
+        if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push(format!("{section_name}:"));
+        lines.push(render_yaml_bool_key(2, key, value));
+    }
+
+    join_lines(&lines, newline, trailing_newline)
+}
+
 fn update_yaml_disabled_list_section(
     content: &str,
     section_name: &str,
@@ -559,6 +642,11 @@ fn update_yaml_disabled_list_section(
     }
 
     join_lines(&lines, newline, trailing_newline)
+}
+
+#[allow(dead_code)]
+fn render_yaml_bool_key(indent: usize, key: &str, value: bool) -> String {
+    format!("{}{}: {}", " ".repeat(indent), key, value)
 }
 
 fn find_yaml_section_end(lines: &[String], section_start: usize, section_indent: usize) -> usize {
@@ -641,6 +729,44 @@ fn update_toml_commands_document(content: &str, entries: &[String]) -> String {
 
 fn update_toml_plugins_document(content: &str, entries: &[String]) -> String {
     update_toml_disabled_list_section(content, "plugins", entries)
+}
+
+#[allow(dead_code)]
+fn update_toml_bool_section_document(
+    content: &str,
+    section_name: &str,
+    key: &str,
+    value: bool,
+) -> String {
+    let newline = detect_newline(content);
+    let trailing_newline = content.ends_with('\n');
+    let mut lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
+    let value_line = format!("{key} = {value}");
+
+    let section_index = lines
+        .iter()
+        .position(|line| line.trim() == format!("[{section_name}]"));
+
+    if let Some(section_start) = section_index {
+        let table_end = find_toml_table_end(&lines, section_start);
+        let existing = (section_start + 1..table_end).find(|&idx| {
+            let trimmed = lines[idx].trim_start();
+            trimmed.starts_with(key) && trimmed.contains('=')
+        });
+        if let Some(index) = existing {
+            lines[index] = value_line;
+        } else {
+            lines.splice(table_end..table_end, vec![value_line]);
+        }
+    } else {
+        if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push(format!("[{section_name}]"));
+        lines.push(value_line);
+    }
+
+    join_lines(&lines, newline, trailing_newline)
 }
 
 fn update_toml_disabled_list_section(

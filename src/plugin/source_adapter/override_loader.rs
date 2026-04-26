@@ -234,7 +234,11 @@ fn load_override_manifest(
     {
         runtime.options.insert(
             "config_path".to_string(),
-            Value::String(default_plugin_config_path(plugin_id.as_str()).display().to_string()),
+            Value::String(
+                default_plugin_config_path(plugin_id.as_str())
+                    .display()
+                    .to_string(),
+            ),
         );
     }
     let sdk = merge_sdk(seed.sdk, host.sdk.unwrap_or_default());
@@ -368,6 +372,10 @@ fn inject_source_extra(
             SourceAdapterFamily::AstrbotPythonBridge,
             SourceCompatLevel::Bridged,
         ),
+        SourcePluginFamily::Neomofox => (
+            SourceAdapterFamily::NeomofoxPythonBridge,
+            SourceCompatLevel::Bridged,
+        ),
         SourcePluginFamily::Nonebot => (
             SourceAdapterFamily::NonebotExternal,
             SourceCompatLevel::MetadataOnly,
@@ -447,8 +455,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::config_paths::resolve_user_config_dir;
-    use serde_json::json;
     use serde_json::Value;
+    use serde_json::json;
 
     use super::discover_plugin_manifests_in_dirs;
 
@@ -550,8 +558,11 @@ mod tests {
         )
         .expect("metadata should be written");
         fs::write(source_root.join("main.py"), "class Hello: pass\n").expect("main should exist");
-        fs::write(source_root.join("_conf_schema.json"), "{\"token\":{\"type\":\"string\"}}")
-            .expect("schema should exist");
+        fs::write(
+            source_root.join("_conf_schema.json"),
+            "{\"token\":{\"type\":\"string\"}}",
+        )
+        .expect("schema should exist");
         fs::write(
             manifest_root.join("hello.override.json"),
             serde_json::to_vec_pretty(&json!({
@@ -626,6 +637,137 @@ mod tests {
             crate::PluginType::Application
         );
         assert_eq!(descriptor.runtime.entrypoint, "hello_weather");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn discover_neomofox_override_manifest_extracts_manifest_metadata() {
+        let root = temp_root("neomofox-override");
+        let source_root = root.join("neomofox_plugin").join("emoji_sender");
+        let manifest_root = root.join("manifests");
+        fs::create_dir_all(&source_root).expect("source root should be created");
+        fs::create_dir_all(&manifest_root).expect("manifest root should be created");
+        fs::write(source_root.join("__init__.py"), "").expect("package should exist");
+        fs::write(
+            source_root.join("plugin.py"),
+            "from src.core.components import BasePlugin, register_plugin\n@register_plugin\nclass EmojiSenderPlugin(BasePlugin):\n    plugin_name = 'emoji_sender'\n    plugin_description = 'emoji sender'\n    plugin_version = '1.0.0'\n",
+        )
+        .expect("entrypoint should exist");
+        fs::write(
+            source_root.join("manifest.json"),
+            serde_json::to_vec_pretty(&json!({
+                "name": "emoji_sender",
+                "version": "1.0.0",
+                "description": "send emoji memes",
+                "author": "MoFox Team",
+                "entry_point": "plugin.py",
+                "min_core_version": "1.0.0",
+                "python_dependencies": ["pillow"],
+                "include": [
+                    {
+                        "component_type": "service",
+                        "component_name": "emoji_sender",
+                        "enabled": true
+                    }
+                ]
+            }))
+            .expect("manifest should serialize"),
+        )
+        .expect("manifest should be written");
+        fs::write(
+            manifest_root.join("emoji.override.json"),
+            serde_json::to_vec_pretty(&json!({
+                "version": 1,
+                "source": {
+                    "kind": "neomofox",
+                    "path": "neomofox_plugin/emoji_sender"
+                }
+            }))
+            .expect("override should serialize"),
+        )
+        .expect("override should be written");
+
+        let manifests =
+            discover_plugin_manifests_in_dirs([root.as_path()]).expect("discovery should succeed");
+        assert_eq!(manifests.len(), 1);
+        let descriptor = &manifests[0].descriptor;
+        assert_eq!(descriptor.metadata.id, "emoji-sender");
+        assert_eq!(descriptor.metadata.name, "emoji_sender");
+        assert_eq!(descriptor.metadata.description, "send emoji memes");
+        assert_eq!(descriptor.runtime.kind, crate::PluginRuntimeKind::Python);
+        assert_eq!(descriptor.runtime.entrypoint, "emoji_sender.plugin");
+        assert_eq!(
+            descriptor
+                .runtime
+                .options
+                .get("compat_family")
+                .and_then(Value::as_str),
+            Some("neomofox")
+        );
+        assert_eq!(
+            descriptor
+                .metadata
+                .extra
+                .get("sourceFamily")
+                .and_then(|value| value.as_str()),
+            Some("neomofox")
+        );
+        assert_eq!(
+            descriptor
+                .metadata
+                .extra
+                .get("adapterFamily")
+                .and_then(|value| value.as_str()),
+            Some("neomofox_python_bridge")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn discover_neomofox_override_keeps_file_path_entrypoint_segments() {
+        let root = temp_root("neomofox-hyphen-entrypoint");
+        let source_root = root.join("neomofox_plugin").join("my-plugin");
+        let manifest_root = root.join("manifests");
+        fs::create_dir_all(source_root.join("src")).expect("source root should be created");
+        fs::create_dir_all(&manifest_root).expect("manifest root should be created");
+        fs::write(source_root.join("__init__.py"), "").expect("package should exist");
+        fs::write(
+            source_root.join("src").join("plugin.py"),
+            "from src.core.components import BasePlugin, register_plugin\n@register_plugin\nclass MyPlugin(BasePlugin):\n    plugin_name = 'my_plugin'\n    def get_components(self):\n        return []\n",
+        )
+        .expect("entrypoint should exist");
+        fs::write(
+            source_root.join("manifest.json"),
+            serde_json::to_vec_pretty(&json!({
+                "name": "my_plugin",
+                "version": "1.0.0",
+                "entry_point": "src/plugin.py"
+            }))
+            .expect("manifest should serialize"),
+        )
+        .expect("manifest should be written");
+        fs::write(
+            manifest_root.join("my-plugin.override.json"),
+            serde_json::to_vec_pretty(&json!({
+                "version": 1,
+                "source": {
+                    "kind": "neomofox",
+                    "path": "neomofox_plugin/my-plugin"
+                }
+            }))
+            .expect("override should serialize"),
+        )
+        .expect("override should be written");
+
+        let manifests =
+            discover_plugin_manifests_in_dirs([root.as_path()]).expect("discovery should succeed");
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(
+            manifests[0].descriptor.runtime.entrypoint,
+            "my-plugin.src.plugin"
+        );
 
         let _ = fs::remove_dir_all(root);
     }

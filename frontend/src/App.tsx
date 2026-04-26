@@ -5,6 +5,7 @@ import { Route, Routes, useNavigate } from 'react-router-dom';
 import PageBackground from '@/components/page_background';
 import PageLoading from '@/components/page_loading';
 import Toaster from '@/components/toaster';
+import DesktopClosePrompt from '@/components/desktop_close_prompt';
 
 import DialogProvider from '@/contexts/dialog';
 
@@ -35,6 +36,7 @@ function App () {
       <Provider store={store}>
         <PageBackground />
         <Toaster />
+        <DesktopClosePrompt />
         <Suspense fallback={<PageLoading />}>
           <AuthChecker>
             <AppRoutes />

@@ -345,6 +345,21 @@ export default class WebUIManager {
     return data.data;
   }
 
+  public static async getDesktopSettings () {
+    const { data } = await serverRequest.get<ServerResponse<DesktopSettings>>(
+      '/Desktop/GetSettings'
+    );
+    return data.data;
+  }
+
+  public static async updateDesktopSettings (settings: Pick<DesktopSettings, 'closeToTray'>) {
+    const { data } = await serverRequest.post<ServerResponse<DesktopSettings>>(
+      '/Desktop/UpdateSettings',
+      settings
+    );
+    return data.data;
+  }
+
   // 获取当前客户端IP
   public static async getClientIP () {
     const { data } = await serverRequest.get<ServerResponse<{ ip: string; }>>(

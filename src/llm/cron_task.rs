@@ -5,9 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use chrono::{
-    DateTime, Datelike, Duration, FixedOffset, Offset, Timelike, Utc,
-};
+use chrono::{DateTime, Datelike, Duration, FixedOffset, Offset, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config_paths::resolve_preferred_plugin_cron_state_path;
@@ -396,7 +394,11 @@ fn apply_scheduler_overlay(
         return;
     }
 
-    match compute_next_run_time(job, entry.last_run_time.as_deref().and_then(parse_timestamp), now) {
+    match compute_next_run_time(
+        job,
+        entry.last_run_time.as_deref().and_then(parse_timestamp),
+        now,
+    ) {
         Ok(next_run_time) => {
             entry.schedule_signature = Some(schedule_signature);
             entry.next_run_time = next_run_time.clone();
@@ -621,13 +623,18 @@ fn cron_fields_match(fields: &ParsedCronFields, candidate: DateTime<FixedOffset>
     let month_matches = field_matches(&fields.month, candidate.month());
     let day_of_month_matches = field_matches(&fields.day_of_month, candidate.day());
     let weekday = candidate.weekday().num_days_from_sunday();
-    let day_of_week_matches =
-        field_matches(&fields.day_of_week, weekday) || (weekday == 0 && field_matches(&fields.day_of_week, 7));
+    let day_of_week_matches = field_matches(&fields.day_of_week, weekday)
+        || (weekday == 0 && field_matches(&fields.day_of_week, 7));
 
     minute_matches
         && hour_matches
         && month_matches
-        && day_match(day_of_month_matches, day_of_week_matches, &fields.day_of_month, &fields.day_of_week)
+        && day_match(
+            day_of_month_matches,
+            day_of_week_matches,
+            &fields.day_of_month,
+            &fields.day_of_week,
+        )
 }
 
 fn day_match(
@@ -751,12 +758,14 @@ fn read_state_document_path(path: &Path) -> Result<Option<CronTaskStateDocument>
     if content.trim().is_empty() {
         return Ok(Some(CronTaskStateDocument::default()));
     }
-    serde_json::from_str::<CronTaskStateDocument>(&content).map(Some).map_err(|err| {
-        format!(
-            "plugin cron state file '{}' is invalid json: {err}",
-            path.display()
-        )
-    })
+    serde_json::from_str::<CronTaskStateDocument>(&content)
+        .map(Some)
+        .map_err(|err| {
+            format!(
+                "plugin cron state file '{}' is invalid json: {err}",
+                path.display()
+            )
+        })
 }
 
 fn cron_state_temp_path(path: &Path) -> PathBuf {

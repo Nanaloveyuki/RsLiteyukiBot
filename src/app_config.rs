@@ -53,6 +53,9 @@ pub(crate) struct AppConfigDoc {
     pub(crate) commands: Option<CommandConfigSection>,
     #[serde(default)]
     pub(crate) plugins: Option<PluginConfigSection>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) desktop: Option<DesktopConfigSection>,
     #[serde(default, rename = "onebot-v11", alias = "onebot_v11")]
     pub(crate) onebot_v11: Option<OnebotV11ConfigSection>,
 }
@@ -67,6 +70,21 @@ pub(crate) struct CommandConfigSection {
 pub(crate) struct PluginConfigSection {
     #[serde(default)]
     pub(crate) disabled: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct DesktopConfigSection {
+    #[serde(default)]
+    pub(crate) close_to_tray: Option<bool>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopCloseBehavior {
+    pub close_to_tray: bool,
+    pub configured: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -492,6 +510,43 @@ pub(crate) fn load_app_config_with_warnings(emit_stderr: bool) -> (AppConfigDoc,
 
 pub(crate) fn resolve_app_config_path() -> Option<PathBuf> {
     resolve_existing_app_config_path()
+}
+
+#[allow(dead_code)]
+pub fn resolve_desktop_close_behavior() -> DesktopCloseBehavior {
+    let (doc, _) = load_app_config_with_warnings(false);
+    desktop_close_behavior_from_doc(&doc)
+}
+
+#[allow(dead_code)]
+pub fn persist_desktop_close_to_tray_preference(
+    close_to_tray: bool,
+) -> Result<DesktopCloseBehavior, String> {
+    ensure_default_config_files().map_err(|err| err.to_string())?;
+    let path = resolve_app_config_path().unwrap_or_else(resolve_default_app_config_path);
+    crate::config_edit::persist_desktop_close_to_tray(path.as_path(), close_to_tray)?;
+    Ok(DesktopCloseBehavior {
+        close_to_tray,
+        configured: true,
+    })
+}
+
+#[allow(dead_code)]
+fn desktop_close_behavior_from_doc(doc: &AppConfigDoc) -> DesktopCloseBehavior {
+    match doc
+        .desktop
+        .as_ref()
+        .and_then(|section| section.close_to_tray)
+    {
+        Some(close_to_tray) => DesktopCloseBehavior {
+            close_to_tray,
+            configured: true,
+        },
+        None => DesktopCloseBehavior {
+            close_to_tray: true,
+            configured: false,
+        },
+    }
 }
 
 pub(crate) fn ensure_default_config_files() -> Result<(), Box<dyn std::error::Error>> {

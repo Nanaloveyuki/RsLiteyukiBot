@@ -8,3 +8,20 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv
 }
+
+interface LiteyukiDesktopClosePayload {
+  closeToTrayDefault: boolean
+}
+
+interface LiteyukiDesktopBridge {
+  onCloseRequested: (
+    listener: (payload: LiteyukiDesktopClosePayload) => void
+  ) => () => void
+  closeToBackground: (alwaysRemember: boolean) => Promise<void>
+  exitApp: (alwaysRemember: boolean) => Promise<void>
+  cancelClose: () => Promise<void>
+}
+
+interface Window {
+  __LITEYUKI_DESKTOP__?: LiteyukiDesktopBridge
+}

@@ -698,9 +698,7 @@ fn spawn_plugin_cron_scheduler(
             match result {
                 Ok(executed) if executed > 0 => {
                     with_state_write(&state, |host| {
-                        host.push_note(format!(
-                            "plugin cron scheduler executed {executed} job(s)"
-                        ));
+                        host.push_note(format!("plugin cron scheduler executed {executed} job(s)"));
                     });
                 }
                 Ok(_) => {}

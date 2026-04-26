@@ -105,6 +105,7 @@ impl PluginDescriptor {
 pub enum PluginCapabilitySource {
     AstrbotDecorator,
     AstrbotContext,
+    NeomofoxComponent,
     #[default]
     Unknown,
 }

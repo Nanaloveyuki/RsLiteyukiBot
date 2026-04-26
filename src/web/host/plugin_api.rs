@@ -733,7 +733,12 @@ fn all_plugin_capabilities_payload(
             PluginCapabilitiesPayload {
                 plugin_id: plugin_id.clone(),
                 runtime_kind,
-                support: build_plugin_capability_support(service, &snapshot, plugin_id.as_str(), active),
+                support: build_plugin_capability_support(
+                    service,
+                    &snapshot,
+                    plugin_id.as_str(),
+                    active,
+                ),
                 snapshot,
             }
         })
@@ -784,7 +789,12 @@ fn build_plugin_capability_support(
     PluginCapabilitySupportSummary {
         tools: build_tool_capability_support(snapshot, plugin_active),
         web_apis: build_web_api_capability_support(snapshot, plugin_active),
-        cron_jobs: build_cron_capability_support(cron_registered, cron_enabled, cron_executable, plugin_active),
+        cron_jobs: build_cron_capability_support(
+            cron_registered,
+            cron_enabled,
+            cron_executable,
+            plugin_active,
+        ),
         tasks: build_registration_only_capability_support(
             !snapshot.tasks.is_empty(),
             plugin_active,
@@ -961,9 +971,7 @@ fn plugin_diagnostics_payload(
             || !payload.snapshot.cron_jobs.is_empty()
             || !payload.snapshot.tasks.is_empty(),
         executable_bindings: build_runtime_binding_summary(&payload.support),
-        scheduler_status: if !entry.loaded
-            && payload.support.cron_jobs.registered
-        {
+        scheduler_status: if !entry.loaded && payload.support.cron_jobs.registered {
             "disabled".to_string()
         } else {
             run_async_for_web_host(runtime_host.plugin_cron_scheduler_status(plugin_id))

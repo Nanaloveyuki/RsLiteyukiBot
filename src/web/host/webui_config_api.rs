@@ -164,6 +164,37 @@ pub(super) fn route_webui_config_api(
         return Some(napcat_response(body, is_head));
     }
 
+    if api_path == "/Desktop/GetSettings" {
+        let behavior = crate::app_config::resolve_desktop_close_behavior();
+        let body = napcat_ok(&serde_json::json!({
+            "closeToTray": behavior.close_to_tray,
+            "configured": behavior.configured,
+            "configPath": crate::app_config::resolve_app_config_path()
+                .map(|path| path.display().to_string())
+        }));
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/Desktop/UpdateSettings" {
+        let body = if let Some(close_to_tray) = parse_json_body(request)
+            .get("closeToTray")
+            .and_then(Value::as_bool)
+        {
+            match crate::app_config::persist_desktop_close_to_tray_preference(close_to_tray) {
+                Ok(behavior) => napcat_ok(&serde_json::json!({
+                    "closeToTray": behavior.close_to_tray,
+                    "configured": behavior.configured,
+                    "configPath": crate::app_config::resolve_app_config_path()
+                        .map(|path| path.display().to_string())
+                })),
+                Err(err) => napcat_err(-1, err.as_str()),
+            }
+        } else {
+            napcat_err(-1, "missing closeToTray flag")
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
     if api_path == "/WebUIConfig/GetSSLStatus" {
         let cert_path = state_path(SSL_CERT_FILE);
         let key_path = state_path(SSL_KEY_FILE);
