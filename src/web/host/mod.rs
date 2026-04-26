@@ -18,7 +18,7 @@ use self::config::*;
 use self::http::*;
 use self::terminal::*;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::io::Cursor;
@@ -53,6 +53,11 @@ use crate::app_host::{AppHostPluginCatalogSnapshot, AppHostSnapshot, EmbeddedApp
 use crate::config_edit::persist_disabled_plugins;
 use crate::i18n::current_snapshot as current_i18n_snapshot;
 use crate::observability::{BufferedLogEntry, recent_buffered_logs};
+use crate::plugin::source_adapter::{
+    descriptor_adapter_family, descriptor_compat_kind, descriptor_compat_level,
+    descriptor_family_value, descriptor_source_family, descriptor_source_kind,
+    discover_plugin_manifests_in_dirs,
+};
 use crate::runtime_support::{resolve_builtin_plugin_dirs, resolve_local_plugin_dir};
 use crate::{LogLevel, PluginLoadState, PluginManifestLoader, PluginSdk, emit_console_log};
 use zip::ZipArchive;
@@ -77,6 +82,8 @@ const SSL_KEY_FILE: &str = "config/webui/key.pem";
 const CUSTOM_FONT_FILE: &str = "config/webui/fonts/CustomFont.woff";
 const PUBLIC_FONT_DIR: &str = "frontend/public/fonts";
 const WORKSPACE_FILE_DOWNLOAD_NAME: &str = "workspace.txt";
+const SOURCE_ADAPTER_MANIFEST_DIR: &str = "manifests";
+const SOURCE_ADAPTER_OVERRIDE_SUFFIX: &str = ".override.json";
 const TERMINAL_WS_PATH: &str = "/api/ws/terminal";
 const TERMINAL_DEFAULT_COLS: u16 = 80;
 const TERMINAL_DEFAULT_ROWS: u16 = 24;
@@ -224,28 +231,22 @@ fn install_local_plugin_archive(
 
     let install_result = (|| {
         unpack_zip_archive(upload.data.as_slice(), extracted_root.as_path())?;
-        let plugin_source_dir = find_plugin_root_in_extracted_dir(extracted_root.as_path())?;
-        let manifest = PluginManifestLoader::load_manifest(&plugin_source_dir.join("plugin.json"))
-            .map_err(|err| err.to_string())?;
-        let plugin_id = manifest.descriptor.metadata.id.trim().to_string();
-        if plugin_id.is_empty() {
-            return Err("plugin manifest id is empty".to_string());
-        }
-        if plugin_id_already_exists(plugin_id.as_str(), runtime_host) {
-            return Err(format!("plugin '{plugin_id}' already exists"));
-        }
-
-        let final_dir = plugin_root.join(&plugin_id);
-        if final_dir.exists() {
-            return Err(format!("plugin '{plugin_id}' already exists"));
-        }
-
-        let staged_plugin_dir = install_root.join(&plugin_id);
-        copy_directory_recursive(plugin_source_dir.as_path(), staged_plugin_dir.as_path())?;
-        PluginManifestLoader::load_manifest(&staged_plugin_dir.join("plugin.json"))
-            .map_err(|err| err.to_string())?;
-        fs::rename(&staged_plugin_dir, &final_dir)
-            .map_err(|err| format!("failed to finalize plugin install: {err}"))?;
+        let install_summary = match find_plugin_root_in_extracted_dir(extracted_root.as_path())? {
+            ExtractedPluginArchive::NativeManifest { root } => {
+                install_native_plugin_archive(
+                    plugin_root.as_path(),
+                    install_root.as_path(),
+                    &root,
+                    runtime_host,
+                )?
+            }
+            ExtractedPluginArchive::SourceAdapterBundle { root } => install_source_adapter_bundle(
+                plugin_root.as_path(),
+                install_root.as_path(),
+                &root,
+                runtime_host,
+            )?,
+        };
 
         if let Some(runtime_host) = runtime_host {
             let previous_disabled =
@@ -253,7 +254,7 @@ fn install_local_plugin_archive(
             if let Err(err) = run_async_for_web_host(
                 runtime_host.apply_disabled_plugins(previous_disabled.clone()),
             ) {
-                let _ = fs::remove_dir_all(&final_dir);
+                rollback_installed_plugin_paths(install_summary.install_targets.as_slice());
                 let _ =
                     run_async_for_web_host(runtime_host.apply_disabled_plugins(previous_disabled));
                 return Err(format!(
@@ -262,17 +263,151 @@ fn install_local_plugin_archive(
             }
         }
 
-        Ok((plugin_id, final_dir))
+        Ok(install_summary)
     })();
 
     let _ = fs::remove_dir_all(&stage_root);
 
-    let (plugin_id, final_dir) = install_result?;
+    let install_summary = install_result?;
+    let primary_plugin_id = install_summary.plugin_ids.first().cloned();
+    let primary_install_path = (install_summary.install_targets.len() == 1)
+        .then(|| install_summary.install_targets[0].display().to_string());
     Ok(serde_json::json!({
-        "message": format!("插件 {plugin_id} 已安装"),
-        "pluginId": plugin_id,
-        "installPath": final_dir.display().to_string(),
+        "message": if install_summary.plugin_ids.len() == 1 {
+            format!("插件 {} 已安装", install_summary.plugin_ids[0])
+        } else {
+            format!("已安装 {} 个插件", install_summary.plugin_ids.len())
+        },
+        "pluginId": primary_plugin_id,
+        "pluginIds": install_summary.plugin_ids,
+        "installPath": primary_install_path,
+        "installPaths": install_summary
+            .install_targets
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>(),
+        "installRoot": plugin_root.display().to_string(),
     }))
+}
+
+#[derive(Debug)]
+enum ExtractedPluginArchive {
+    NativeManifest { root: PathBuf },
+    SourceAdapterBundle { root: PathBuf },
+}
+
+#[derive(Debug)]
+struct InstalledPluginArchive {
+    plugin_ids: Vec<String>,
+    install_targets: Vec<PathBuf>,
+}
+
+fn install_native_plugin_archive(
+    plugin_root: &Path,
+    install_root: &Path,
+    plugin_source_dir: &Path,
+    runtime_host: Option<&EmbeddedAppHost>,
+) -> Result<InstalledPluginArchive, String> {
+    let manifest = PluginManifestLoader::load_manifest(&plugin_source_dir.join("plugin.json"))
+        .map_err(|err| err.to_string())?;
+    let plugin_id = manifest.descriptor.metadata.id.trim().to_string();
+    if plugin_id.is_empty() {
+        return Err("plugin manifest id is empty".to_string());
+    }
+    if plugin_id_already_exists(plugin_id.as_str(), runtime_host) {
+        return Err(format!("plugin '{plugin_id}' already exists"));
+    }
+
+    let final_dir = plugin_root.join(&plugin_id);
+    if final_dir.exists() {
+        return Err(format!("plugin '{plugin_id}' already exists"));
+    }
+
+    let staged_plugin_dir = install_root.join(&plugin_id);
+    copy_directory_recursive(plugin_source_dir, staged_plugin_dir.as_path())?;
+    PluginManifestLoader::load_manifest(&staged_plugin_dir.join("plugin.json"))
+        .map_err(|err| err.to_string())?;
+    fs::rename(&staged_plugin_dir, &final_dir)
+        .map_err(|err| format!("failed to finalize plugin install: {err}"))?;
+
+    Ok(InstalledPluginArchive {
+        plugin_ids: vec![plugin_id],
+        install_targets: vec![final_dir],
+    })
+}
+
+fn install_source_adapter_bundle(
+    plugin_root: &Path,
+    install_root: &Path,
+    bundle_root: &Path,
+    runtime_host: Option<&EmbeddedAppHost>,
+) -> Result<InstalledPluginArchive, String> {
+    let manifests =
+        discover_plugin_manifests_in_dirs([bundle_root]).map_err(|err| err.to_string())?;
+    if manifests.is_empty() {
+        return Err("plugin archive does not contain any source-adapter override manifests"
+            .to_string());
+    }
+
+    let mut plugin_ids = manifests
+        .iter()
+        .map(|manifest| manifest.descriptor.metadata.id.trim().to_string())
+        .collect::<Vec<_>>();
+    if plugin_ids.iter().any(|plugin_id| plugin_id.is_empty()) {
+        return Err("plugin manifest id is empty".to_string());
+    }
+    for plugin_id in &plugin_ids {
+        if plugin_id_already_exists(plugin_id.as_str(), runtime_host) {
+            return Err(format!("plugin '{plugin_id}' already exists"));
+        }
+    }
+
+    let install_relative_paths =
+        install_relative_paths_from_source_bundle(bundle_root, manifests.as_slice())?;
+    for relative_path in &install_relative_paths {
+        let source_path = bundle_root.join(relative_path);
+        if !source_path.exists() {
+            return Err(format!(
+                "plugin archive is missing referenced path {}",
+                source_path.display()
+            ));
+        }
+
+        let final_path = plugin_root.join(relative_path);
+        if final_path.exists() {
+            return Err(format!(
+                "plugin install target already exists: {}",
+                final_path.display()
+            ));
+        }
+    }
+
+    for relative_path in &install_relative_paths {
+        let source_path = bundle_root.join(relative_path);
+        let staged_path = install_root.join(relative_path);
+        copy_install_path(source_path.as_path(), staged_path.as_path())?;
+    }
+
+    let staged_manifests =
+        discover_plugin_manifests_in_dirs([install_root]).map_err(|err| err.to_string())?;
+    let staged_plugin_ids = staged_manifests
+        .into_iter()
+        .map(|manifest| manifest.descriptor.metadata.id)
+        .collect::<HashSet<_>>();
+    let expected_plugin_ids = plugin_ids.iter().cloned().collect::<HashSet<_>>();
+    if staged_plugin_ids != expected_plugin_ids {
+        return Err("staged source-adapter plugin bundle did not round-trip through discovery"
+            .to_string());
+    }
+
+    let install_targets =
+        finalize_source_adapter_install(plugin_root, install_root, install_relative_paths.as_slice())?;
+    plugin_ids.sort();
+
+    Ok(InstalledPluginArchive {
+        plugin_ids,
+        install_targets,
+    })
 }
 
 fn unpack_zip_archive(archive_bytes: &[u8], target_dir: &Path) -> Result<(), String> {
@@ -317,7 +452,7 @@ fn plugin_id_already_exists(plugin_id: &str, runtime_host: Option<&EmbeddedAppHo
         })
         .unwrap_or_else(|| {
             let plugin_dirs = resolve_builtin_plugin_dirs();
-            PluginManifestLoader::discover_in_dirs(plugin_dirs.iter())
+            discover_plugin_manifests_in_dirs(plugin_dirs.iter())
                 .map(|manifests| {
                     manifests
                         .into_iter()
@@ -327,27 +462,77 @@ fn plugin_id_already_exists(plugin_id: &str, runtime_host: Option<&EmbeddedAppHo
         })
 }
 
-fn find_plugin_root_in_extracted_dir(root: &Path) -> Result<PathBuf, String> {
-    if root.join("plugin.json").is_file() {
-        return Ok(root.to_path_buf());
+fn find_plugin_root_in_extracted_dir(root: &Path) -> Result<ExtractedPluginArchive, String> {
+    let mut native_candidates = Vec::new();
+    let mut source_bundle_candidates = Vec::new();
+    for candidate in extracted_archive_root_candidates(root)? {
+        if candidate.join("plugin.json").is_file() {
+            native_candidates.push(candidate.clone());
+            continue;
+        }
+        if is_source_adapter_bundle_root(candidate.as_path())? {
+            source_bundle_candidates.push(candidate);
+        }
     }
 
-    let mut candidates = Vec::new();
+    match (native_candidates.len(), source_bundle_candidates.len()) {
+        (1, 0) => Ok(ExtractedPluginArchive::NativeManifest {
+            root: native_candidates.remove(0),
+        }),
+        (0, 1) => Ok(ExtractedPluginArchive::SourceAdapterBundle {
+            root: source_bundle_candidates.remove(0),
+        }),
+        (0, 0) => {
+            Err("plugin.json or source-adapter manifests were not found in the archive root"
+                .to_string())
+        }
+        _ => Err("plugin archive contains multiple plugin roots".to_string()),
+    }
+}
+
+fn extracted_archive_root_candidates(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut candidates = vec![root.to_path_buf()];
     let entries =
         fs::read_dir(root).map_err(|err| format!("failed to inspect extracted plugin: {err}"))?;
     for entry in entries {
         let entry = entry.map_err(|err| format!("failed to inspect extracted plugin: {err}"))?;
         let path = entry.path();
-        if path.is_dir() && path.join("plugin.json").is_file() {
+        if path.is_dir() {
             candidates.push(path);
         }
     }
+    Ok(candidates)
+}
 
-    match candidates.len() {
-        1 => Ok(candidates.remove(0)),
-        0 => Err("plugin.json was not found in the archive root".to_string()),
-        _ => Err("plugin archive contains multiple plugin roots".to_string()),
+fn is_source_adapter_bundle_root(root: &Path) -> Result<bool, String> {
+    let manifest_dir = root.join(SOURCE_ADAPTER_MANIFEST_DIR);
+    if !manifest_dir.is_dir() {
+        return Ok(false);
     }
+
+    let mut has_override_manifest = false;
+    let entries = fs::read_dir(&manifest_dir)
+        .map_err(|err| format!("failed to inspect source-adapter manifests: {err}"))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|err| format!("failed to inspect source-adapter manifests: {err}"))?;
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.ends_with(SOURCE_ADAPTER_OVERRIDE_SUFFIX))
+        {
+            has_override_manifest = true;
+            break;
+        }
+    }
+    if !has_override_manifest {
+        return Ok(false);
+    }
+
+    let manifests = discover_plugin_manifests_in_dirs([root]).map_err(|err| err.to_string())?;
+    Ok(!manifests.is_empty())
 }
 
 fn copy_directory_recursive(source: &Path, target: &Path) -> Result<(), String> {
@@ -378,6 +563,197 @@ fn copy_directory_recursive(source: &Path, target: &Path) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+fn copy_install_path(source: &Path, target: &Path) -> Result<(), String> {
+    if source.is_dir() {
+        return copy_directory_recursive(source, target);
+    }
+    if !source.is_file() {
+        return Err(format!(
+            "plugin archive install source does not exist: {}",
+            source.display()
+        ));
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create plugin parent directory: {err}"))?;
+    }
+    fs::copy(source, target).map_err(|err| format!("failed to copy plugin file: {err}"))?;
+    Ok(())
+}
+
+fn install_relative_paths_from_source_bundle(
+    bundle_root: &Path,
+    manifests: &[crate::PluginManifest],
+) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    for manifest in manifests {
+        let source_path = descriptor_relative_install_path(
+            &manifest.descriptor,
+            "sourcePath",
+            manifest.path.as_path(),
+        )?;
+        for key in ["sourcePath", "overrideManifestPath"] {
+            let relative_path =
+                descriptor_relative_install_path(&manifest.descriptor, key, manifest.path.as_path())?;
+            if seen.insert(relative_path.clone()) {
+                paths.push(relative_path);
+            }
+        }
+        for metadata_path in descriptor_metadata_install_paths(
+            bundle_root,
+            &manifest.descriptor,
+            source_path.as_path(),
+            manifest.path.as_path(),
+        )? {
+            if seen.insert(metadata_path.clone()) {
+                paths.push(metadata_path);
+            }
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn descriptor_relative_install_path(
+    descriptor: &crate::PluginDescriptor,
+    key: &str,
+    manifest_path: &Path,
+) -> Result<PathBuf, String> {
+    let raw = descriptor_family_value(descriptor, key)
+        .and_then(|value| value.as_str().map(ToString::to_string))
+        .ok_or_else(|| {
+            format!(
+                "manifest {} is missing descriptor extra '{}'",
+                manifest_path.display(),
+                key
+            )
+        })?;
+    sanitize_plugin_archive_relative_path(raw.as_str()).map_err(|err| {
+        format!(
+            "manifest {} has invalid descriptor extra '{}': {}",
+            manifest_path.display(),
+            key,
+            err
+        )
+    })
+}
+
+fn sanitize_plugin_archive_relative_path(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim().trim_start_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return Err("path should not be empty".to_string());
+    }
+
+    let mut output = PathBuf::new();
+    for component in Path::new(trimmed).components() {
+        match component {
+            Component::Normal(segment) => output.push(segment),
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
+                return Err("path escapes plugin root".to_string());
+            }
+        }
+    }
+    if output.as_os_str().is_empty() {
+        return Err("path should not be empty".to_string());
+    }
+    Ok(output)
+}
+
+fn descriptor_metadata_install_paths(
+    bundle_root: &Path,
+    descriptor: &crate::PluginDescriptor,
+    source_path: &Path,
+    manifest_path: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    let Some(value) = descriptor_family_value(descriptor, "metadataFiles") else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = value.as_array() else {
+        return Err(format!(
+            "manifest {} has invalid descriptor extra 'metadataFiles'",
+            manifest_path.display()
+        ));
+    };
+
+    let mut metadata_paths = Vec::new();
+    for item in items {
+        let raw = item.as_str().ok_or_else(|| {
+            format!(
+                "manifest {} has non-string metadataFiles entry",
+                manifest_path.display()
+            )
+        })?;
+        let candidate = sanitize_plugin_archive_relative_path(raw).map_err(|err| {
+            format!(
+                "manifest {} has invalid metadataFiles entry '{}': {}",
+                manifest_path.display(),
+                raw,
+                err
+            )
+        })?;
+
+        let resolved_path = if bundle_root.join(&candidate).exists() {
+            candidate
+        } else {
+            source_path.join(candidate)
+        };
+        if resolved_path.starts_with(source_path) {
+            continue;
+        }
+        metadata_paths.push(resolved_path);
+    }
+    Ok(metadata_paths)
+}
+
+fn finalize_source_adapter_install(
+    plugin_root: &Path,
+    install_root: &Path,
+    relative_paths: &[PathBuf],
+) -> Result<Vec<PathBuf>, String> {
+    let mut created_targets = Vec::new();
+    for relative_path in relative_paths {
+        let staged_path = install_root.join(relative_path);
+        let final_path = plugin_root.join(relative_path);
+        if final_path.exists() {
+            rollback_installed_plugin_paths(created_targets.as_slice());
+            return Err(format!(
+                "plugin install target already exists: {}",
+                final_path.display()
+            ));
+        }
+        if let Some(parent) = final_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create plugin parent directory: {err}"))?;
+        }
+        if let Err(err) = fs::rename(&staged_path, &final_path) {
+            rollback_installed_plugin_paths(created_targets.as_slice());
+            return Err(format!("failed to finalize plugin install: {err}"));
+        }
+        created_targets.push(final_path);
+    }
+    Ok(created_targets)
+}
+
+fn rollback_installed_plugin_paths(paths: &[PathBuf]) {
+    let mut ordered_paths = paths.to_vec();
+    ordered_paths.sort_by(|left, right| {
+        right
+            .components()
+            .count()
+            .cmp(&left.components().count())
+            .then_with(|| right.cmp(left))
+    });
+    for path in ordered_paths {
+        if path.is_dir() {
+            let _ = fs::remove_dir_all(&path);
+        } else if path.exists() {
+            let _ = fs::remove_file(&path);
+        }
+    }
 }
 
 fn sanitize_workspace_relative_path(raw: &str) -> Result<PathBuf, String> {
@@ -774,7 +1150,7 @@ fn build_local_plugin_store_catalog(runtime_host: Option<&EmbeddedAppHost>) -> P
         })
         .unwrap_or_else(|| {
             let plugin_dirs = resolve_builtin_plugin_dirs();
-            PluginManifestLoader::discover_in_dirs(plugin_dirs.iter())
+            discover_plugin_manifests_in_dirs(plugin_dirs.iter())
                 .map(|manifests| {
                     manifests
                         .into_iter()
@@ -962,7 +1338,7 @@ fn infer_plugin_config_schema(config: &Map<String, Value>) -> Vec<Value> {
 
 fn discover_plugin_descriptor(plugin_id: &str) -> Option<crate::PluginDescriptor> {
     let plugin_dirs = resolve_builtin_plugin_dirs();
-    let manifests = PluginManifestLoader::discover_in_dirs(plugin_dirs.iter()).ok()?;
+    let manifests = discover_plugin_manifests_in_dirs(plugin_dirs.iter()).ok()?;
     manifests
         .into_iter()
         .find(|manifest| manifest.descriptor.metadata.id == plugin_id)
@@ -1019,8 +1395,8 @@ fn build_runtime_plugin_payload(
         let capability_snapshot = capability_snapshots
             .get(metadata.id.as_str())
             .and_then(|snapshot| snapshot.as_ref());
-        let compat_kind = plugin_compat_kind(entry.descriptor.runtime.kind, capability_snapshot);
-        let source_kind = plugin_source_kind(entry.descriptor.runtime.kind, compat_kind);
+        let compat_kind = descriptor_compat_kind(&entry.descriptor, capability_snapshot);
+        let source_kind = descriptor_source_kind(&entry.descriptor, capability_snapshot);
         let status = if disabled.contains(metadata.id.as_str()) {
             "disabled"
         } else if entry.loaded && entry.load_state != Some(PluginLoadState::Deferred) {
@@ -1063,6 +1439,30 @@ fn build_runtime_plugin_payload(
             "compatKind".to_string(),
             Value::String(compat_kind.to_string()),
         );
+        if let Some(source_family) = descriptor_source_family(&entry.descriptor) {
+            plugin.insert(
+                "sourceFamily".to_string(),
+                serde_json::to_value(source_family)
+                    .unwrap_or_else(|_| Value::String("native".to_string())),
+            );
+        }
+        if let Some(adapter_family) = descriptor_adapter_family(&entry.descriptor) {
+            plugin.insert(
+                "adapterFamily".to_string(),
+                serde_json::to_value(adapter_family)
+                    .unwrap_or_else(|_| Value::String("native".to_string())),
+            );
+        }
+        if let Some(compat_level) = descriptor_compat_level(&entry.descriptor) {
+            plugin.insert(
+                "compatLevel".to_string(),
+                serde_json::to_value(compat_level)
+                    .unwrap_or_else(|_| Value::String("native".to_string())),
+            );
+        }
+        if let Some(source_path) = descriptor_family_value(&entry.descriptor, "sourcePath") {
+            plugin.insert("sourcePath".to_string(), source_path);
+        }
         plugin.insert("status".to_string(), Value::String(status.to_string()));
         plugin.insert(
             "hasConfig".to_string(),
@@ -1100,7 +1500,7 @@ fn discover_plugins() -> Vec<Value> {
     let (doc, _) = load_app_config_with_warnings(false);
     let disabled = resolve_disabled_plugins(&doc);
     let plugin_dirs = resolve_builtin_plugin_dirs();
-    let Ok(manifests) = PluginManifestLoader::discover_in_dirs(plugin_dirs.iter()) else {
+    let Ok(manifests) = discover_plugin_manifests_in_dirs(plugin_dirs.iter()) else {
         return Vec::new();
     };
 
@@ -1121,8 +1521,8 @@ fn discover_plugins() -> Vec<Value> {
             let author = descriptor.metadata.author.clone();
             let homepage = descriptor.metadata.homepage.clone();
             let pages = plugin_declared_page_paths(&descriptor);
-            let compat_kind = plugin_compat_kind(descriptor.runtime.kind, None);
-            let source_kind = plugin_source_kind(descriptor.runtime.kind, compat_kind);
+            let compat_kind = descriptor_compat_kind(&descriptor, None);
+            let source_kind = descriptor_source_kind(&descriptor, None);
             let status = if disabled.iter().any(|entry| entry == &id) {
                 "disabled"
             } else {
@@ -1152,6 +1552,24 @@ fn discover_plugins() -> Vec<Value> {
                     "compatKind".to_string(),
                     Value::String(compat_kind.to_string()),
                 ),
+                (
+                    "sourceFamily".to_string(),
+                    descriptor_source_family(&descriptor)
+                        .and_then(|value| serde_json::to_value(value).ok())
+                        .unwrap_or(Value::Null),
+                ),
+                (
+                    "adapterFamily".to_string(),
+                    descriptor_adapter_family(&descriptor)
+                        .and_then(|value| serde_json::to_value(value).ok())
+                        .unwrap_or(Value::Null),
+                ),
+                (
+                    "compatLevel".to_string(),
+                    descriptor_compat_level(&descriptor)
+                        .and_then(|value| serde_json::to_value(value).ok())
+                        .unwrap_or(Value::Null),
+                ),
                 ("status".to_string(), Value::String(status.to_string())),
                 (
                     "hasConfig".to_string(),
@@ -1159,17 +1577,14 @@ fn discover_plugins() -> Vec<Value> {
                 ),
                 ("hasPages".to_string(), Value::Bool(!pages.is_empty())),
                 ("hasCapabilities".to_string(), plugin_capability_flags(None)),
+                (
+                    "sourcePath".to_string(),
+                    descriptor_family_value(&descriptor, "sourcePath").unwrap_or(Value::Null),
+                ),
                 ("homepage".to_string(), Value::String(homepage)),
             ]))
         })
         .collect()
-}
-
-fn plugin_snapshot_has_runtime_capabilities(snapshot: &crate::PluginCapabilitySnapshot) -> bool {
-    !snapshot.tools.is_empty()
-        || !snapshot.web_apis.is_empty()
-        || !snapshot.cron_jobs.is_empty()
-        || !snapshot.tasks.is_empty()
 }
 
 fn plugin_capability_flags(snapshot: Option<&crate::PluginCapabilitySnapshot>) -> Value {
@@ -1188,29 +1603,6 @@ fn plugin_capability_flags(snapshot: Option<&crate::PluginCapabilitySnapshot>) -
         ("cronJobs".to_string(), Value::Bool(cron_jobs)),
         ("tasks".to_string(), Value::Bool(tasks)),
     ]))
-}
-
-fn plugin_compat_kind(
-    runtime_kind: crate::PluginRuntimeKind,
-    snapshot: Option<&crate::PluginCapabilitySnapshot>,
-) -> &'static str {
-    if runtime_kind == crate::PluginRuntimeKind::Python
-        && snapshot.is_some_and(plugin_snapshot_has_runtime_capabilities)
-    {
-        "astrbot"
-    } else {
-        "none"
-    }
-}
-
-fn plugin_source_kind(runtime_kind: crate::PluginRuntimeKind, compat_kind: &str) -> &'static str {
-    match runtime_kind {
-        crate::PluginRuntimeKind::Native => "liteyuki-native",
-        crate::PluginRuntimeKind::Python if compat_kind == "astrbot" => "astrbot-compatible",
-        crate::PluginRuntimeKind::Python => "liteyuki-python-bridge",
-        crate::PluginRuntimeKind::Lua => "runtime-lua",
-        crate::PluginRuntimeKind::External => "runtime-external",
-    }
 }
 
 fn update_disabled_plugins(plugin_id: &str, enable: bool) -> Result<(), String> {
@@ -1898,6 +2290,7 @@ fn is_expected_client_disconnect(err: &io::Error) -> bool {
 mod tests {
     use super::*;
     use crate::RuntimeTarget;
+    use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const TEST_HTML: &str = "<!doctype html><title>Shared Host</title>";
@@ -3306,16 +3699,17 @@ class CapabilityRoutePlugin(star.Star):
                 .as_array()
                 .is_some_and(|items| items.iter().any(|job| {
                     job["jobType"] == "active_agent"
-                        && job["jobId"].as_str().is_some_and(|id| id.contains("active_agent"))
+                        && job["jobId"]
+                            .as_str()
+                            .is_some_and(|id| id.contains("active_agent"))
                 }))
         );
         assert!(
             capabilities_response["data"]["snapshot"]["cronJobs"]
                 .as_array()
-                .is_some_and(|items| items.iter().any(|job| {
-                    job["jobType"] == "basic"
-                        && job["nextRunTime"].is_string()
-                }))
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|job| { job["jobType"] == "basic" && job["nextRunTime"].is_string() }))
         );
         assert_eq!(
             capabilities_response["data"]["snapshot"]["tasks"][0]["taskId"],
@@ -3382,7 +3776,10 @@ class CapabilityRoutePlugin(star.Star):
         assert_eq!(runtime_state["data"]["active"], true);
         assert_eq!(runtime_state["data"]["executableBindings"]["tools"], true);
         assert_eq!(runtime_state["data"]["executableBindings"]["webApis"], true);
-        assert_eq!(runtime_state["data"]["executableBindings"]["cronJobs"], true);
+        assert_eq!(
+            runtime_state["data"]["executableBindings"]["cronJobs"],
+            true
+        );
         assert_eq!(runtime_state["data"]["schedulerStatus"], "active");
 
         let execute_response = route_json_api(
@@ -3526,8 +3923,7 @@ class CapabilityRoutePlugin(star.Star):
             cron_jobs["data"]["items"]
                 .as_array()
                 .is_some_and(|items| items.iter().any(|job| {
-                    job["jobType"] == "basic"
-                        && job["lastRunTime"] == "2026-04-26T10:05:00+00:00"
+                    job["jobType"] == "basic" && job["lastRunTime"] == "2026-04-26T10:05:00+00:00"
                 }))
         );
 
@@ -4325,6 +4721,191 @@ class CapabilityRoutePlugin(star.Star):
             .expect("system clock should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("rsliteyukibot-web-host-{name}-{unique}"))
+    }
+
+    fn build_test_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        for (path, contents) in entries {
+            writer
+                .start_file(
+                    path.replace('\\', "/"),
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .expect("zip entry should be created");
+            writer
+                .write_all(contents)
+                .expect("zip entry should be written");
+        }
+        writer
+            .finish()
+            .expect("zip writer should finish")
+            .into_inner()
+    }
+
+    fn build_plugin_upload_request(filename: &str, archive: &[u8]) -> Vec<u8> {
+        let boundary = "----RsLiteyukiPluginUpload";
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"plugin\"; filename=\"{filename}\"\r\nContent-Type: application/zip\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(archive);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let mut request = format!(
+            "POST /api/Plugin/Install HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(&body);
+        request
+    }
+
+    #[test]
+    fn install_local_plugin_archive_accepts_source_adapter_bundle() {
+        let _env_guard = env_lock()
+            .lock()
+            .expect("environment lock should not be poisoned");
+        let home_root = temp_dir_path("source-adapter-install");
+        fs::create_dir_all(home_root.as_path()).expect("temp home should be created");
+        let _guards = [
+            EnvVarGuard::set("USERPROFILE", home_root.as_path()),
+            EnvVarGuard::set("HOME", home_root.as_path()),
+        ];
+
+        let override_manifest = serde_json::to_string_pretty(&serde_json::json!({
+            "version": 1,
+            "source": {
+                "kind": "astrbot",
+                "path": "astrbot_plugin/hello_world",
+                "metadataFiles": ["shared/plugin-doc.yaml"]
+            }
+        }))
+        .expect("override manifest should serialize");
+        let archive = build_test_zip(&[
+            (
+                "bundle/manifests/hello.override.json",
+                override_manifest.as_bytes(),
+            ),
+            (
+                "bundle/astrbot_plugin/hello_world/metadata.yaml",
+                b"name: hello_world\ndisplay_name: Hello World\ndesc: greeting\n",
+            ),
+            (
+                "bundle/astrbot_plugin/hello_world/main.py",
+                b"class Hello: pass\n",
+            ),
+            (
+                "bundle/astrbot_plugin/hello_world/_conf_schema.json",
+                br#"{"token":{"type":"string"}}"#,
+            ),
+            (
+                "bundle/shared/plugin-doc.yaml",
+                b"title: plugin-doc\n",
+            ),
+        ]);
+
+        let response = install_local_plugin_archive(
+            build_plugin_upload_request("hello.zip", archive.as_slice()).as_slice(),
+            None,
+        )
+        .expect("source-adapter bundle should install");
+
+        assert_eq!(response["pluginId"], serde_json::json!("hello-world"));
+        assert_eq!(response["pluginIds"], serde_json::json!(["hello-world"]));
+
+        let plugin_root = resolve_local_plugin_dir();
+        assert!(
+            plugin_root
+                .join("manifests")
+                .join("hello.override.json")
+                .is_file(),
+            "override manifest should be installed under manifests/"
+        );
+        assert!(
+            plugin_root
+                .join("astrbot_plugin")
+                .join("hello_world")
+                .join("metadata.yaml")
+                .is_file(),
+            "source plugin tree should be installed under its family directory"
+        );
+        assert!(
+            plugin_root.join("shared").join("plugin-doc.yaml").is_file(),
+            "metadataFiles assets outside sourcePath should also be installed"
+        );
+
+        let discovered = discover_plugin_manifests_in_dirs([plugin_root.as_path()])
+            .expect("installed source-adapter bundle should be discoverable");
+        assert!(
+            discovered
+                .into_iter()
+                .any(|manifest| manifest.descriptor.metadata.id == "hello-world"),
+            "installed source-adapter bundle should produce a normalized manifest"
+        );
+
+        let _ = fs::remove_dir_all(home_root);
+    }
+
+    #[test]
+    fn finalize_source_adapter_install_rolls_back_created_targets_on_conflict() {
+        let root = temp_dir_path("source-adapter-finalize-rollback");
+        let plugin_root = root.join("plugins");
+        let install_root = root.join("install");
+        fs::create_dir_all(
+            install_root
+                .join("astrbot_plugin")
+                .join("hello_world"),
+        )
+        .expect("staged source dir should be created");
+        fs::create_dir_all(install_root.join("shared")).expect("staged shared dir should exist");
+        fs::write(
+            install_root
+                .join("astrbot_plugin")
+                .join("hello_world")
+                .join("metadata.yaml"),
+            "name: hello_world\n",
+        )
+        .expect("staged source file should be written");
+        fs::write(
+            install_root.join("shared").join("plugin-doc.yaml"),
+            "title: staged\n",
+        )
+        .expect("staged metadata file should be written");
+
+        fs::create_dir_all(plugin_root.join("shared")).expect("plugin shared dir should exist");
+        fs::write(
+            plugin_root.join("shared").join("plugin-doc.yaml"),
+            "title: existing\n",
+        )
+        .expect("existing conflicting file should be written");
+
+        let result = finalize_source_adapter_install(
+            plugin_root.as_path(),
+            install_root.as_path(),
+            &[
+                PathBuf::from("astrbot_plugin/hello_world"),
+                PathBuf::from("shared/plugin-doc.yaml"),
+            ],
+        );
+        assert!(
+            result.is_err(),
+            "finalize should fail when a later install target already exists"
+        );
+        assert!(
+            !plugin_root
+                .join("astrbot_plugin")
+                .join("hello_world")
+                .exists(),
+            "already-created targets should be rolled back after a later conflict"
+        );
+        assert_eq!(
+            fs::read_to_string(plugin_root.join("shared").join("plugin-doc.yaml"))
+                .expect("conflicting target should remain readable"),
+            "title: existing\n"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -607,6 +607,166 @@ async fn plugin_manager_deferred_manifest_runtime_fails_health_check_and_cleans_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_manager_metadata_only_external_manifest_runtime_skips_health_check_failure() {
+    let manager = PluginManager::new();
+    let dir = TempDir::create();
+    let manifest_dir = dir.path.join("manifests");
+    let source_root = dir.path.join("nonebot_plugin").join("demo_nonebot");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir should be created");
+    std::fs::create_dir_all(&source_root).expect("source root should be created");
+    std::fs::write(
+        manifest_dir.join("demo.override.json"),
+        r#"{
+  "version": 1,
+  "source": {
+    "kind": "nonebot",
+    "path": "nonebot_plugin/demo_nonebot"
+  },
+  "host": {
+    "name": "Demo NoneBot"
+  }
+}"#,
+    )
+    .expect("override manifest should be written");
+
+    let discovered = manager
+        .discover_manifest_plugins_in_dirs([dir.path.as_path()])
+        .expect("manifest discovery should succeed");
+    assert_eq!(discovered, vec!["demo-nonebot".to_string()]);
+
+    let context = plugin_context();
+    let loaded = manager
+        .load_plugins(discovered, context.clone())
+        .await
+        .expect("metadata-only manifest should load");
+    assert_eq!(loaded[0].load_plan.state, PluginLoadState::Deferred);
+    assert_eq!(loaded[0].load_plan.runtime_kind, PluginRuntimeKind::External);
+
+    manager
+        .health_check_loaded_plugins(context.clone())
+        .await
+        .expect("metadata-only deferred external runtime should not fail health check");
+
+    manager
+        .shutdown_loaded_plugins(context)
+        .await
+        .expect("metadata-only deferred external runtime should shutdown cleanly");
+    assert!(
+        !manager.is_loaded("demo-nonebot"),
+        "metadata-only deferred plugin should be removed after shutdown"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_manager_nonebot_override_with_runtime_override_still_fails_health_check() {
+    let manager = PluginManager::new();
+    let dir = TempDir::create();
+    let manifest_dir = dir.path.join("manifests");
+    let source_root = dir.path.join("nonebot_plugin").join("demo_nonebot");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir should be created");
+    std::fs::create_dir_all(&source_root).expect("source root should be created");
+    std::fs::write(
+        manifest_dir.join("demo.override.json"),
+        r#"{
+  "version": 1,
+  "source": {
+    "kind": "nonebot",
+    "path": "nonebot_plugin/demo_nonebot"
+  },
+  "host": {
+    "runtime": {
+      "abi": "custom-external"
+    }
+  }
+}"#,
+    )
+    .expect("override manifest should be written");
+
+    let discovered = manager
+        .discover_manifest_plugins_in_dirs([dir.path.as_path()])
+        .expect("manifest discovery should succeed");
+    assert_eq!(discovered, vec!["demo-nonebot".to_string()]);
+
+    let context = plugin_context();
+    let loaded = manager
+        .load_plugins(discovered, context.clone())
+        .await
+        .expect("overridden metadata-only manifest should still load");
+    assert_eq!(loaded[0].load_plan.state, PluginLoadState::Deferred);
+    assert_eq!(loaded[0].load_plan.runtime_kind, PluginRuntimeKind::External);
+
+    let err = manager
+        .health_check_loaded_plugins(context.clone())
+        .await
+        .expect_err("runtime-overridden synthetic nonebot plugin should fail health check");
+    match err {
+        PluginLoadError::Lifecycle { id, phase, reason } => {
+            assert_eq!(id, "demo-nonebot");
+            assert_eq!(phase, "health_check");
+            assert!(
+                reason.contains("manifest runtime is deferred"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected Lifecycle error, got {:?}", other),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_manager_plain_external_manifest_runtime_still_fails_health_check() {
+    let manager = PluginManager::new();
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("external_manifest_deferred");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "id": "external-deferred-health",
+  "name": "External Deferred Health",
+  "type": "service",
+  "extra": {
+    "sourceFamily": "nonebot",
+    "adapterFamily": "nonebot_external",
+    "compatLevel": "metadata_only",
+    "sourcePath": "nonebot_plugin/external_manifest_deferred",
+    "overrideManifestPath": "manifests/external_manifest_deferred.override.json"
+  },
+  "runtime": {
+    "kind": "external"
+  }
+}"#,
+    )
+    .expect("manifest should be written");
+
+    let context = plugin_context();
+    let discovered = manager
+        .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+        .expect("manifest discovery should succeed");
+    assert_eq!(discovered, vec!["external-deferred-health".to_string()]);
+
+    manager
+        .load_plugins(discovered, context.clone())
+        .await
+        .expect("external deferred manifest should still load");
+
+    let err = manager
+        .health_check_loaded_plugins(context.clone())
+        .await
+        .expect_err("plain external deferred runtime should still fail health check");
+    match err {
+        PluginLoadError::Lifecycle { id, phase, reason } => {
+            assert_eq!(id, "external-deferred-health");
+            assert_eq!(phase, "health_check");
+            assert!(
+                reason.contains("manifest runtime is deferred"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected Lifecycle error, got {:?}", other),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_manager_rejects_plugin_with_unsupported_sdk_api_version() {
     let manager = PluginManager::new();
     let dir = TempDir::create();

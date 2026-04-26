@@ -59,18 +59,19 @@ pub use observability::{
     BufferedLogEntry, LogLevel, LogMode, Logger, LoggerConfig, TimeZone, TimestampFormat,
     emit_console_log, recent_buffered_logs,
 };
+pub use plugin::discover_plugin_manifests_in_dirs;
 pub use plugin::{
-    LoadedPlugin, LuaRuntimeAdapter, NativeRuntimeAdapter, Plugin, PluginAbiContract,
-    PluginAbiMethod, PluginCallEnvelope, PluginCallResult, PluginCapabilitySnapshot,
-    PluginCapabilitySource, PluginCatalogEntry, PluginContext, PluginDescriptor, PluginErrorCode,
-    PluginExecutionRecord, PluginFuture, PluginHandshakeRequest, PluginHandshakeResponse,
-    PluginHostApi, PluginHostBridge, PluginLoadError, PluginLoadPlan, PluginLoadState,
-    PluginManager, PluginManifest, PluginManifestError, PluginManifestLoader, PluginMetadata,
-    PluginRegisteredCronJob, PluginRegisteredTask, PluginRegisteredTool, PluginRegisteredWebApi,
-    PluginRuntimeDiagnostics, PluginRuntimeKind, PluginRuntimeSpec, PluginScopedCommand, PluginSdk,
-    PluginSdkError, PluginSdkFuture, PluginSdkSpec, PluginToolResult, PluginTuiCommand, PluginType,
-    PluginWebApiRequest, PluginWebApiResponse, PythonRuntimeAdapter, RuntimeAdapter,
-    RuntimeAdapterRegistry,
+    ExternalRuntimeAdapter, LoadedPlugin, LuaRuntimeAdapter, NativeRuntimeAdapter, Plugin,
+    PluginAbiContract, PluginAbiMethod, PluginCallEnvelope, PluginCallResult,
+    PluginCapabilitySnapshot, PluginCapabilitySource, PluginCatalogEntry, PluginContext,
+    PluginDescriptor, PluginErrorCode, PluginExecutionRecord, PluginFuture, PluginHandshakeRequest,
+    PluginHandshakeResponse, PluginHostApi, PluginHostBridge, PluginLoadError, PluginLoadPlan,
+    PluginLoadState, PluginManager, PluginManifest, PluginManifestError, PluginManifestLoader,
+    PluginMetadata, PluginRegisteredCronJob, PluginRegisteredTask, PluginRegisteredTool,
+    PluginRegisteredWebApi, PluginRuntimeDiagnostics, PluginRuntimeKind, PluginRuntimeSpec,
+    PluginScopedCommand, PluginSdk, PluginSdkError, PluginSdkFuture, PluginSdkSpec,
+    PluginToolResult, PluginTuiCommand, PluginType, PluginWebApiRequest, PluginWebApiResponse,
+    PythonRuntimeAdapter, RuntimeAdapter, RuntimeAdapterRegistry,
 };
 pub use session::{
     Matcher, MatcherReport, Rule, SessionDispatchReport, SessionEvent, SessionRouter, SessionScope,

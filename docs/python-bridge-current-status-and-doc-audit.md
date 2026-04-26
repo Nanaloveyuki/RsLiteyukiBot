@@ -2,46 +2,25 @@
 
 ## Purpose
 
-This document records the current implementation state of the Python bridge / AstrBot compatibility lane after the latest runtime web API adaptation pass, and audits whether the existing `docs/` content still matches the real project state.
+This document records the current implementation state of the Python bridge / AstrBot compatibility lane and explains which `docs/` files should be treated as current truth versus historical planning material.
 
 Date of audit: 2026-04-26
 
-## What Was Finished In This Pass
+## Current Runtime Truth
 
-### Runtime web API compatibility
+The current Python bridge already supports:
 
-The Python bridge now supports a minimal AstrBot-style Quart-compatible web API execution path on top of the host runtime route bridge.
+- Python plugin load, start, shutdown, unload, and cleanup
+- retained compatibility metadata for tools, web APIs, cron jobs, legacy tasks, and compat agents
+- runtime tool execution through the host plugin API and the shared LLM tool bundle
+- runtime web API execution through `/api/Plugin/Runtime/WebApi/{plugin_id}/{registered_path...}`
+- a minimal Quart-compatible request/response shim for plugin web API handlers
+- host-owned cron execution and cron state persistence
+- runtime state and diagnostics query APIs
 
-Implemented pieces:
+The important current limit is unchanged:
 
-- registered AstrBot web APIs can be executed through:
-  - `/api/Plugin/Runtime/WebApi/{plugin_id}/{registered_path...}`
-- Python compat runtime now exposes a minimal `quart` shim for plugin web API handlers:
-  - `quart.request`
-  - `quart.jsonify`
-  - `quart.make_response`
-- request context is bound inside the actual awaited Python execution path, so it works correctly with the dedicated shared async runtime thread
-- request inspection now supports the common compatibility subset:
-  - `request.method`
-  - `request.path`
-  - `request.args.get(..., type=...)`
-  - `request.headers.get(...)`
-  - `await request.get_json()`
-  - `await request.get_data(...)`
-  - `request.remote_addr`
-
-### Runtime diagnostics / execution consistency
-
-This pass continued to align the Python bridge with the backend APIs that already exist in the host:
-
-- capability snapshots
-- runtime web API dispatch
-- tool execution bridge
-- runtime state query
-- diagnostics query
-
-Cron jobs now have a real host-owned scheduler backend.
-Legacy tasks remain registration-only surfaces.
+- legacy tasks are still visible metadata, not an executable backend surface
 
 ## Current Truth Table
 
@@ -52,71 +31,43 @@ Legacy tasks remain registration-only surfaces.
 | Cron jobs | Yes | Yes | Yes | Yes |
 | Legacy tasks | Yes | Yes | No | No |
 
-## Regression Coverage Added / Revalidated
+## Doc Audit Result
 
-Verified in this pass:
+### Current-state documents
 
-- AstrBot context metadata tests still pass
-- command-group alias propagation tests still pass
-- runtime web API dispatch route tests pass
-- Quart-compatible request/response usage passes through the host runtime bridge
-- plugin cron scheduler route/diagnostics integration passes
+Treat these as the current implementation-facing documents:
 
-Commands run:
-
-- `cargo check --manifest-path src-tauri/Cargo.toml --locked --offline`
-- `cargo test --test plugin_manager`
-- `cargo test plugin_runtime_web_api_routes_dispatch_registered_handlers --lib`
-- `cargo test plugin_cron_scheduler_executes_basic_jobs_and_updates_diagnostics -- --nocapture`
-
-## Docs Audit
-
-### Documents confirmed consistent with current implementation
-
-- `docs/python-bridge-compatibility-notes.md`
-  - updated in this audit to distinguish shipped cron scheduling from still-missing legacy task execution
-- `docs/python-bridge-risk-register.md`
-  - updated in this audit so the metadata-only warning now applies to legacy tasks rather than cron
-- `docs/tools-mcp-skills-frontend-api-draft.md`
-  - still matches the current tools / MCP / skills backend surfaces
-
-### Documents updated during this audit
-
-- `docs/plugin-backend-api-requirements.md`
-  - updated the implementation snapshot and state matrix to reflect the landed cron scheduler backend
-- `docs/python-bridge-compatibility-notes.md`
-  - removed outdated statements that still described cron execution as missing
-- `docs/python-bridge-risk-register.md`
-  - narrowed the metadata-only warning to legacy tasks and kept cron execution state truthful
+- `docs/plugin-runtime-current-state.md`
+- `docs/tools-mcp-skills-web-api.md`
 - `docs/frontend-backend-adaptation-requirements.md`
-  - still contains pre-cron-scheduler wording in the current worktree and should be updated in the frontend adaptation lane rather than this backend-only pass
-- `docs/python-bridge-refactor-plan.md`
-  - added a status note so readers do not mistake it for the current implementation state
-  - clarified that `sdk.rs` has already been split into `src/plugin/sdk/`
+- `docs/python-bridge-compatibility-notes.md`
+- `docs/python-bridge-risk-register.md`
 
-### Documents that are intentionally plan / design artifacts
+### Historical plan / design documents
 
-These are still useful and not "wrong", but they should be read as planning material rather than authoritative current-state specs:
+These are still useful, but they are not the authoritative current-state contract:
 
 - `docs/python-bridge-refactor-plan.md`
 - `docs/astrbot-tools-mcp-skills-action-plan.md`
 - `docs/progressive-tool-disclosure-design.md`
 
-## Current Remaining Gaps
+## Remaining Gaps
 
-The main plugin/backend gaps still remaining after this pass are:
+The main Python bridge gaps still worth tracking are:
 
 - no legacy task execution engine
-- no full Quart server compatibility; only the minimal shim needed for plugin runtime web API handlers
+- no full Quart server compatibility beyond the minimal runtime web API shim
 - no full AstrBot provider / agent parity
+- no durable capability snapshot for unloaded or disabled plugins
 
 ## Practical Reading Order
 
-For current plugin bridge reality, prefer reading in this order:
+For current plugin bridge reality, prefer this order:
 
-1. `docs/python-bridge-current-status-and-doc-audit.md`
-2. `docs/python-bridge-compatibility-notes.md`
-3. `docs/python-bridge-risk-register.md`
-4. `docs/plugin-backend-api-requirements.md`
+1. `docs/plugin-runtime-current-state.md`
+2. `docs/python-bridge-current-status-and-doc-audit.md`
+3. `docs/python-bridge-compatibility-notes.md`
+4. `docs/python-bridge-risk-register.md`
+5. `docs/tools-mcp-skills-web-api.md`
 
-Use `docs/python-bridge-refactor-plan.md` only when you want the original refactor phases and historical implementation direction.
+Use `docs/python-bridge-refactor-plan.md` only when you need the original bridge plan and phase history.

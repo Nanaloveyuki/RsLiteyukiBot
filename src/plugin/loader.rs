@@ -41,47 +41,7 @@ impl PluginManifestLoader {
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
-        let mut manifests = Vec::new();
-        for dir in dirs {
-            let dir = dir.as_ref();
-            if !dir.exists() {
-                continue;
-            }
-
-            if dir.is_file() {
-                if dir.file_name().and_then(|name| name.to_str()) == Some("plugin.json") {
-                    manifests.push(Self::load_manifest(dir)?);
-                }
-                continue;
-            }
-
-            let root_manifest = dir.join("plugin.json");
-            if root_manifest.is_file() {
-                manifests.push(Self::load_manifest(&root_manifest)?);
-            }
-
-            let entries = std::fs::read_dir(dir).map_err(|err| {
-                PluginManifestError::Io(format!("read_dir failed for {}: {}", dir.display(), err))
-            })?;
-            for entry in entries {
-                let entry = entry.map_err(|err| {
-                    PluginManifestError::Io(format!(
-                        "read_dir entry failed for {}: {}",
-                        dir.display(),
-                        err
-                    ))
-                })?;
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let manifest = path.join("plugin.json");
-                if manifest.is_file() {
-                    manifests.push(Self::load_manifest(&manifest)?);
-                }
-            }
-        }
-        Ok(manifests)
+        crate::plugin::source_adapter::discover_plugin_manifests_in_dirs(dirs)
     }
 
     pub fn load_manifest(path: &Path) -> Result<PluginManifest, PluginManifestError> {
@@ -150,7 +110,7 @@ struct RawManifest {
     commands: Option<Vec<PluginCommandDescriptor>>,
 }
 
-fn normalize_plugin_id(name: &str) -> String {
+pub(crate) fn normalize_plugin_id(name: &str) -> String {
     let mut id = String::with_capacity(name.len());
     let mut last_dash = false;
     for ch in name.chars() {
@@ -166,7 +126,7 @@ fn normalize_plugin_id(name: &str) -> String {
     id.trim_matches('-').to_string()
 }
 
-fn validate_manifest_commands(
+pub(crate) fn validate_manifest_commands(
     commands: &mut [PluginCommandDescriptor],
     path: &Path,
 ) -> Result<(), PluginManifestError> {
@@ -248,7 +208,7 @@ fn normalize_manifest_command_scope(raw: &str) -> Result<String, String> {
     }
 }
 
-fn normalize_manifest_permissions(
+pub(crate) fn normalize_manifest_permissions(
     raw_permissions: &[String],
     path: &Path,
 ) -> Result<Vec<String>, PluginManifestError> {

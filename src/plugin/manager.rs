@@ -10,8 +10,11 @@ use crate::core::{LifecycleContext, RuntimeTarget};
 use crate::observability::Logger;
 use crate::session::SessionRouter;
 
-use super::loader::{PluginManifestError, PluginManifestLoader};
+use super::loader::PluginManifestError;
 use super::sdk::{PluginHostBridge, PluginLoadPlan, PluginLoadState, PluginSdk};
+use super::source_adapter::{
+    descriptor_allows_metadata_only_health_check_skip, discover_plugin_manifests_in_dirs,
+};
 use super::{PluginDescriptor, PluginMetadata};
 
 const MODULE_PLUGIN: &str = "plugin.manager";
@@ -69,6 +72,11 @@ pub struct PluginCatalogEntry {
 impl LoadedPlugin {
     fn has_deferred_manifest_runtime(&self) -> bool {
         self.descriptor.manifest_path.is_some() && self.load_plan.state == PluginLoadState::Deferred
+    }
+
+    fn allows_deferred_manifest_health_check(&self) -> bool {
+        self.has_deferred_manifest_runtime()
+            && descriptor_allows_metadata_only_health_check_skip(&self.descriptor)
     }
 
     fn deferred_runtime_reason(&self) -> &str {
@@ -432,6 +440,19 @@ impl PluginManager {
         for item in loaded {
             let id = item.descriptor.metadata.id.clone();
             if item.has_deferred_manifest_runtime() {
+                if item.allows_deferred_manifest_health_check() {
+                    if let Some(logger) = &self.logger {
+                        logger.info_in(
+                            MODULE_PLUGIN,
+                            format!(
+                                "plugin '{}' health check skipped because manifest runtime is deferred metadata-only: {}",
+                                id,
+                                item.deferred_runtime_reason()
+                            ),
+                        );
+                    }
+                    continue;
+                }
                 return Err(PluginLoadError::Lifecycle {
                     id,
                     phase: "health_check",
@@ -474,7 +495,7 @@ impl PluginManager {
         I: IntoIterator<Item = P>,
         P: AsRef<std::path::Path>,
     {
-        let manifests = PluginManifestLoader::discover_in_dirs(dirs)?;
+        let manifests = discover_plugin_manifests_in_dirs(dirs)?;
         let mut ids = Vec::new();
         for manifest in manifests {
             let id = manifest.descriptor.metadata.id.clone();

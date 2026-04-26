@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 
-use crate::PluginManifestLoader;
+use liteyukibot_core::discover_plugin_manifests_in_dirs;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -203,7 +203,7 @@ where
         .into_iter()
         .map(|dir| dir.as_ref().to_path_buf())
         .collect::<Vec<_>>();
-    match PluginManifestLoader::discover_in_dirs(plugin_dirs.iter()) {
+    match discover_plugin_manifests_in_dirs(plugin_dirs.iter()) {
         Ok(manifests) => {
             let mut seen_dirs = HashSet::new();
             for manifest in manifests {

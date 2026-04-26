@@ -2,9 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub(crate) use liteyukibot_core::{
-    BotEvent, PluginManifestLoader, PluginSdk, SessionEvent, SessionScope,
-};
+pub(crate) use liteyukibot_core::{BotEvent, PluginSdk, SessionEvent, SessionScope};
 use liteyukibot_core::{LiteyukiBot, LogLevel, RuntimeTarget, emit_console_log};
 use tokio::sync::mpsc;
 

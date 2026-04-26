@@ -2,8 +2,8 @@ mod config;
 mod host_async;
 mod python;
 
-use std::collections::BTreeMap;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
@@ -42,9 +42,8 @@ use python::commands::{
     sync_disabled_scope_commands_in_lock,
 };
 use python::lifecycle::{
-    PythonRuntimeState, dispatch_python_event, execute_python_registered_tool,
-    execute_python_registered_cron_job, execute_python_registered_web_api,
-    execute_python_tui_command,
+    PythonRuntimeState, dispatch_python_event, execute_python_registered_cron_job,
+    execute_python_registered_tool, execute_python_registered_web_api, execute_python_tui_command,
     get_python_plugin_capability_snapshot, get_python_plugin_runtime_diagnostics,
     health_check_python_manifest_plugin, list_all_python_plugin_capability_snapshots,
     load_python_manifest_plugin, shutdown_python_manifest_plugin, start_python_manifest_plugin,
@@ -318,6 +317,7 @@ impl RuntimeAdapterRegistry {
         registry.register(NativeRuntimeAdapter);
         registry.register(PythonRuntimeAdapter);
         registry.register(LuaRuntimeAdapter);
+        registry.register(ExternalRuntimeAdapter);
         registry
     }
 
@@ -332,6 +332,8 @@ impl RuntimeAdapterRegistry {
             .cloned()
     }
 }
+
+pub struct ExternalRuntimeAdapter;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PluginPermissionSet {
@@ -726,10 +728,9 @@ impl PluginSdk {
         self.sync_all_plugin_cron_snapshots(snapshots.as_mut_slice(), true, now)?;
         let disabled = disabled_plugin_ids.iter().cloned().collect::<HashSet<_>>();
         let due_jobs = {
-            let scheduler = self
-                .cron_scheduler
-                .lock()
-                .map_err(|_| PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string()))?;
+            let scheduler = self.cron_scheduler.lock().map_err(|_| {
+                PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string())
+            })?;
             scheduler.collect_due_jobs(snapshots.as_slice(), &disabled, now)
         };
 
@@ -740,11 +741,12 @@ impl PluginSdk {
         let job_map = snapshots
             .iter()
             .flat_map(|snapshot| {
-                snapshot
-                    .cron_jobs
-                    .iter()
-                    .cloned()
-                    .map(|job| (CronTaskKey::new(snapshot.plugin_id.clone(), job.job_id.clone()), job))
+                snapshot.cron_jobs.iter().cloned().map(|job| {
+                    (
+                        CronTaskKey::new(snapshot.plugin_id.clone(), job.job_id.clone()),
+                        job,
+                    )
+                })
             })
             .collect::<BTreeMap<_, _>>();
 
@@ -812,25 +814,20 @@ impl PluginSdk {
             return Ok("unsupported".to_string());
         };
         self.sync_plugin_cron_snapshot(&mut snapshot, Utc::now())?;
-        let scheduler = self
-            .cron_scheduler
-            .lock()
-            .map_err(|_| PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string()))?;
+        let scheduler = self.cron_scheduler.lock().map_err(|_| {
+            PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string())
+        })?;
         Ok(scheduler.plugin_scheduler_status(&snapshot))
     }
 
-    pub fn plugin_has_executable_cron_jobs(
-        &self,
-        plugin_id: &str,
-    ) -> Result<bool, PluginSdkError> {
+    pub fn plugin_has_executable_cron_jobs(&self, plugin_id: &str) -> Result<bool, PluginSdkError> {
         let Some(mut snapshot) = self.get_plugin_capabilities_raw(plugin_id)? else {
             return Ok(false);
         };
         self.sync_plugin_cron_snapshot(&mut snapshot, Utc::now())?;
-        let scheduler = self
-            .cron_scheduler
-            .lock()
-            .map_err(|_| PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string()))?;
+        let scheduler = self.cron_scheduler.lock().map_err(|_| {
+            PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string())
+        })?;
         Ok(scheduler.plugin_has_executable_jobs(&snapshot))
     }
 
@@ -841,7 +838,9 @@ impl PluginSdk {
         get_python_plugin_capability_snapshot(&self.python_runtime, plugin_id)
     }
 
-    fn list_all_plugin_capabilities_raw(&self) -> Result<Vec<PluginCapabilitySnapshot>, PluginSdkError> {
+    fn list_all_plugin_capabilities_raw(
+        &self,
+    ) -> Result<Vec<PluginCapabilitySnapshot>, PluginSdkError> {
         list_all_python_plugin_capability_snapshots(&self.python_runtime)
     }
 
@@ -852,7 +851,9 @@ impl PluginSdk {
     ) -> Result<(), PluginSdkError> {
         self.cron_scheduler
             .lock()
-            .map_err(|_| PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string()))?
+            .map_err(|_| {
+                PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string())
+            })?
             .sync_snapshot(snapshot, now)
             .map_err(PluginSdkError::Runtime)
     }
@@ -865,7 +866,9 @@ impl PluginSdk {
     ) -> Result<(), PluginSdkError> {
         self.cron_scheduler
             .lock()
-            .map_err(|_| PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string()))?
+            .map_err(|_| {
+                PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string())
+            })?
             .sync_snapshots(snapshots, prune_missing, now)
             .map_err(PluginSdkError::Runtime)
     }
@@ -968,6 +971,34 @@ impl RuntimeAdapter for LuaRuntimeAdapter {
                 PluginRuntimeKind::Lua,
                 contract,
                 "lua runtime bridge is reserved for future lua integration",
+            ))
+        })
+    }
+}
+
+impl RuntimeAdapter for ExternalRuntimeAdapter {
+    fn kind(&self) -> PluginRuntimeKind {
+        PluginRuntimeKind::External
+    }
+
+    fn plan_load(
+        &self,
+        descriptor: &PluginDescriptor,
+        host: &dyn PluginHostApi,
+    ) -> PluginSdkFuture<PluginLoadPlan> {
+        let contract = build_plugin_contract(
+            descriptor,
+            PluginRuntimeKind::External,
+            "liteyuki-external-bridge",
+            host,
+            false,
+        );
+        Box::pin(async move {
+            let contract = contract?;
+            Ok(PluginLoadPlan::deferred(
+                PluginRuntimeKind::External,
+                contract,
+                "external runtime bridge is reserved for managed sidecar integration",
             ))
         })
     }

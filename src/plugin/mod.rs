@@ -3,6 +3,7 @@ mod loader;
 mod manager;
 mod model;
 mod sdk;
+pub(crate) mod source_adapter;
 
 pub use abi::{
     PluginAbiContract, PluginAbiMethod, PluginCallEnvelope, PluginCallResult, PluginErrorCode,
@@ -20,8 +21,9 @@ pub use model::{
     PluginRuntimeSpec, PluginSdkSpec, PluginToolResult, PluginType,
 };
 pub use sdk::{
-    LuaRuntimeAdapter, NativeRuntimeAdapter, PluginHostApi, PluginHostBridge, PluginLoadPlan,
-    PluginLoadState, PluginScopedCommand, PluginSdk, PluginSdkError, PluginSdkFuture,
-    PluginTuiCommand, PluginWebApiRequest, PluginWebApiResponse, PythonRuntimeAdapter,
-    RuntimeAdapter, RuntimeAdapterRegistry,
+    ExternalRuntimeAdapter, LuaRuntimeAdapter, NativeRuntimeAdapter, PluginHostApi,
+    PluginHostBridge, PluginLoadPlan, PluginLoadState, PluginScopedCommand, PluginSdk,
+    PluginSdkError, PluginSdkFuture, PluginTuiCommand, PluginWebApiRequest, PluginWebApiResponse,
+    PythonRuntimeAdapter, RuntimeAdapter, RuntimeAdapterRegistry,
 };
+pub use source_adapter::discover_plugin_manifests_in_dirs;
