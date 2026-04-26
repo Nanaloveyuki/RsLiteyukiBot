@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, get_current_pid};
 use tokio::sync::Mutex as AsyncMutex;
@@ -29,6 +30,7 @@ use std::path::PathBuf;
 
 const APP_TITLE: &str = "Liteyuki";
 const RESOURCE_USAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+const PLUGIN_CRON_SAMPLE_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_STATUS_NOTES: usize = 32;
 
 #[derive(Debug, Clone)]
@@ -424,10 +426,10 @@ impl EmbeddedAppHost {
             host.push_note("embedded runtime ready");
         });
 
-        Ok(Self {
-            bot: Arc::new(AsyncMutex::new(bot)),
-            state,
-        })
+        let bot = Arc::new(AsyncMutex::new(bot));
+        spawn_plugin_cron_scheduler(bot.clone(), state.clone());
+
+        Ok(Self { bot, state })
     }
 
     pub fn snapshot(&self) -> AppHostSnapshot {
@@ -502,6 +504,31 @@ impl EmbeddedAppHost {
         let bot = self.bot.lock().await;
         bot.plugin_sdk()
             .get_plugin_runtime_diagnostics(plugin_id)
+            .map_err(|err| err.to_string())
+    }
+
+    pub async fn plugin_cron_scheduler_status(&self, plugin_id: &str) -> Result<String, String> {
+        let bot = self.bot.lock().await;
+        bot.plugin_sdk()
+            .plugin_cron_scheduler_status(plugin_id)
+            .map_err(|err| err.to_string())
+    }
+
+    pub async fn plugin_has_executable_cron_jobs(&self, plugin_id: &str) -> Result<bool, String> {
+        let bot = self.bot.lock().await;
+        bot.plugin_sdk()
+            .plugin_has_executable_cron_jobs(plugin_id)
+            .map_err(|err| err.to_string())
+    }
+
+    pub async fn run_plugin_cron_tick(&self) -> Result<usize, String> {
+        self.run_plugin_cron_tick_at(Utc::now()).await
+    }
+
+    pub async fn run_plugin_cron_tick_at(&self, now: DateTime<Utc>) -> Result<usize, String> {
+        let bot = self.bot.lock().await;
+        bot.plugin_sdk()
+            .run_due_plugin_jobs(bot.disabled_plugin_ids().as_slice(), Some(now))
             .map_err(|err| err.to_string())
     }
 
@@ -643,6 +670,46 @@ fn spawn_resource_usage_sampler(state: Arc<RwLock<AppHostState>>) {
         loop {
             ticker.tick().await;
             with_state_write(&state, |host| host.set_resource_usage(sampler.sample()));
+        }
+    });
+}
+
+fn spawn_plugin_cron_scheduler(
+    bot: Arc<AsyncMutex<LiteyukiBot>>,
+    state: Arc<RwLock<AppHostState>>,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(PLUGIN_CRON_SAMPLE_INTERVAL);
+        loop {
+            ticker.tick().await;
+            let should_stop = state
+                .read()
+                .ok()
+                .is_some_and(|host| host.snapshot.status == "stopped");
+            if should_stop {
+                break;
+            }
+
+            let result = {
+                let bot = bot.lock().await;
+                bot.plugin_sdk()
+                    .run_due_plugin_jobs(bot.disabled_plugin_ids().as_slice(), Some(Utc::now()))
+            };
+            match result {
+                Ok(executed) if executed > 0 => {
+                    with_state_write(&state, |host| {
+                        host.push_note(format!(
+                            "plugin cron scheduler executed {executed} job(s)"
+                        ));
+                    });
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    let warning = format!("plugin cron scheduler tick failed: {err}");
+                    emit_console_log(LogLevel::Warn, "app.host.cron", warning.as_str());
+                    with_state_write(&state, |host| host.push_warning(warning));
+                }
+            }
         }
     });
 }

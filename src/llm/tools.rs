@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::config_paths::resolve_preferred_tool_state_path;
 use crate::llm::client::{LlmClientError, LlmFunctionTool, LlmToolOutput};
 
 use super::mcp::{McpBoundTool, McpManager};
@@ -14,6 +16,11 @@ const TOOL_CATEGORY_DISCOVERY: &str = "tool_discovery";
 const TOOL_CATEGORY_WORKSPACE: &str = "workspace";
 const TOOL_CATEGORY_SKILLS: &str = "skills";
 const TOOL_CATEGORY_MCP: &str = "mcp";
+const NON_TOGGLEABLE_TOOL_NAMES: &[&str] = &[
+    "list_tool_categories",
+    "list_tools_in_category",
+    "get_tool_schema",
+];
 
 const DEFAULT_FILE_READ_MAX_CHARS: usize = 12_000;
 const DEFAULT_FILE_LIST_MAX_DEPTH: usize = 4;
@@ -59,6 +66,7 @@ pub(crate) struct ToolCatalogEntry {
     pub(crate) when_to_use: String,
     pub(crate) origin: String,
     pub(crate) strict: bool,
+    pub(crate) active: bool,
 }
 
 #[allow(dead_code)]
@@ -89,11 +97,235 @@ struct ManagedTool {
     tool: LlmFunctionTool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ToolStateDocument {
+    #[serde(default)]
+    tools: BTreeMap<String, bool>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ToolStateStore {
+    path: PathBuf,
+    tools: BTreeMap<String, bool>,
+    warnings: Vec<String>,
+    load_error: Option<String>,
+}
+
+impl ToolStateStore {
+    fn from_default_path() -> Self {
+        Self::from_config_path(resolve_preferred_tool_state_path())
+    }
+
+    fn from_config_path(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let backup_path = tool_state_backup_path(path.as_path());
+        let mut warnings = Vec::new();
+
+        match read_tool_state_source(path.as_path(), backup_path.as_path()) {
+            Ok((document, source_warning)) => {
+                if let Some(source_warning) = source_warning {
+                    warnings.push(source_warning);
+                }
+                Self {
+                    path,
+                    tools: document.tools,
+                    warnings,
+                    load_error: None,
+                }
+            }
+            Err(err) => Self {
+                path,
+                tools: BTreeMap::new(),
+                warnings: vec![err.clone()],
+                load_error: Some(err),
+            },
+        }
+    }
+
+    fn path(&self) -> &Path {
+        self.path.as_path()
+    }
+
+    fn warnings(&self) -> &[String] {
+        self.warnings.as_slice()
+    }
+
+    fn is_active(&self, name: &str) -> bool {
+        if NON_TOGGLEABLE_TOOL_NAMES
+            .iter()
+            .any(|tool_name| tool_name == &name)
+        {
+            return true;
+        }
+        self.tools.get(name).copied().unwrap_or(true)
+    }
+
+    fn set_active(&mut self, name: &str, active: bool) -> Result<(), String> {
+        if let Some(err) = &self.load_error {
+            return Err(err.clone());
+        }
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("tool name should not be empty".to_string());
+        }
+        if !active
+            && NON_TOGGLEABLE_TOOL_NAMES
+                .iter()
+                .any(|tool_name| tool_name == &trimmed)
+        {
+            return Err(format!(
+                "tool '{trimmed}' is a required discovery helper and cannot be toggled"
+            ));
+        }
+
+        if active {
+            self.tools.remove(trimmed);
+        } else {
+            self.tools.insert(trimmed.to_string(), false);
+        }
+
+        self.persist()
+    }
+
+    fn persist(&self) -> Result<(), String> {
+        if let Some(parent) = self.path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!(
+                    "failed to create tool state directory '{}': {err}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        let content = serde_json::to_string_pretty(&ToolStateDocument {
+            tools: self.tools.clone(),
+        })
+        .map_err(|err| format!("failed to serialize tool state: {err}"))?;
+        let temp_path = tool_state_temp_path(self.path.as_path());
+        let backup_path = tool_state_backup_path(self.path.as_path());
+        let mut file = fs::File::create(&temp_path).map_err(|err| {
+            format!(
+                "failed to create tool state temp file '{}': {err}",
+                temp_path.display()
+            )
+        })?;
+        file.write_all(format!("{content}\n").as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|err| {
+                let _ = fs::remove_file(&temp_path);
+                format!(
+                    "failed to flush tool state temp file '{}': {err}",
+                    temp_path.display()
+                )
+            })?;
+        drop(file);
+
+        if backup_path.exists() {
+            let _ = fs::remove_file(&backup_path);
+        }
+        if self.path.exists() {
+            fs::rename(&self.path, &backup_path).map_err(|err| {
+                let _ = fs::remove_file(&temp_path);
+                format!(
+                    "failed to stage previous tool state file '{}' for replacement: {err}",
+                    self.path.display()
+                )
+            })?;
+        }
+        if let Err(err) = fs::rename(&temp_path, &self.path) {
+            let _ = fs::remove_file(&temp_path);
+            if backup_path.exists() {
+                let _ = fs::rename(&backup_path, &self.path);
+            }
+            return Err(format!(
+                "failed to replace tool state file '{}': {err}",
+                self.path.display()
+            ));
+        }
+        if backup_path.exists() {
+            let _ = fs::remove_file(backup_path);
+        }
+        Ok(())
+    }
+}
+
+fn read_tool_state_source(
+    path: &Path,
+    backup_path: &Path,
+) -> Result<(ToolStateDocument, Option<String>), String> {
+    match read_tool_state_document(path) {
+        Ok(Some(document)) => return Ok((document, None)),
+        Ok(None) => {}
+        Err(primary_err) => {
+            if let Ok(Some(document)) = read_tool_state_document(backup_path) {
+                return Ok((
+                    document,
+                    Some(format!(
+                        "tool state file '{}' was invalid; restored state from backup '{}'",
+                        path.display(),
+                        backup_path.display()
+                    )),
+                ));
+            }
+            return Err(primary_err);
+        }
+    }
+
+    if let Ok(Some(document)) = read_tool_state_document(backup_path) {
+        return Ok((
+            document,
+            Some(format!(
+                "tool state file '{}' was missing; restored state from backup '{}'",
+                path.display(),
+                backup_path.display()
+            )),
+        ));
+    }
+
+    Ok((ToolStateDocument::default(), None))
+}
+
+fn read_tool_state_document(path: &Path) -> Result<Option<ToolStateDocument>, String> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(format!(
+                "tool state file '{}' could not be read: {err}",
+                path.display()
+            ));
+        }
+    };
+
+    if content.trim().is_empty() {
+        return Ok(Some(ToolStateDocument::default()));
+    }
+
+    serde_json::from_str::<ToolStateDocument>(&content)
+        .map(Some)
+        .map_err(|err| format!("tool state file '{}' is invalid json: {err}", path.display()))
+}
+
+fn tool_state_temp_path(path: &Path) -> PathBuf {
+    let suffix = format!(
+        "{}.tmp",
+        std::process::id()
+    );
+    path.with_extension(suffix)
+}
+
+fn tool_state_backup_path(path: &Path) -> PathBuf {
+    path.with_extension("json.bak")
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ToolManager {
     workspace_root: PathBuf,
     skill_manager: SkillManager,
     mcp_manager: McpManager,
+    tool_state: ToolStateStore,
 }
 
 impl ToolManager {
@@ -102,6 +334,7 @@ impl ToolManager {
             workspace_root: workspace_root.to_path_buf(),
             skill_manager: SkillManager::for_workspace(workspace_root),
             mcp_manager: McpManager::from_default_config(),
+            tool_state: ToolStateStore::from_default_path(),
         }
     }
 
@@ -121,6 +354,7 @@ impl ToolManager {
                 vec![format!("skills inventory unavailable: {err}")],
             ),
         };
+        warnings.extend(self.tool_state.warnings().iter().cloned());
         let mut tools = self.build_local_execution_tools();
         let mcp_load = self.mcp_manager.load_tools().await;
         warnings.extend(mcp_load.warnings.clone());
@@ -128,9 +362,15 @@ impl ToolManager {
 
         let execution_descriptors = tools
             .iter()
+            .filter(|tool| self.tool_state.is_active(tool.descriptor.name.as_str()))
             .map(|tool| tool.descriptor.clone())
             .collect::<Vec<_>>();
-        tools.extend(build_discovery_tools(execution_descriptors.clone()));
+        tools.retain(|tool| self.tool_state.is_active(tool.descriptor.name.as_str()));
+        tools.extend(
+            build_discovery_tools(execution_descriptors.clone())
+                .into_iter()
+                .filter(|tool| self.tool_state.is_active(tool.descriptor.name.as_str())),
+        );
 
         let mut merged_tools = Vec::new();
         let mut seen_names = HashSet::new();
@@ -164,6 +404,7 @@ impl ToolManager {
     #[allow(dead_code)]
     pub(crate) async fn describe_runtime_tools(&self) -> ToolCatalogSnapshot {
         let mut warnings = Vec::new();
+        warnings.extend(self.tool_state.warnings().iter().cloned());
         let mut tools = self.build_local_execution_tools();
         let mcp_load = self.mcp_manager.load_tools().await;
         warnings.extend(mcp_load.warnings);
@@ -178,7 +419,10 @@ impl ToolManager {
         ToolCatalogSnapshot {
             tools: tools
                 .into_iter()
-                .map(|tool| tool_descriptor_to_catalog_entry(tool.descriptor))
+                .map(|tool| {
+                    let active = self.tool_state.is_active(tool.descriptor.name.as_str());
+                    tool_descriptor_to_catalog_entry(tool.descriptor, active)
+                })
                 .collect(),
             warnings,
         }
@@ -201,6 +445,16 @@ impl ToolManager {
     #[allow(dead_code)]
     pub(crate) async fn describe_mcp_servers(&self) -> super::mcp::McpServerCatalogSnapshot {
         self.mcp_manager.inspect_servers().await
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_tool_active(&mut self, name: &str, active: bool) -> Result<(), String> {
+        self.tool_state.set_active(name, active)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn tool_state_path(&self) -> &Path {
+        self.tool_state.path()
     }
 
     fn build_local_execution_tools(&self) -> Vec<ManagedTool> {
@@ -478,7 +732,7 @@ fn build_discovery_tools(descriptors: Vec<ToolDescriptor>) -> Vec<ManagedTool> {
 }
 
 #[allow(dead_code)]
-fn tool_descriptor_to_catalog_entry(descriptor: ToolDescriptor) -> ToolCatalogEntry {
+fn tool_descriptor_to_catalog_entry(descriptor: ToolDescriptor, active: bool) -> ToolCatalogEntry {
     ToolCatalogEntry {
         name: descriptor.name,
         description: descriptor.description,
@@ -487,6 +741,7 @@ fn tool_descriptor_to_catalog_entry(descriptor: ToolDescriptor) -> ToolCatalogEn
         when_to_use: descriptor.when_to_use,
         origin: origin_label(&descriptor.origin),
         strict: descriptor.strict,
+        active,
     }
 }
 
@@ -912,10 +1167,18 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn isolated_manager_for_workspace(workspace_root: &Path) -> ToolManager {
+        isolated_manager_with_tool_state(workspace_root, temp_path("tool-state.json").as_path())
+    }
+
+    fn isolated_manager_with_tool_state(
+        workspace_root: &Path,
+        tool_state_path: &Path,
+    ) -> ToolManager {
         ToolManager {
             workspace_root: workspace_root.to_path_buf(),
             skill_manager: SkillManager::for_workspace(workspace_root),
             mcp_manager: McpManager::from_config_path(temp_path("missing-mcp-config.json")),
+            tool_state: ToolStateStore::from_config_path(tool_state_path),
         }
     }
 
@@ -1010,6 +1273,121 @@ mod tests {
         );
 
         let _ = fs::remove_file(root.join("skills"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn tool_manager_persists_disabled_tools_and_skips_them_in_runtime_bundle() {
+        let root = temp_path("tool-toggle");
+        fs::create_dir_all(&root).expect("root should exist");
+        let tool_state_path = temp_path("tool-state.json");
+
+        let mut manager =
+            isolated_manager_with_tool_state(root.as_path(), tool_state_path.as_path());
+        manager
+            .set_tool_active("workspace_read_file", false)
+            .expect("tool state should persist");
+
+        let snapshot = manager.describe_runtime_tools().await;
+        assert!(
+            snapshot
+                .tools
+                .iter()
+                .any(|tool| tool.name == "workspace_read_file" && !tool.active)
+        );
+
+        let bundle = manager
+            .build_runtime_bundle(&[])
+            .await
+            .expect("bundle should build");
+        assert!(
+            bundle
+                .tools
+                .iter()
+                .all(|tool| tool.name != "workspace_read_file")
+        );
+
+        let reloaded = isolated_manager_with_tool_state(root.as_path(), tool_state_path.as_path());
+        let reloaded_snapshot = reloaded.describe_runtime_tools().await;
+        assert!(
+            reloaded_snapshot
+                .tools
+                .iter()
+                .any(|tool| tool.name == "workspace_read_file" && !tool.active)
+        );
+
+        let persisted = fs::read_to_string(&tool_state_path)
+            .expect("tool state file should be written");
+        assert!(persisted.contains("\"workspace_read_file\": false"));
+
+        let _ = fs::remove_file(tool_state_path);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn tool_manager_recovers_from_backup_without_overwriting_invalid_primary_state() {
+        let root = temp_path("tool-backup");
+        fs::create_dir_all(&root).expect("root should exist");
+        let tool_state_path = temp_path("tool-state.json");
+        let backup_path = tool_state_backup_path(tool_state_path.as_path());
+        fs::write(&tool_state_path, "{invalid json").expect("invalid primary should be written");
+        fs::write(
+            &backup_path,
+            "{\n  \"tools\": {\n    \"workspace_read_file\": false\n  }\n}\n",
+        )
+        .expect("backup state should be written");
+
+        let manager = isolated_manager_with_tool_state(root.as_path(), tool_state_path.as_path());
+        let snapshot = manager.describe_runtime_tools().await;
+        assert!(
+            snapshot
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("restored state from backup"))
+        );
+        assert!(
+            snapshot
+                .tools
+                .iter()
+                .any(|tool| tool.name == "workspace_read_file" && !tool.active)
+        );
+
+        let _ = fs::remove_file(tool_state_path);
+        let _ = fs::remove_file(backup_path);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn discovery_helpers_stay_active_even_if_state_file_marks_them_disabled() {
+        let root = temp_path("tool-discovery-helper");
+        fs::create_dir_all(&root).expect("root should exist");
+        let tool_state_path = temp_path("tool-state.json");
+        fs::write(
+            &tool_state_path,
+            "{\n  \"tools\": {\n    \"list_tool_categories\": false\n  }\n}\n",
+        )
+        .expect("tool state should be written");
+
+        let manager = isolated_manager_with_tool_state(root.as_path(), tool_state_path.as_path());
+        let snapshot = manager.describe_runtime_tools().await;
+        assert!(
+            snapshot
+                .tools
+                .iter()
+                .any(|tool| tool.name == "list_tool_categories" && tool.active)
+        );
+        let bundle = manager
+            .build_runtime_bundle(&[])
+            .await
+            .expect("bundle should build");
+        assert!(
+            bundle
+                .tools
+                .iter()
+                .any(|tool| tool.name == "list_tool_categories")
+        );
+
+        let _ = fs::remove_file(tool_state_path);
         let _ = fs::remove_dir_all(root);
     }
 

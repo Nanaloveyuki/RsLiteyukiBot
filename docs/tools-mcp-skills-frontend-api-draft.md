@@ -7,8 +7,12 @@ This document records the frontend-facing API surface that matches the current b
 Current status:
 
 - Backend runtime support for `tools / mcp / skills` is implemented in the shared LLM path.
-- Read-only Web management APIs are now implemented for tool, MCP, and skill discovery.
-- Mutable dashboard management APIs are still future work.
+- Web management APIs are now implemented for tool, MCP, and skill discovery.
+- Basic dashboard write APIs now exist for:
+  - tool enable/disable
+  - MCP save/test
+  - skill read/upload
+- Deeper lifecycle management such as MCP process hosting, skill delete/update, and richer policy controls is still future work.
 
 ## Implemented Backend Runtime
 
@@ -29,13 +33,18 @@ Runtime-exposed local tools currently include:
 - `list_tools_in_category`
 - `get_tool_schema`
 
-## Implemented Read-Only Web Routes
+## Implemented Web Routes
 
 These routes now exist under the Web host API layer and return NapCat-style envelopes:
 
 - `GET /api/tools`
+- `POST /api/tools/toggle`
 - `GET /api/mcp/servers`
+- `POST /api/mcp/save`
+- `POST /api/mcp/test`
 - `GET /api/skills`
+- `GET /api/skills/read`
+- `POST /api/skills/upload`
 
 ### 1. Tools
 
@@ -63,7 +72,8 @@ Current response shape:
         "category": "workspace",
         "origin": "local",
         "whenToUse": "Use when you already know which repository file or SKILL.md you need to inspect.",
-        "strict": true
+        "strict": true,
+        "active": true
       }
     ],
     "warnings": []
@@ -75,6 +85,7 @@ Notes:
 
 - Includes local runtime tools, MCP-backed tools, and local discovery helpers in one list.
 - `origin` is `local` or `mcp:<server_name>`.
+- `active` indicates whether the tool is currently enabled in the shared runtime.
 
 ### 2. MCP
 
@@ -139,19 +150,15 @@ Current response shape:
 }
 ```
 
-## Remaining Planned Routes
-
-These are still recommended future routes for the dashboard, but are not implemented yet.
-
 ### 4. Tool Management
 
 `POST /api/tools/toggle`
 
 Purpose:
 
-- enable or disable a tool in future iterations
+- enable or disable a runtime tool
 
-Recommended request shape:
+Current request shape:
 
 ```json
 {
@@ -160,10 +167,27 @@ Recommended request shape:
 }
 ```
 
+Current response shape:
+
+```json
+{
+  "code": 0,
+  "msg": "success",
+  "data": {
+    "name": "workspace_read_file",
+    "active": false,
+    "configPath": "%USERPROFILE%/.liteyuki/configs/tool-state.json",
+    "tools": [],
+    "warnings": []
+  }
+}
+```
+
 Note:
 
-- this is planned only
-- current backend does not yet persist tool activation state
+- this route is now implemented
+- tool activation state is persisted in `tool-state.json`
+- the discovery helpers `list_tool_categories`, `list_tools_in_category`, and `get_tool_schema` should stay always enabled and should not expose a toggle in the UI
 
 ### 5. MCP Management
 
@@ -173,7 +197,7 @@ Purpose:
 
 - replace the current MCP server config file
 
-Recommended request shape:
+Current request shape:
 
 ```json
 {
@@ -195,25 +219,40 @@ Purpose:
 
 - test one server config without requiring the dashboard to start a full chat
 
-Recommended request shape:
+Current request shape:
 
 ```json
 {
-  "name": "filesystem",
-  "url": "http://127.0.0.1:8787/mcp",
-  "transport": "streamable_http",
-  "active": true,
-  "headers": {}
+  "server": {
+    "name": "filesystem",
+    "url": "http://127.0.0.1:8787/mcp",
+    "transport": "streamable_http",
+    "active": true,
+    "headers": {}
+  }
 }
 ```
 
-Recommended response shape:
+Current response shape:
 
 ```json
 {
-  "ok": true,
-  "toolCount": 3,
-  "warnings": []
+  "code": 0,
+  "msg": "success",
+  "data": {
+    "servers": [
+      {
+        "name": "filesystem",
+        "transport": "streamable_http",
+        "url": "http://127.0.0.1:8787/mcp",
+        "active": true,
+        "toolCount": 3,
+        "toolNames": ["read_file", "list_dir", "stat_path"],
+        "warnings": []
+      }
+    ],
+    "warnings": []
+  }
 }
 ```
 
@@ -225,13 +264,35 @@ Purpose:
 
 - read a single `SKILL.md` in a dashboard inspector
 
-Recommended response shape:
+Current response shape:
 
 ```json
 {
-  "name": "rust-debugging",
-  "path": "skills/rust-debugging/SKILL.md",
-  "content": "# Skill..."
+  "code": 0,
+  "msg": "success",
+  "data": {
+    "name": "rust-debugging",
+    "description": "Workflow for narrowing Rust compile failures.",
+    "path": "skills/rust-debugging/SKILL.md",
+    "content": "# Skill...",
+    "truncated": false
+  }
+}
+```
+
+`POST /api/skills/upload`
+
+Purpose:
+
+- create or overwrite a repo-local `SKILL.md` entry
+
+Current request shape:
+
+```json
+{
+  "name": "uploaded-skill",
+  "content": "---\ndescription: Uploaded skill\n---\n# Uploaded",
+  "overwrite": false
 }
 ```
 
@@ -246,14 +307,15 @@ The future frontend should assume these backend rules:
 - Only providers on the shared OpenAI-style runtime currently support tool execution.
 - Anthropic and Gemini should be treated as text-generation providers unless tool support is added explicitly later.
 
-## Suggested Implementation Order
+## Remaining Gaps
 
-1. Add one-shot diagnostics next:
-   - `POST /api/mcp/test`
-   - `GET /api/skills/read`
-2. Add mutable management routes last:
-   - `POST /api/mcp/save`
-   - `POST /api/tools/toggle`
+The remaining backend gaps for this area are no longer the basic CRUD-style inspector APIs.
+What is still missing is the next layer of runtime management:
+
+- MCP stdio / child-process hosting and supervision
+- skill update / delete / rename flows
+- more granular per-tool policy or scope control beyond a simple enabled flag
+- UI-oriented audit history for tool and MCP state changes
 
 ## Non-Goals For The Next Frontend Pass
 

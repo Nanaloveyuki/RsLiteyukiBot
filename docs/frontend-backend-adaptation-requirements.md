@@ -403,7 +403,10 @@
 
 建议交互：
 
-- 当前第一轮只做只读状态页
+- 当前第一轮先做 inventory + diagnostics 主视图
+- 在 MCP 面板里可以直接开放基础配置管理：
+  - save
+  - test
 - 重点显示 warning，而不是只显示是否成功
 
 因为当前后端设计就是：
@@ -431,7 +434,7 @@
 
 ### Tools / MCP / Skills 的当前后端缺口
 
-前端如果要做真正管理，还会被这些缺口卡住：
+这组能力相比最初盘点已经继续往前走了，后端现在已补齐基础管理接口：
 
 - `POST /api/tools/toggle`
 - `POST /api/mcp/save`
@@ -439,10 +442,18 @@
 - `GET /api/skills/read?name=<skill_name>`
 - `POST /api/skills/upload`
 
-所以第一轮前端正确目标不是“全能管理页”，而是：
+这意味着前端第一轮已经不必把所有可写按钮都做成 `coming soon`。更合理的收敛是：
 
-- 先把只读 inventory / diagnostics 做出来
-- 把可写按钮预留为 disabled / coming soon
+- 先做稳定的 inventory / diagnostics 面板
+- 同时开放基础表单型管理动作：
+  - tool enable / disable
+  - 但 `list_tool_categories` / `list_tools_in_category` / `get_tool_schema` 这三个 discovery helper 不应允许关闭
+  - MCP config save / test
+  - skill read / upload
+- 暂时继续把更深层的管理能力留到后续：
+  - tool policy / permission 分级
+  - MCP 进程托管
+  - skill update / delete
 
 ## 跨页面的前端实现约束
 
@@ -527,11 +538,9 @@
 
 ### P2
 
-- MCP save/test
-- skill read/upload
-- tool toggle
 - 更完整的插件运行时诊断页
 - cron / task 真正调度后的运行态页
+- tools / mcp / skills 更深层的生命周期管理
 
 ## 最终结论
 

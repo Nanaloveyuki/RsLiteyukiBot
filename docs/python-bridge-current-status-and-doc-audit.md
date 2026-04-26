@@ -4,7 +4,7 @@
 
 This document records the current implementation state of the Python bridge / AstrBot compatibility lane after the latest runtime web API adaptation pass, and audits whether the existing `docs/` content still matches the real project state.
 
-Date of audit: 2026-04-25
+Date of audit: 2026-04-26
 
 ## What Was Finished In This Pass
 
@@ -40,7 +40,8 @@ This pass continued to align the Python bridge with the backend APIs that alread
 - runtime state query
 - diagnostics query
 
-Cron jobs and legacy tasks remain registration-only surfaces.
+Cron jobs now have a real host-owned scheduler backend.
+Legacy tasks remain registration-only surfaces.
 
 ## Current Truth Table
 
@@ -48,7 +49,7 @@ Cron jobs and legacy tasks remain registration-only surfaces.
 | --- | --- | --- | --- | --- |
 | Tools | Yes | Yes | Yes | No |
 | Web APIs | Yes | Yes | Yes | No |
-| Cron jobs | Yes | Yes | No | No |
+| Cron jobs | Yes | Yes | Yes | Yes |
 | Legacy tasks | Yes | Yes | No | No |
 
 ## Regression Coverage Added / Revalidated
@@ -59,35 +60,36 @@ Verified in this pass:
 - command-group alias propagation tests still pass
 - runtime web API dispatch route tests pass
 - Quart-compatible request/response usage passes through the host runtime bridge
+- plugin cron scheduler route/diagnostics integration passes
 
 Commands run:
 
 - `cargo check --manifest-path src-tauri/Cargo.toml --locked --offline`
 - `cargo test --test plugin_manager`
 - `cargo test plugin_runtime_web_api_routes_dispatch_registered_handlers --lib`
+- `cargo test plugin_cron_scheduler_executes_basic_jobs_and_updates_diagnostics -- --nocapture`
 
 ## Docs Audit
 
 ### Documents confirmed consistent with current implementation
 
 - `docs/python-bridge-compatibility-notes.md`
-  - matches the current bridge reality after the latest updates
-  - correctly says tools and web APIs now have host bridges
-  - correctly says cron/task execution is still intentionally missing
+  - updated in this audit to distinguish shipped cron scheduling from still-missing legacy task execution
 - `docs/python-bridge-risk-register.md`
-  - still matches the real shared-interpreter risk profile
-  - correctly distinguishes executable tool/web-api support from registration-only cron/task support
-- `docs/frontend-backend-adaptation-requirements.md`
-  - matches the current backend capability surface used by frontend integration work
-  - correctly treats tools and web APIs as executable while cron/task remain scheduler-pending
+  - updated in this audit so the metadata-only warning now applies to legacy tasks rather than cron
 - `docs/tools-mcp-skills-frontend-api-draft.md`
   - still matches the current tools / MCP / skills backend surfaces
 
 ### Documents updated during this audit
 
 - `docs/plugin-backend-api-requirements.md`
-  - fixed an outdated sentence in the Phase 1 rationale that still said Rust could not inspect or serve capability registrations
-  - current truth is that visibility/query/execution bridges exist for tools and web APIs, while scheduler support is the remaining gap
+  - updated the implementation snapshot and state matrix to reflect the landed cron scheduler backend
+- `docs/python-bridge-compatibility-notes.md`
+  - removed outdated statements that still described cron execution as missing
+- `docs/python-bridge-risk-register.md`
+  - narrowed the metadata-only warning to legacy tasks and kept cron execution state truthful
+- `docs/frontend-backend-adaptation-requirements.md`
+  - still contains pre-cron-scheduler wording in the current worktree and should be updated in the frontend adaptation lane rather than this backend-only pass
 - `docs/python-bridge-refactor-plan.md`
   - added a status note so readers do not mistake it for the current implementation state
   - clarified that `sdk.rs` has already been split into `src/plugin/sdk/`
@@ -104,7 +106,6 @@ These are still useful and not "wrong", but they should be read as planning mate
 
 The main plugin/backend gaps still remaining after this pass are:
 
-- no real cron scheduler backend
 - no legacy task execution engine
 - no full Quart server compatibility; only the minimal shim needed for plugin runtime web API handlers
 - no full AstrBot provider / agent parity

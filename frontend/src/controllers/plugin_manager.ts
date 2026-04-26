@@ -3,6 +3,21 @@ import { PluginStoreList, PluginStoreItem } from '@/types/plugin-store';
 
 /** 插件状态 */
 export type PluginStatus = 'active' | 'disabled' | 'stopped';
+export type PluginRuntimeKind = 'native' | 'python' | 'lua' | 'external';
+export type PluginSourceKind =
+  | 'liteyuki-native'
+  | 'liteyuki-python-bridge'
+  | 'astrbot-compatible'
+  | 'runtime-lua'
+  | 'runtime-external';
+
+export interface PluginCapabilityFlags {
+  any: boolean;
+  tools: boolean;
+  webApis: boolean;
+  cronJobs: boolean;
+  tasks: boolean;
+}
 
 /** 插件信息 */
 export interface PluginItem {
@@ -22,6 +37,11 @@ export interface PluginItem {
   hasConfig?: boolean;
   /** 是否有扩展页面 */
   hasPages?: boolean;
+  runtimeKind?: PluginRuntimeKind;
+  pluginType?: string;
+  sourceKind?: PluginSourceKind;
+  compatKind?: string;
+  hasCapabilities?: PluginCapabilityFlags;
   /** 主页链接 */
   homepage?: string;
   /** 仓库链接 */
@@ -74,6 +94,83 @@ export interface PluginConfigResponse {
   config: Record<string, unknown>;
   /** 是否支持响应式更新 */
   supportReactive?: boolean;
+}
+
+export interface PluginCapabilitySupportState {
+  registered: boolean;
+  executable: boolean;
+  persistent: boolean;
+  active: boolean;
+  status: 'registered_only' | 'deferred' | 'active' | 'disabled' | 'error' | 'unsupported' | string;
+}
+
+export interface PluginCapabilitySupportSummary {
+  tools: PluginCapabilitySupportState;
+  webApis: PluginCapabilitySupportState;
+  cronJobs: PluginCapabilitySupportState;
+  tasks: PluginCapabilitySupportState;
+}
+
+export interface PluginCapabilitySnapshot {
+  pluginId: string;
+  runtimeKind: PluginRuntimeKind;
+  tools: unknown[];
+  webApis: unknown[];
+  cronJobs: unknown[];
+  tasks: unknown[];
+  updatedAt?: string;
+}
+
+export interface PluginCapabilitiesResponse {
+  pluginId: string;
+  runtimeKind: PluginRuntimeKind;
+  support: PluginCapabilitySupportSummary;
+  snapshot: PluginCapabilitySnapshot;
+}
+
+export interface PluginCapabilityListResponse {
+  pluginId: string;
+  runtimeKind: PluginRuntimeKind;
+  support: PluginCapabilitySupportState;
+  items: unknown[];
+  updatedAt?: string;
+}
+
+export interface PluginRuntimeBindingSummary {
+  tools: boolean;
+  webApis: boolean;
+  cronJobs: boolean;
+  tasks: boolean;
+}
+
+export interface PluginRuntimeStateResponse {
+  pluginId: string;
+  runtimeKind: PluginRuntimeKind;
+  loaded: boolean;
+  enabled: boolean;
+  active: boolean;
+  snapshotExtracted: boolean;
+  executableBindings: PluginRuntimeBindingSummary;
+  schedulerStatus: string;
+  taskRuntimeStatus: string;
+}
+
+export interface PluginExecutionRecord {
+  lastError?: string;
+  lastErrorAt?: string;
+  lastSuccessAt?: string;
+}
+
+export interface PluginDiagnosticsResponse {
+  pluginId: string;
+  runtimeKind: PluginRuntimeKind;
+  loadState: string;
+  snapshotExtracted: boolean;
+  executableBindings: PluginRuntimeBindingSummary;
+  schedulerStatus: string;
+  lastWebApiDispatch: PluginExecutionRecord;
+  lastToolExecution: PluginExecutionRecord;
+  lastCronExecution: PluginExecutionRecord;
 }
 
 /** 服务端响应 */
@@ -193,6 +290,55 @@ export default class PluginManager {
    */
   public static async setPluginConfig (id: string, config: Record<string, unknown>): Promise<void> {
     await serverRequest.post<ServerResponse<void>>('/Plugin/Config', { id, config });
+  }
+
+  public static async getPluginCapabilities (id: string): Promise<PluginCapabilitiesResponse> {
+    const { data } = await serverRequest.get<ServerResponse<PluginCapabilitiesResponse>>('/Plugin/Capabilities', {
+      params: { id },
+    });
+    return data.data;
+  }
+
+  public static async getPluginTools (id: string): Promise<PluginCapabilityListResponse> {
+    const { data } = await serverRequest.get<ServerResponse<PluginCapabilityListResponse>>('/Plugin/Tools', {
+      params: { id },
+    });
+    return data.data;
+  }
+
+  public static async getPluginWebApis (id: string): Promise<PluginCapabilityListResponse> {
+    const { data } = await serverRequest.get<ServerResponse<PluginCapabilityListResponse>>('/Plugin/WebApis', {
+      params: { id },
+    });
+    return data.data;
+  }
+
+  public static async getPluginCronJobs (id: string): Promise<PluginCapabilityListResponse> {
+    const { data } = await serverRequest.get<ServerResponse<PluginCapabilityListResponse>>('/Plugin/CronJobs', {
+      params: { id },
+    });
+    return data.data;
+  }
+
+  public static async getPluginTasks (id: string): Promise<PluginCapabilityListResponse> {
+    const { data } = await serverRequest.get<ServerResponse<PluginCapabilityListResponse>>('/Plugin/Tasks', {
+      params: { id },
+    });
+    return data.data;
+  }
+
+  public static async getPluginRuntimeState (id: string): Promise<PluginRuntimeStateResponse> {
+    const { data } = await serverRequest.get<ServerResponse<PluginRuntimeStateResponse>>('/Plugin/RuntimeState', {
+      params: { id },
+    });
+    return data.data;
+  }
+
+  public static async getPluginDiagnostics (id: string): Promise<PluginDiagnosticsResponse> {
+    const { data } = await serverRequest.get<ServerResponse<PluginDiagnosticsResponse>>('/Plugin/Diagnostics', {
+      params: { id },
+    });
+    return data.data;
   }
 
   /**

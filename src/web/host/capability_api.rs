@@ -2,6 +2,7 @@ use super::*;
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -10,6 +11,12 @@ use crate::config_paths::resolve_preferred_mcp_config_path;
 use crate::llm::mcp::{McpManager, McpServerConfig};
 use crate::llm::skills::SkillManager;
 use crate::llm::tools::ToolManager;
+
+const NON_TOGGLEABLE_TOOLS: &[&str] = &[
+    "list_tool_categories",
+    "list_tools_in_category",
+    "get_tool_schema",
+];
 
 pub(super) fn route_capability_api(
     method: &str,
@@ -25,6 +32,19 @@ pub(super) fn route_capability_api(
         }
 
         let body = match tools_payload() {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/tools/toggle" {
+        if !method.eq_ignore_ascii_case("POST") {
+            let body = napcat_err(-1, "tools/toggle only accepts POST");
+            return Some(napcat_response(body, is_head));
+        }
+
+        let body = match toggle_tool_payload(request) {
             Ok(payload) => napcat_ok(&payload),
             Err(err) => napcat_err(-1, err.as_str()),
         };
@@ -116,6 +136,39 @@ fn tools_payload() -> Result<serde_json::Value, String> {
     let manager = ToolManager::for_current_workspace()?;
     let runtime = run_async_for_web_host(manager.describe_runtime_tools());
     Ok(serde_json::json!({
+        "tools": runtime.tools,
+        "warnings": runtime.warnings,
+    }))
+}
+
+fn toggle_tool_payload(request: &[u8]) -> Result<serde_json::Value, String> {
+    let request_body = parse_json_body(request);
+    let payload: WebToolToggleRequest = serde_json::from_value(request_body)
+        .map_err(|err| format!("invalid tools/toggle payload: {err}"))?;
+    let name = payload.name.trim();
+    if name.is_empty() {
+        return Err("tool name should not be empty".to_string());
+    }
+    if NON_TOGGLEABLE_TOOLS.iter().any(|tool_name| tool_name == &name) {
+        return Err(format!("tool '{name}' is a required discovery helper and cannot be toggled"));
+    }
+
+    let _guard = tool_toggle_lock()
+        .lock()
+        .map_err(|_| "tool toggle lock poisoned".to_string())?;
+    let mut manager = ToolManager::for_current_workspace()?;
+    let known_tools = run_async_for_web_host(manager.describe_runtime_tools());
+    if !known_tools.tools.iter().any(|tool| tool.name == name) {
+        return Err(format!("tool '{name}' was not found"));
+    }
+
+    manager.set_tool_active(name, payload.active)?;
+    let runtime = run_async_for_web_host(manager.describe_runtime_tools());
+
+    Ok(serde_json::json!({
+        "name": name,
+        "active": payload.active,
+        "configPath": manager.tool_state_path().display().to_string(),
         "tools": runtime.tools,
         "warnings": runtime.warnings,
     }))
@@ -346,6 +399,11 @@ fn capability_workspace_root() -> PathBuf {
         .unwrap_or_else(workspace_root)
 }
 
+fn tool_toggle_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn truncate_chars(value: &str, max_chars: usize) -> (String, bool) {
     if value.chars().count() <= max_chars {
         return (value.to_string(), false);
@@ -371,4 +429,11 @@ struct WebSkillUploadRequest {
     content: String,
     #[serde(default)]
     overwrite: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebToolToggleRequest {
+    name: String,
+    active: bool,
 }

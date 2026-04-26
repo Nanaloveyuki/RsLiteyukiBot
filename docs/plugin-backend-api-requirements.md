@@ -9,7 +9,7 @@ Frontend shape can be added on top later, but backend capability boundaries shou
 
 ## Implementation Status Snapshot
 
-As of the current repository state on 2026-04-25, the backend is no longer in a metadata-only state.
+As of the current repository state on 2026-04-26, the backend is no longer in a metadata-only state.
 
 Implemented:
 
@@ -17,12 +17,12 @@ Implemented:
 - Phase 2 capability query APIs
 - Phase 3 registered web API execution
 - Phase 4 registered tool execution
+- Phase 5 cron scheduler backend for host-executable plugin cron jobs
 - Phase 6 runtime state and diagnostics APIs
 
 Still missing:
 
-- Phase 5 cron/task scheduler backend
-- host-owned persistence and restart recovery for runtime jobs
+- legacy task execution backend
 - durable capability snapshots when a plugin is unloaded or disabled
 - richer diagnostics such as runtime hook failure history and scheduler execution history
 
@@ -79,6 +79,11 @@ Already available:
   - `PluginSdk::build_all_plugin_tool_bundle(...)`
   - `POST /api/Plugin/Tools/Execute`
   - host LLM runtime bundle assembly used by `/api/LLM/Chat`
+- real backend scheduling for host-executable registered cron jobs through:
+  - `PluginCronTaskScheduler`
+  - `PluginSdk::run_due_plugin_jobs(...)`
+  - `EmbeddedAppHost::run_plugin_cron_tick(...)`
+  - host-owned cron state persistence at `plugin-cron-state.json`
 - runtime state and diagnostics query APIs for:
   - `/api/Plugin/RuntimeState`
   - `/api/Plugin/Diagnostics`
@@ -91,9 +96,8 @@ Already available:
 
 Not yet available:
 
-- real scheduler backend for registered cron jobs
 - task execution backend beyond truthful capability reporting
-- persistence and startup recovery for plugin runtime jobs
+- persistence and startup recovery for legacy tasks or non-cron scheduler surfaces
 - host-owned durable capability snapshots for unloaded or disabled plugins
 - richer plugin diagnostics for:
   - runtime hook failures
@@ -111,7 +115,7 @@ Out of scope for the first backend pass even though metadata is already retained
 | Plugin extension pages | Yes, via manifest metadata | Yes, through plugin catalog snapshot | Yes, through `/api/Plugin/List` extension page payload | Yes, static page serving only | Manifest-driven only |
 | Registered LLM tools | Yes | Yes | Yes, through `/api/Plugin/Tools` | Yes, through host LLM tool runtime and `/api/Plugin/Tools/Execute` | No |
 | Registered web APIs | Yes | Yes | Yes, through `/api/Plugin/WebApis` and `/api/Plugin/Capabilities` | Yes, through `/api/Plugin/Runtime/WebApi/...` | No |
-| Registered cron jobs | Yes | Yes | Yes, through `/api/Plugin/CronJobs` and `/api/Plugin/Capabilities` | No | No |
+| Registered cron jobs | Yes | Yes | Yes, through `/api/Plugin/CronJobs` and `/api/Plugin/Capabilities` | Yes, through the host cron scheduler and Python execution bridge | Yes, through `plugin-cron-state.json` |
 | Registered legacy tasks | Yes | Yes | Yes, through `/api/Plugin/Tasks` and `/api/Plugin/Capabilities` | No | No |
 
 ## Architectural Boundaries
@@ -171,7 +175,7 @@ Expose plugin runtime registrations from the Python bridge back into Rust in a s
 
 The current compat layer retains tool, web API, cron, and task metadata in Python runtime state.
 The Rust host can now inspect and serve those registrations through capability, runtime web API, tool execution, runtime state, and diagnostics APIs.
-The remaining gap is no longer "visibility", but truthful execution-state reporting and the missing cron/task scheduler backend.
+The remaining gap is no longer "visibility", but truthful execution-state reporting and the still-missing legacy task execution backend.
 
 ### Required Rust-side snapshot objects
 
@@ -483,11 +487,12 @@ This avoids collisions with:
 
 ### Requirement
 
-Provide a real scheduler backend for plugin-registered cron jobs and tasks.
+Keep the shipped cron scheduler backend stable and add the still-missing task execution backend.
 
 ### Why
 
-The compat layer can preserve cron metadata, but there is no scheduler, persistence, or recovery.
+The compat layer now has a real host-owned cron scheduler with persistence and recovery.
+The remaining execution gap in this phase is legacy tasks rather than cron visibility or cron persistence.
 
 ### Required minimum scheduler capabilities
 
@@ -565,7 +570,7 @@ Expose runtime inspection and failure state for plugin features that are more dy
 Current repository status:
 
 - both endpoints are implemented
-- current payloads already cover runtime kind, load state, snapshot extracted or not, executable binding presence, scheduler status placeholder, last web API dispatch error, last tool execution error, and last cron execution placeholder
+- current payloads already cover runtime kind, load state, snapshot extracted or not, executable binding presence, scheduler status, last web API dispatch error, last tool execution error, and last cron execution state
 - runtime hook failure history and scheduler execution history are still not implemented
 
 ### Suggested diagnostics payload areas
@@ -672,7 +677,7 @@ The repository now satisfies capability query, runtime web API execution, plugin
 
 The main remaining backend gaps are:
 
-- cron jobs are still registration-only metadata and do not have a Rust scheduler backend
+- host-executable cron jobs now run through a Rust-owned scheduler backend with persisted state recovery
 - legacy tasks are still status-only and do not have a task execution engine
 - plugin capability snapshots are still runtime-state projections and are not persisted when a plugin is not loaded
 - diagnostics are currently last-error and last-success snapshots, not a full failure timeline

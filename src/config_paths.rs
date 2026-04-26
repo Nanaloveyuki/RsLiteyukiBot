@@ -13,6 +13,8 @@ pub(crate) const PASSWORD_CONFIG_FILENAME: &str = "password.yaml";
 pub(crate) const WEBUI_PASSWORD_FILENAME: &str = "password.json";
 pub(crate) const LLM_PROMPT_STORE_FILENAME: &str = "llm-prompts.json";
 pub(crate) const MCP_CONFIG_FILENAME: &str = "mcp-servers.json";
+pub(crate) const TOOL_STATE_FILENAME: &str = "tool-state.json";
+pub(crate) const PLUGIN_CRON_STATE_FILENAME: &str = "plugin-cron-state.json";
 const LEGACY_WEBUI_PASSWORD_RELATIVE_PATH: &str = ".liteyuki/password.json";
 const LEGACY_LLM_PROMPT_STORE_PATH: &str = "llm-prompts.json";
 
@@ -71,6 +73,14 @@ pub(crate) fn resolve_default_llm_prompt_store_path() -> PathBuf {
 
 pub(crate) fn resolve_default_mcp_config_path() -> PathBuf {
     resolve_user_config_file(MCP_CONFIG_FILENAME)
+}
+
+pub(crate) fn resolve_default_tool_state_path() -> PathBuf {
+    resolve_user_config_file(TOOL_STATE_FILENAME)
+}
+
+pub(crate) fn resolve_default_plugin_cron_state_path() -> PathBuf {
+    resolve_user_config_file(PLUGIN_CRON_STATE_FILENAME)
 }
 
 pub(crate) fn resolve_existing_named_config_path(
@@ -306,6 +316,24 @@ pub(crate) fn resolve_preferred_mcp_config_path() -> PathBuf {
         &[MCP_CONFIG_FILENAME],
         &[MCP_CONFIG_FILENAME],
         resolve_default_mcp_config_path,
+    )
+}
+
+pub(crate) fn resolve_preferred_tool_state_path() -> PathBuf {
+    resolve_preferred_named_config_path(
+        "LY_TOOL_STATE_PATH",
+        &[TOOL_STATE_FILENAME],
+        &[],
+        resolve_default_tool_state_path,
+    )
+}
+
+pub(crate) fn resolve_preferred_plugin_cron_state_path() -> PathBuf {
+    resolve_preferred_named_config_path(
+        "LY_PLUGIN_CRON_STATE_PATH",
+        &[PLUGIN_CRON_STATE_FILENAME],
+        &[],
+        resolve_default_plugin_cron_state_path,
     )
 }
 

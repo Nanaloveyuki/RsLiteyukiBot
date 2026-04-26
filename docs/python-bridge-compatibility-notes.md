@@ -66,7 +66,7 @@ Known intentional gaps:
 - no full AstrBot command parser parity
 - no typed argument conversion or richer parsed-parameter model
 - no provider manager parity beyond tool metadata retention
-- no real cron execution backend
+- no legacy task execution backend
 - no dashboard persistence for registered cron jobs / web apis
 - web api execution support is limited to the host runtime route bridge, not a full Quart server
 - no real agent handoff execution path
@@ -81,7 +81,7 @@ Now implemented in the host:
 Still intentionally missing:
 
 - no provider manager parity beyond tool metadata retention
-- no cron scheduler backend or persistence recovery
+- no legacy task execution backend
 - no durable unloaded-plugin capability snapshot
 
 ## Compatibility Strategy
@@ -102,7 +102,8 @@ Current runtime note:
 - pending background tasks are cancelled after each callback to avoid leaking old plugin state across reloads
 - registered AstrBot tools can now be executed through the host tool runtime bridge
 - registered AstrBot web APIs can now be dispatched through the host runtime route bridge
-- cron and legacy task compatibility in this round is still metadata-preserving only
+- host-executable AstrBot cron jobs now run through the host scheduler with persisted cron state recovery
+- legacy task compatibility in this round is still metadata-preserving only
 - unload now clears module-owned AstrBot compat runtime state before removing Python modules
 
 ## Coordination Note

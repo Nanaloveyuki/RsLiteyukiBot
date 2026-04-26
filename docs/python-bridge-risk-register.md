@@ -130,8 +130,9 @@ Current mitigation:
 Current issue:
 
 - AstrBot-style tool registration, web api registration, and cron/job registration now preserve metadata in the compat layer
-- only cron/job registration is still metadata-only in the Rust host
+- legacy task registration is still metadata-only in the Rust host
 - tool execution and web api execution now have real host bridges
+- host-executable cron jobs now have a real scheduler backend
 
 Impact:
 
@@ -140,8 +141,8 @@ Impact:
 
 Current mitigation:
 
-- expose capability state explicitly so tools/web apis report executable support while cron/tasks still report registration-only support
-- document clearly which surfaces are executable and which are still placeholders
+- expose capability state explicitly so tools, web apis, and host-executable cron jobs report executable support while legacy tasks still report registration-only support
+- document clearly which surfaces are executable and which are still placeholders or task-pending
 
 Follow-up target:
 

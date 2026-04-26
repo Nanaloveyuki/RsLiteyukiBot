@@ -1,4 +1,5 @@
 pub mod client;
+pub(crate) mod cron_task;
 pub(crate) mod mcp;
 pub mod prompt;
 pub(crate) mod service;

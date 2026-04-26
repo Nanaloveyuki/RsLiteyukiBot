@@ -2,6 +2,7 @@ mod config;
 mod host_async;
 mod python;
 
+use std::collections::BTreeMap;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -10,11 +11,13 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::adapter::{AdapterManager, AdapterPacket};
 use crate::comm::{ChannelMessage, ChannelRegistry, SharedStore};
 use crate::core::{BotEvent, LifecycleContext};
+use crate::llm::cron_task::{CronTaskKey, PluginCronTaskScheduler};
 use crate::llm::{LlmClientError, LlmFunctionTool, LlmToolOutput};
 use crate::observability::Logger;
 use crate::session::SessionRouter;
@@ -40,7 +43,8 @@ use python::commands::{
 };
 use python::lifecycle::{
     PythonRuntimeState, dispatch_python_event, execute_python_registered_tool,
-    execute_python_registered_web_api, execute_python_tui_command,
+    execute_python_registered_cron_job, execute_python_registered_web_api,
+    execute_python_tui_command,
     get_python_plugin_capability_snapshot, get_python_plugin_runtime_diagnostics,
     health_check_python_manifest_plugin, list_all_python_plugin_capability_snapshots,
     load_python_manifest_plugin, shutdown_python_manifest_plugin, start_python_manifest_plugin,
@@ -358,6 +362,7 @@ impl PluginPermissionSet {
 pub struct PluginSdk {
     adapters: RuntimeAdapterRegistry,
     python_runtime: Arc<Mutex<PythonRuntimeState>>,
+    cron_scheduler: Arc<Mutex<PluginCronTaskScheduler>>,
 }
 
 impl Default for PluginSdk {
@@ -365,6 +370,7 @@ impl Default for PluginSdk {
         Self {
             adapters: RuntimeAdapterRegistry::with_defaults(),
             python_runtime: Arc::new(Mutex::new(PythonRuntimeState::default())),
+            cron_scheduler: Arc::new(Mutex::new(PluginCronTaskScheduler::from_default_path())),
         }
     }
 }
@@ -374,6 +380,7 @@ impl PluginSdk {
         Self {
             adapters,
             python_runtime: Arc::new(Mutex::new(PythonRuntimeState::default())),
+            cron_scheduler: Arc::new(Mutex::new(PluginCronTaskScheduler::from_default_path())),
         }
     }
 
@@ -573,7 +580,11 @@ impl PluginSdk {
         &self,
         plugin_id: &str,
     ) -> Result<Option<PluginCapabilitySnapshot>, PluginSdkError> {
-        get_python_plugin_capability_snapshot(&self.python_runtime, plugin_id)
+        let mut snapshot = self.get_plugin_capabilities_raw(plugin_id)?;
+        if let Some(snapshot) = snapshot.as_mut() {
+            self.sync_plugin_cron_snapshot(snapshot, Utc::now())?;
+        }
+        Ok(snapshot)
     }
 
     pub fn list_plugin_tools(
@@ -619,7 +630,9 @@ impl PluginSdk {
     pub fn list_all_plugin_capabilities(
         &self,
     ) -> Result<Vec<PluginCapabilitySnapshot>, PluginSdkError> {
-        list_all_python_plugin_capability_snapshots(&self.python_runtime)
+        let mut snapshots = self.list_all_plugin_capabilities_raw()?;
+        self.sync_all_plugin_cron_snapshots(snapshots.as_mut_slice(), true, Utc::now())?;
+        Ok(snapshots)
     }
 
     pub fn execute_plugin_web_api(
@@ -701,6 +714,160 @@ impl PluginSdk {
         plugin_id: &str,
     ) -> Result<Option<PluginRuntimeDiagnostics>, PluginSdkError> {
         get_python_plugin_runtime_diagnostics(&self.python_runtime, plugin_id)
+    }
+
+    pub fn run_due_plugin_jobs(
+        &self,
+        disabled_plugin_ids: &[String],
+        now: Option<DateTime<Utc>>,
+    ) -> Result<usize, PluginSdkError> {
+        let now = now.unwrap_or_else(Utc::now);
+        let mut snapshots = self.list_all_plugin_capabilities_raw()?;
+        self.sync_all_plugin_cron_snapshots(snapshots.as_mut_slice(), true, now)?;
+        let disabled = disabled_plugin_ids.iter().cloned().collect::<HashSet<_>>();
+        let due_jobs = {
+            let scheduler = self
+                .cron_scheduler
+                .lock()
+                .map_err(|_| PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string()))?;
+            scheduler.collect_due_jobs(snapshots.as_slice(), &disabled, now)
+        };
+
+        if due_jobs.is_empty() {
+            return Ok(0);
+        }
+
+        let job_map = snapshots
+            .iter()
+            .flat_map(|snapshot| {
+                snapshot
+                    .cron_jobs
+                    .iter()
+                    .cloned()
+                    .map(|job| (CronTaskKey::new(snapshot.plugin_id.clone(), job.job_id.clone()), job))
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let mut executed = 0usize;
+        for due_job in due_jobs {
+            let Some(job) = job_map.get(&due_job.key) else {
+                continue;
+            };
+            match execute_python_registered_cron_job(
+                &self.python_runtime,
+                due_job.key.plugin_id.as_str(),
+                due_job.key.job_id.as_str(),
+                &due_job.job.payload,
+            ) {
+                Ok(true) => {
+                    executed = executed.saturating_add(1);
+                    self.cron_scheduler
+                        .lock()
+                        .map_err(|_| {
+                            PluginSdkError::Runtime(
+                                "plugin cron scheduler lock poisoned".to_string(),
+                            )
+                        })?
+                        .mark_job_success(&due_job.key, job, now)
+                        .map_err(PluginSdkError::Runtime)?;
+                }
+                Ok(false) => {
+                    self.cron_scheduler
+                        .lock()
+                        .map_err(|_| {
+                            PluginSdkError::Runtime(
+                                "plugin cron scheduler lock poisoned".to_string(),
+                            )
+                        })?
+                        .mark_job_error(
+                            &due_job.key,
+                            job,
+                            now,
+                            format!(
+                                "plugin cron job '{}' does not expose an executable handler",
+                                due_job.key.job_id
+                            ),
+                        )
+                        .map_err(PluginSdkError::Runtime)?;
+                }
+                Err(err) => {
+                    self.cron_scheduler
+                        .lock()
+                        .map_err(|_| {
+                            PluginSdkError::Runtime(
+                                "plugin cron scheduler lock poisoned".to_string(),
+                            )
+                        })?
+                        .mark_job_error(&due_job.key, job, now, err.to_string())
+                        .map_err(PluginSdkError::Runtime)?;
+                }
+            }
+        }
+
+        Ok(executed)
+    }
+
+    pub fn plugin_cron_scheduler_status(&self, plugin_id: &str) -> Result<String, PluginSdkError> {
+        let Some(mut snapshot) = self.get_plugin_capabilities_raw(plugin_id)? else {
+            return Ok("unsupported".to_string());
+        };
+        self.sync_plugin_cron_snapshot(&mut snapshot, Utc::now())?;
+        let scheduler = self
+            .cron_scheduler
+            .lock()
+            .map_err(|_| PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string()))?;
+        Ok(scheduler.plugin_scheduler_status(&snapshot))
+    }
+
+    pub fn plugin_has_executable_cron_jobs(
+        &self,
+        plugin_id: &str,
+    ) -> Result<bool, PluginSdkError> {
+        let Some(mut snapshot) = self.get_plugin_capabilities_raw(plugin_id)? else {
+            return Ok(false);
+        };
+        self.sync_plugin_cron_snapshot(&mut snapshot, Utc::now())?;
+        let scheduler = self
+            .cron_scheduler
+            .lock()
+            .map_err(|_| PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string()))?;
+        Ok(scheduler.plugin_has_executable_jobs(&snapshot))
+    }
+
+    fn get_plugin_capabilities_raw(
+        &self,
+        plugin_id: &str,
+    ) -> Result<Option<PluginCapabilitySnapshot>, PluginSdkError> {
+        get_python_plugin_capability_snapshot(&self.python_runtime, plugin_id)
+    }
+
+    fn list_all_plugin_capabilities_raw(&self) -> Result<Vec<PluginCapabilitySnapshot>, PluginSdkError> {
+        list_all_python_plugin_capability_snapshots(&self.python_runtime)
+    }
+
+    fn sync_plugin_cron_snapshot(
+        &self,
+        snapshot: &mut PluginCapabilitySnapshot,
+        now: DateTime<Utc>,
+    ) -> Result<(), PluginSdkError> {
+        self.cron_scheduler
+            .lock()
+            .map_err(|_| PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string()))?
+            .sync_snapshot(snapshot, now)
+            .map_err(PluginSdkError::Runtime)
+    }
+
+    fn sync_all_plugin_cron_snapshots(
+        &self,
+        snapshots: &mut [PluginCapabilitySnapshot],
+        prune_missing: bool,
+        now: DateTime<Utc>,
+    ) -> Result<(), PluginSdkError> {
+        self.cron_scheduler
+            .lock()
+            .map_err(|_| PluginSdkError::Runtime("plugin cron scheduler lock poisoned".to_string()))?
+            .sync_snapshots(snapshots, prune_missing, now)
+            .map_err(PluginSdkError::Runtime)
     }
 }
 

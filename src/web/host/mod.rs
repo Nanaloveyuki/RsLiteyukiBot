@@ -2051,12 +2051,19 @@ mod tests {
             )
             .expect("skill file should be written");
 
-            let guards = vec![EnvVarGuard::set("LY_WORKSPACE_ROOT", root.as_path())];
+            let guards = vec![
+                EnvVarGuard::set("LY_WORKSPACE_ROOT", root.as_path()),
+                EnvVarGuard::set("LY_TOOL_STATE_PATH", root.join("tool-state.json").as_path()),
+            ];
             Self { root, guards }
         }
 
         fn mcp_config_path(&self) -> PathBuf {
             self.root.join("mcp-servers.json")
+        }
+
+        fn tool_state_path(&self) -> PathBuf {
+            self.root.join("tool-state.json")
         }
     }
 
@@ -2094,6 +2101,8 @@ mod tests {
 from astrbot.api.event import filter
 from quart import jsonify, make_response, request
 
+CRON_RUNS = []
+
 
 class CapabilityRoutePlugin(star.Star):
     async def initialize(self):
@@ -2102,6 +2111,7 @@ class CapabilityRoutePlugin(star.Star):
         self.context.register_web_api("/cap-multi", self.handle_multi_api, ["GET", "PUT", "PATCH", "DELETE"], "cap multi api")
         self.context.register_web_api("/cap-quart", self.handle_quart_api, ["POST"], "cap quart api")
         self.context.register_web_api("/cap-text", self.handle_text_api, ["GET"], "cap text api")
+        self.context.register_web_api("/cap-cron-state", self.handle_cron_state, ["GET"], "cap cron state api")
         self.context.add_llm_tools(
             FunctionTool(
                 name="manual_capability_route_tool",
@@ -2115,6 +2125,14 @@ class CapabilityRoutePlugin(star.Star):
             description="capability route cron",
             cron_expression="*/5 * * * *",
             payload={"mode": "route"},
+            enabled=True,
+        )
+        await self.context.cron_manager.add_basic_job(
+            name="capability-basic-cron",
+            handler=self.handle_basic_cron,
+            cron_expression="*/5 * * * *",
+            description="capability basic cron",
+            payload={"mode": "basic"},
             enabled=True,
         )
         self.context.register_task("capability-route-task", "route task")
@@ -2165,6 +2183,13 @@ class CapabilityRoutePlugin(star.Star):
     async def handle_text_api(self, request=None):
         return "capability route text"
 
+    async def handle_cron_state(self, request=None):
+        return {"runs": list(CRON_RUNS)}
+
+    async def handle_basic_cron(self, mode: str = "basic"):
+        CRON_RUNS.append(mode)
+        return {"mode": mode}
+
     async def manual_tool(self, value: str = "ok", count: int = 1):
         if value == "fail":
             raise RuntimeError("capability route tool failed")
@@ -2197,6 +2222,10 @@ class CapabilityRoutePlugin(star.Star):
                 EnvVarGuard::set("LY_LLM_CONFIG_PATH", root.join("llm-config.yaml").as_path()),
                 EnvVarGuard::set("LY_PASSWORD_PATH", root.join("password.yaml").as_path()),
                 EnvVarGuard::set("LY_PLUGIN_DIRS", root.join("plugins").as_path()),
+                EnvVarGuard::set(
+                    "LY_PLUGIN_CRON_STATE_PATH",
+                    root.join("plugin-cron-state.json").as_path(),
+                ),
             ];
             Self { root, guards }
         }
@@ -3093,6 +3122,106 @@ class CapabilityRoutePlugin(star.Star):
         server_task.await.expect("mock server should finish");
     }
 
+    #[test]
+    fn capability_routes_support_tool_toggle_and_persist_state() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let env = CapabilityRouteTestEnv::new();
+        let server = test_server();
+
+        let initial_response = route_json_api(&server, "GET", "/api/tools", None);
+        assert_eq!(initial_response["code"], 0);
+        assert!(
+            initial_response["data"]["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|tool| {
+                    tool["name"] == "workspace_read_file" && tool["active"] == true
+                }))
+        );
+
+        let toggle_response = route_json_api(
+            &server,
+            "POST",
+            "/api/tools/toggle",
+            Some(&serde_json::json!({
+                "name": "workspace_read_file",
+                "active": false
+            })),
+        );
+        assert_eq!(toggle_response["code"], 0);
+        assert_eq!(toggle_response["data"]["name"], "workspace_read_file");
+        assert_eq!(toggle_response["data"]["active"], false);
+        assert!(
+            toggle_response["data"]["configPath"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("tool-state.json"))
+        );
+        assert!(
+            toggle_response["data"]["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|tool| {
+                    tool["name"] == "workspace_read_file" && tool["active"] == false
+                }))
+        );
+
+        let refreshed_response = route_json_api(&server, "GET", "/api/tools", None);
+        assert_eq!(refreshed_response["code"], 0);
+        assert!(
+            refreshed_response["data"]["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|tool| {
+                    tool["name"] == "workspace_read_file" && tool["active"] == false
+                }))
+        );
+
+        let tool_state = fs::read_to_string(env.tool_state_path())
+            .expect("tools/toggle should persist tool-state.json");
+        assert!(tool_state.contains("\"workspace_read_file\": false"));
+    }
+
+    #[test]
+    fn capability_routes_reject_discovery_helper_toggle_and_invalid_state_overwrite() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let env = CapabilityRouteTestEnv::new();
+        let server = test_server();
+
+        let helper_response = route_json_api(
+            &server,
+            "POST",
+            "/api/tools/toggle",
+            Some(&serde_json::json!({
+                "name": "list_tool_categories",
+                "active": false
+            })),
+        );
+        assert_eq!(helper_response["code"], -1);
+        assert!(
+            helper_response["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("required discovery helper"))
+        );
+
+        fs::write(env.tool_state_path(), "{invalid json")
+            .expect("broken tool state should be written");
+        let invalid_response = route_json_api(
+            &server,
+            "POST",
+            "/api/tools/toggle",
+            Some(&serde_json::json!({
+                "name": "workspace_read_file",
+                "active": false
+            })),
+        );
+        assert_eq!(invalid_response["code"], -1);
+        assert!(
+            invalid_response["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("invalid json"))
+        );
+        let persisted = fs::read_to_string(env.tool_state_path())
+            .expect("invalid tool state should not be overwritten");
+        assert_eq!(persisted, "{invalid json");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn plugin_capability_routes_expose_runtime_snapshot_queries() {
         let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
@@ -3145,6 +3274,18 @@ class CapabilityRoutePlugin(star.Star):
             "active"
         );
         assert_eq!(
+            capabilities_response["data"]["support"]["cronJobs"]["registered"],
+            true
+        );
+        assert_eq!(
+            capabilities_response["data"]["support"]["cronJobs"]["executable"],
+            true
+        );
+        assert_eq!(
+            capabilities_response["data"]["support"]["cronJobs"]["status"],
+            "active"
+        );
+        assert_eq!(
             capabilities_response["data"]["snapshot"]["tools"]
                 .as_array()
                 .map(|items| items.len()),
@@ -3155,8 +3296,26 @@ class CapabilityRoutePlugin(star.Star):
             "/cap-route"
         );
         assert_eq!(
-            capabilities_response["data"]["snapshot"]["cronJobs"][0]["jobType"],
-            "active_agent"
+            capabilities_response["data"]["snapshot"]["cronJobs"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(2)
+        );
+        assert!(
+            capabilities_response["data"]["snapshot"]["cronJobs"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|job| {
+                    job["jobType"] == "active_agent"
+                        && job["jobId"].as_str().is_some_and(|id| id.contains("active_agent"))
+                }))
+        );
+        assert!(
+            capabilities_response["data"]["snapshot"]["cronJobs"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|job| {
+                    job["jobType"] == "basic"
+                        && job["nextRunTime"].is_string()
+                }))
         );
         assert_eq!(
             capabilities_response["data"]["snapshot"]["tasks"][0]["taskId"],
@@ -3223,7 +3382,8 @@ class CapabilityRoutePlugin(star.Star):
         assert_eq!(runtime_state["data"]["active"], true);
         assert_eq!(runtime_state["data"]["executableBindings"]["tools"], true);
         assert_eq!(runtime_state["data"]["executableBindings"]["webApis"], true);
-        assert_eq!(runtime_state["data"]["schedulerStatus"], "unsupported");
+        assert_eq!(runtime_state["data"]["executableBindings"]["cronJobs"], true);
+        assert_eq!(runtime_state["data"]["schedulerStatus"], "active");
 
         let execute_response = route_json_api(
             &server,
@@ -3302,6 +3462,73 @@ class CapabilityRoutePlugin(star.Star):
         assert!(
             diagnostics["data"]["lastToolExecution"]["lastSuccessAt"].is_string(),
             "successful tool execution should record lastSuccessAt"
+        );
+
+        runtime_host
+            .shutdown()
+            .await
+            .expect("embedded host should shutdown cleanly");
+        drop(env);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plugin_cron_scheduler_executes_basic_jobs_and_updates_diagnostics() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let env = PluginCapabilityRouteTestEnv::new();
+        let runtime_host = EmbeddedAppHost::start_for_target(RuntimeTarget::Tauri2)
+            .await
+            .expect("embedded host should start for cron scheduler route test");
+        let server = test_server().with_runtime_host(runtime_host.clone());
+
+        let tick_at = chrono::DateTime::parse_from_rfc3339("2026-04-26T10:05:00Z")
+            .expect("timestamp should parse")
+            .with_timezone(&chrono::Utc);
+        let executed = runtime_host
+            .run_plugin_cron_tick_at(tick_at)
+            .await
+            .expect("cron tick should succeed");
+        assert_eq!(executed, 1);
+
+        let cron_state_request = format!(
+            "GET /api/Plugin/Runtime/WebApi/capability-route-plugin/cap-cron-state HTTP/1.1\r\nHost: localhost\r\n{}\r\n\r\n",
+            local_auth_header(&server)
+        );
+        let cron_state_response = server.route_http_request(
+            cron_state_request.as_bytes(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (_, cron_state_body) = split_response(cron_state_response);
+        let cron_state_json: serde_json::Value =
+            serde_json::from_slice(&cron_state_body).expect("cron state should be json");
+        assert_eq!(cron_state_json["runs"][0], "basic");
+
+        let diagnostics = route_json_api(
+            &server,
+            "GET",
+            "/api/Plugin/Diagnostics?id=capability-route-plugin",
+            None,
+        );
+        assert_eq!(diagnostics["code"], 0);
+        assert!(
+            diagnostics["data"]["lastCronExecution"]["lastSuccessAt"].is_string(),
+            "cron execution should record lastSuccessAt"
+        );
+
+        let cron_jobs = route_json_api(
+            &server,
+            "GET",
+            "/api/Plugin/CronJobs?id=capability-route-plugin",
+            None,
+        );
+        assert_eq!(cron_jobs["code"], 0);
+        assert_eq!(cron_jobs["data"]["support"]["executable"], true);
+        assert!(
+            cron_jobs["data"]["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|job| {
+                    job["jobType"] == "basic"
+                        && job["lastRunTime"] == "2026-04-26T10:05:00+00:00"
+                }))
         );
 
         runtime_host

@@ -11,6 +11,7 @@ import {
   LuPackage,
   LuStore,
   LuPuzzle,
+  LuBraces,
 } from 'react-icons/lu';
 
 export type SiteConfig = typeof siteConfig;
@@ -51,6 +52,11 @@ export const siteConfig = {
       label: '模型对话',
       icon: <LuZap className='w-5 h-5' />,
       href: '/debug/ws',
+    },
+    {
+      label: '能力面板',
+      icon: <LuBraces className='w-5 h-5' />,
+      href: '/capabilities',
     },
     {
       label: '文件管理',

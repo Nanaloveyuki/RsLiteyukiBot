@@ -4,7 +4,7 @@ import { Card, CardBody, CardFooter } from '@heroui/card';
 import { Chip } from '@heroui/chip';
 import { Switch } from '@heroui/switch';
 import { Tooltip } from '@heroui/tooltip';
-import { MdDeleteForever, MdSettings } from 'react-icons/md';
+import { MdDeleteForever, MdInfoOutline, MdSettings } from 'react-icons/md';
 import clsx from 'clsx';
 import { useLocalStorage } from '@uidotdev/usehooks';
 import { useState } from 'react';
@@ -32,6 +32,7 @@ export interface PluginDisplayCardProps {
   onToggleStatus: () => Promise<void>;
   onUninstall: () => Promise<void>;
   onConfig?: () => void;
+  onDetails?: () => void;
   hasConfig?: boolean;
 }
 
@@ -40,6 +41,7 @@ const PluginDisplayCard: React.FC<PluginDisplayCardProps> = ({
   onToggleStatus,
   onUninstall,
   onConfig,
+  onDetails,
   hasConfig = false,
 }) => {
   const { name, version, author, description, status, icon } = data;
@@ -129,15 +131,38 @@ const PluginDisplayCard: React.FC<PluginDisplayCardProps> = ({
 
         {/* Version Badge */}
         <div>
-          <Chip
-            size='sm'
-            variant='flat'
-            color='primary'
-            className='h-5 text-xs font-semibold px-0.5'
-            classNames={{ content: 'px-1' }}
-          >
-            v{version}
-          </Chip>
+          <div className='flex flex-wrap gap-1.5'>
+            <Chip
+              size='sm'
+              variant='flat'
+              color='primary'
+              className='h-5 text-xs font-semibold px-0.5'
+              classNames={{ content: 'px-1' }}
+            >
+              v{version}
+            </Chip>
+            {data.runtimeKind && (
+              <Chip size='sm' variant='flat' color='default' className='h-5 text-xs px-0.5' classNames={{ content: 'px-1' }}>
+                {data.runtimeKind}
+              </Chip>
+            )}
+            {data.sourceKind && (
+              <Chip
+                size='sm'
+                variant='flat'
+                color={data.sourceKind === 'astrbot-compatible' ? 'secondary' : 'default'}
+                className='h-5 text-xs px-0.5'
+                classNames={{ content: 'px-1' }}
+              >
+                {data.sourceKind}
+              </Chip>
+            )}
+            {data.hasCapabilities?.any && (
+              <Chip size='sm' variant='flat' color='success' className='h-5 text-xs px-0.5' classNames={{ content: 'px-1' }}>
+                capabilities
+              </Chip>
+            )}
+          </div>
         </div>
       </CardBody>
 
@@ -158,6 +183,21 @@ const PluginDisplayCard: React.FC<PluginDisplayCardProps> = ({
         </Switch>
 
         <div className='flex-1' />
+
+        {onDetails && (
+          <Tooltip content='插件详情'>
+            <Button
+              isIconOnly
+              radius='full'
+              size='sm'
+              variant='light'
+              color='default'
+              onPress={onDetails}
+            >
+              <MdInfoOutline size={20} />
+            </Button>
+          </Tooltip>
+        )}
 
         {hasConfig && (
           <Tooltip content='插件配置'>

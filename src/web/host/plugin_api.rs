@@ -690,7 +690,7 @@ fn plugin_capabilities_payload(
     let snapshot = run_async_for_web_host(runtime_host.plugin_capability_snapshot(plugin_id))
         .map_err(|err| format!("failed to read plugin capability snapshot: {err}"))?
         .unwrap_or_else(|| empty_plugin_capability_snapshot(plugin_id, runtime_kind));
-    let support = build_plugin_capability_support(&snapshot, active);
+    let support = build_plugin_capability_support(service, &snapshot, plugin_id, active);
     Ok(PluginCapabilitiesPayload {
         plugin_id: plugin_id.to_string(),
         runtime_kind,
@@ -733,7 +733,7 @@ fn all_plugin_capabilities_payload(
             PluginCapabilitiesPayload {
                 plugin_id: plugin_id.clone(),
                 runtime_kind,
-                support: build_plugin_capability_support(&snapshot, active),
+                support: build_plugin_capability_support(service, &snapshot, plugin_id.as_str(), active),
                 snapshot,
             }
         })
@@ -758,16 +758,33 @@ fn empty_plugin_capability_snapshot(
 }
 
 fn build_plugin_capability_support(
+    service: &WebHostService,
     snapshot: &crate::PluginCapabilitySnapshot,
+    plugin_id: &str,
     plugin_active: bool,
 ) -> PluginCapabilitySupportSummary {
+    let cron_registered = !snapshot.cron_jobs.is_empty();
+    let cron_enabled = snapshot.cron_jobs.iter().any(|job| job.enabled);
+    let cron_executable = if plugin_active {
+        service
+            .runtime_host
+            .as_ref()
+            .and_then(|runtime_host| {
+                run_async_for_web_host(runtime_host.plugin_has_executable_cron_jobs(plugin_id)).ok()
+            })
+            .unwrap_or_else(|| {
+                snapshot
+                    .cron_jobs
+                    .iter()
+                    .any(crate::llm::cron_task::cron_job_is_host_executable)
+            })
+    } else {
+        false
+    };
     PluginCapabilitySupportSummary {
         tools: build_tool_capability_support(snapshot, plugin_active),
         web_apis: build_web_api_capability_support(snapshot, plugin_active),
-        cron_jobs: build_registration_only_capability_support(
-            !snapshot.cron_jobs.is_empty(),
-            plugin_active,
-        ),
+        cron_jobs: build_cron_capability_support(cron_registered, cron_enabled, cron_executable, plugin_active),
         tasks: build_registration_only_capability_support(
             !snapshot.tasks.is_empty(),
             plugin_active,
@@ -842,6 +859,30 @@ fn build_registration_only_capability_support(
     }
 }
 
+fn build_cron_capability_support(
+    registered: bool,
+    enabled: bool,
+    executable: bool,
+    plugin_active: bool,
+) -> PluginCapabilitySupportState {
+    let status = if !registered {
+        "unsupported"
+    } else if !plugin_active || !enabled {
+        "disabled"
+    } else if executable {
+        "active"
+    } else {
+        "registered_only"
+    };
+    PluginCapabilitySupportState {
+        registered,
+        executable,
+        persistent: executable,
+        active: registered && plugin_active && enabled,
+        status: status.to_string(),
+    }
+}
+
 fn plugin_runtime_state_payload(
     service: &WebHostService,
     plugin_id: &str,
@@ -872,7 +913,12 @@ fn plugin_runtime_state_payload(
             || !payload.snapshot.cron_jobs.is_empty()
             || !payload.snapshot.tasks.is_empty(),
         executable_bindings,
-        scheduler_status: "unsupported".to_string(),
+        scheduler_status: if !enabled && payload.support.cron_jobs.registered {
+            "disabled".to_string()
+        } else {
+            run_async_for_web_host(runtime_host.plugin_cron_scheduler_status(plugin_id))
+                .unwrap_or_else(|_| "unsupported".to_string())
+        },
         task_runtime_status: if payload.support.tasks.registered {
             "registered_only".to_string()
         } else {
@@ -915,7 +961,14 @@ fn plugin_diagnostics_payload(
             || !payload.snapshot.cron_jobs.is_empty()
             || !payload.snapshot.tasks.is_empty(),
         executable_bindings: build_runtime_binding_summary(&payload.support),
-        scheduler_status: "unsupported".to_string(),
+        scheduler_status: if !entry.loaded
+            && payload.support.cron_jobs.registered
+        {
+            "disabled".to_string()
+        } else {
+            run_async_for_web_host(runtime_host.plugin_cron_scheduler_status(plugin_id))
+                .unwrap_or_else(|_| "unsupported".to_string())
+        },
         last_web_api_dispatch: diagnostics.last_web_api_dispatch,
         last_tool_execution: diagnostics.last_tool_execution,
         last_cron_execution: diagnostics.last_cron_execution,
@@ -979,5 +1032,26 @@ fn http_reason_phrase(status_code: u16) -> &'static str {
         503 => "Service Unavailable",
         504 => "Gateway Timeout",
         _ => "OK",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cron_capability_support_marks_disabled_jobs_as_disabled() {
+        let support = build_cron_capability_support(true, false, false, true);
+        assert_eq!(support.status, "disabled");
+        assert!(!support.active);
+        assert!(!support.executable);
+    }
+
+    #[test]
+    fn cron_capability_support_marks_enabled_non_executable_jobs_as_registered_only() {
+        let support = build_cron_capability_support(true, true, false, true);
+        assert_eq!(support.status, "registered_only");
+        assert!(support.active);
+        assert!(!support.executable);
     }
 }

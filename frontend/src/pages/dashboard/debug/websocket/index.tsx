@@ -332,94 +332,6 @@ function detectProviderId (baseUrl: string) {
   return 'openai-compatible';
 }
 
-function reasoningOptionsForProvider (providerId: string, model: string) {
-  if (providerId !== 'openai') {
-    return [];
-  }
-
-  return model.trim().toLowerCase().startsWith('gpt-5')
-    ? ['minimal', 'low', 'medium', 'high', 'xhigh']
-    : [];
-}
-
-function supportsForProvider (
-  providerId: string,
-  baseUrl: string,
-  model: string
-) {
-  const reasoningOptions = reasoningOptionsForProvider(providerId, model);
-
-  switch (providerId) {
-    case 'openai':
-      return {
-        streaming: true,
-        temperature: true,
-        topP: true,
-        topK: false,
-        reasoningEffort: reasoningOptions.length > 0,
-        imageInput: true,
-        textFileInput: true,
-        binaryFileInput: false,
-      };
-    case 'anthropic':
-      return {
-        streaming: true,
-        temperature: true,
-        topP: true,
-        topK: true,
-        reasoningEffort: false,
-        imageInput: true,
-        textFileInput: true,
-        binaryFileInput: false,
-      };
-    case 'google-gemini':
-      return {
-        streaming: true,
-        temperature: true,
-        topP: true,
-        topK: true,
-        reasoningEffort: false,
-        imageInput: true,
-        textFileInput: true,
-        binaryFileInput: false,
-      };
-    case 'openrouter':
-      return {
-        streaming: true,
-        temperature: true,
-        topP: true,
-        topK: false,
-        reasoningEffort: false,
-        imageInput: true,
-        textFileInput: true,
-        binaryFileInput: false,
-      };
-    case 'kimi':
-    case 'qwen':
-      return {
-        streaming: true,
-        temperature: true,
-        topP: true,
-        topK: true,
-        reasoningEffort: false,
-        imageInput: false,
-        textFileInput: true,
-        binaryFileInput: false,
-      };
-    default:
-      return {
-        streaming: true,
-        temperature: true,
-        topP: true,
-        topK: !baseUrl.toLowerCase().includes('api.openai.com'),
-        reasoningEffort: reasoningOptions.length > 0,
-        imageInput: false,
-        textFileInput: true,
-        binaryFileInput: false,
-      };
-  }
-}
-
 function acceptedFileTypes (supports: typeof DEFAULT_SUPPORTS) {
   const accepted: string[] = [];
   if (supports.imageInput) {
@@ -683,12 +595,12 @@ export default function LlmChatPage () {
     return settings?.modelOptions ?? [];
   }, [providerCatalog, selectedProviderId, settings]);
   const reasoningOptions = useMemo(() => {
-    return reasoningOptionsForProvider(selectedProviderId, currentModel);
-  }, [currentModel, selectedProviderId]);
-  const supports = useMemo(
-    () => supportsForProvider(selectedProviderId, currentBaseUrl, currentModel),
-    [currentBaseUrl, currentModel, selectedProviderId]
-  );
+    return settings?.reasoningOptions ?? [];
+  }, [settings]);
+  const supports = useMemo(() => ({
+    ...DEFAULT_SUPPORTS,
+    ...(settings?.supports ?? {}),
+  }), [settings]);
   const chatEnabled = settings?.enabled;
   const chatReady = chatEnabled === true;
   const statusTone = settingsLoading && !settings
@@ -892,7 +804,7 @@ export default function LlmChatPage () {
     }
   };
 
-  const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+  const handlePaste = (event: React.ClipboardEvent<HTMLInputElement>) => {
     const files = Array.from(event.clipboardData.items)
       .map((item) => item.getAsFile())
       .filter((file): file is File => !!file);

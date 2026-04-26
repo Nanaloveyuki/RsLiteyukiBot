@@ -7,18 +7,21 @@ import { useDisclosure } from '@heroui/modal';
 
 import PageLoading from '@/components/page_loading';
 import PluginDisplayCard from '@/components/display_card/plugin_card';
-import PluginManager, { PluginItem } from '@/controllers/plugin_manager';
+import PluginManager, { type ExtensionPageItem, type PluginItem } from '@/controllers/plugin_manager';
 import useDialog from '@/hooks/use-dialog';
 import PluginConfigModal from '@/pages/dashboard/plugin_config_modal';
+import PluginRuntimeDetailModal from '@/pages/dashboard/plugin_runtime_detail_modal';
 
 export default function PluginPage () {
   const [plugins, setPlugins] = useState<PluginItem[]>([]);
+  const [extensionPages, setExtensionPages] = useState<ExtensionPageItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [pluginManagerNotFound, setPluginManagerNotFound] = useState(false);
   const dialog = useDialog();
 
   const { isOpen, onOpen, onOpenChange } = useDisclosure();
   const [currentPluginId, setCurrentPluginId] = useState<string>('');
+  const [detailPlugin, setDetailPlugin] = useState<PluginItem | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loadPlugins = async () => {
@@ -30,8 +33,10 @@ export default function PluginPage () {
       if (listResult.pluginManagerNotFound) {
         setPluginManagerNotFound(true);
         setPlugins([]);
+        setExtensionPages([]);
       } else {
         setPlugins(listResult.plugins);
+        setExtensionPages(listResult.extensionPages ?? []);
       }
     } catch (e: any) {
       toast.error(e.message);
@@ -167,6 +172,20 @@ export default function PluginPage () {
           onOpenChange={onOpenChange}
           pluginId={currentPluginId}
         />
+        <PluginRuntimeDetailModal
+          isOpen={!!detailPlugin}
+          onOpenChange={(open) => {
+            if (!open) {
+              setDetailPlugin(null);
+            }
+          }}
+          plugin={detailPlugin}
+          extensionPages={extensionPages}
+          onConfig={(plugin) => {
+            setDetailPlugin(null);
+            handleConfig(plugin);
+          }}
+        />
 
         <div className='flex mb-6 items-center gap-4'>
           <h1 className='text-2xl font-bold'>插件管理</h1>
@@ -219,6 +238,7 @@ export default function PluginPage () {
                     data={plugin}
                     onToggleStatus={() => handleToggle(plugin)}
                     onUninstall={() => handleUninstall(plugin)}
+                    onDetails={() => setDetailPlugin(plugin)}
                     onConfig={() => {
                       if (plugin.status !== 'active') {
                         toast.error('未启用插件，无法配置插件');
@@ -228,7 +248,7 @@ export default function PluginPage () {
                         toast.error('此插件没有配置哦');
                       }
                     }}
-                    hasConfig
+                    hasConfig={plugin.hasConfig}
                   />
                 ))}
               </div>

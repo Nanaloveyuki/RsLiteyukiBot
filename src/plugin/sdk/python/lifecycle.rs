@@ -824,6 +824,165 @@ pub(crate) fn execute_python_registered_tool(
     response
 }
 
+pub(crate) fn execute_python_registered_cron_job(
+    state: &Arc<Mutex<PythonRuntimeState>>,
+    plugin_id: &str,
+    job_id: &str,
+    payload: &Value,
+) -> Result<bool, PluginSdkError> {
+    let runtime_module = {
+        let lock = state
+            .lock()
+            .map_err(|_| PluginSdkError::Runtime("python runtime lock poisoned".to_string()))?;
+        let Some(plugin) = lock.plugins.get(plugin_id) else {
+            return Ok(false);
+        };
+        plugin.runtime_module.clone()
+    };
+
+    let payload = normalize_tool_arguments(payload)?;
+    let response = Python::with_gil(|py| -> Result<bool, PluginSdkError> {
+        let liteyuki = PyModule::import(py, "liteyuki").map_err(|err| {
+            PluginSdkError::Runtime(format!(
+                "python plugin '{}' cron runtime import failed: {}",
+                plugin_id, err
+            ))
+        })?;
+        let runtime_getter = liteyuki
+            .getattr("_get_astrbot_plugin_runtime")
+            .map_err(|err| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' cron runtime getter is unavailable: {}",
+                    plugin_id, err
+                ))
+            })?;
+        let runtime = runtime_getter
+            .call1((runtime_module.as_str(),))
+            .map_err(|err| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' cron runtime lookup failed: {}",
+                    plugin_id, err
+                ))
+            })?;
+        let runtime = runtime.downcast_into::<PyDict>().map_err(|err| {
+            PluginSdkError::Runtime(format!(
+                "python plugin '{}' cron runtime state shape is invalid: {}",
+                plugin_id, err
+            ))
+        })?;
+        let cron_jobs = runtime
+            .get_item("cron_jobs")
+            .map_err(|err| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' cron registry lookup failed: {}",
+                    plugin_id, err
+                ))
+            })?
+            .ok_or_else(|| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' cron registry is missing",
+                    plugin_id
+                ))
+            })?
+            .downcast_into::<PyList>()
+            .map_err(|err| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' cron registry is invalid: {}",
+                    plugin_id, err
+                ))
+            })?;
+
+        for item in cron_jobs.iter() {
+            let registered_job_id = item
+                .getattr("job_id")
+                .map_err(|err| {
+                    PluginSdkError::Runtime(format!(
+                        "python plugin '{}' cron job id lookup failed: {}",
+                        plugin_id, err
+                    ))
+                })?
+                .extract::<String>()
+                .map_err(|err| {
+                    PluginSdkError::Runtime(format!(
+                        "python plugin '{}' cron job id decode failed: {}",
+                        plugin_id, err
+                    ))
+                })?;
+            if registered_job_id.trim() != job_id.trim() {
+                continue;
+            }
+
+            let enabled = item
+                .getattr("enabled")
+                .ok()
+                .and_then(|value| value.extract::<bool>().ok())
+                .unwrap_or(true);
+            if !enabled {
+                return Err(PluginSdkError::Runtime(format!(
+                    "python plugin '{}' cron job '{}' is disabled",
+                    plugin_id, job_id
+                )));
+            }
+
+            let handler = item.getattr("handler").map_err(|err| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' cron handler lookup failed: {}",
+                    plugin_id, err
+                ))
+            })?;
+            if handler.is_none() {
+                return Ok(false);
+            }
+
+            let kwargs_object = json_to_pyobject(py, &payload).map_err(|err| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' cron payload serialization failed: {}",
+                    plugin_id, err
+                ))
+            })?;
+            let kwargs = kwargs_object.bind(py).downcast::<PyDict>().map_err(|err| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' cron payload must decode to a python dict: {}",
+                    plugin_id, err
+                ))
+            })?;
+            let result = if kwargs.is_empty() {
+                handler.call0()
+            } else {
+                handler.call((), Some(kwargs))
+            }
+            .map_err(|err| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' cron job '{}' invocation failed: {}",
+                    plugin_id, job_id, err
+                ))
+            })?;
+            let _ = await_python_result(py, result.unbind()).map_err(|err| {
+                PluginSdkError::Runtime(format!(
+                    "python plugin '{}' cron job '{}' await failed: {}",
+                    plugin_id, job_id, err
+                ))
+            })?;
+            return Ok(true);
+        }
+
+        Ok(false)
+    });
+
+    match &response {
+        Ok(true) => record_plugin_execution_success(state, plugin_id, PluginExecutionKind::Cron),
+        Err(err) => record_plugin_execution_error(
+            state,
+            plugin_id,
+            PluginExecutionKind::Cron,
+            err.to_string(),
+        ),
+        Ok(false) => {}
+    }
+
+    response
+}
+
 pub(crate) fn start_python_manifest_plugin(
     state: &Arc<Mutex<PythonRuntimeState>>,
     plugin_id: &str,
@@ -1020,6 +1179,7 @@ fn validate_python_entrypoint_callable(
 enum PluginExecutionKind {
     WebApi,
     Tool,
+    Cron,
 }
 
 fn normalize_tool_arguments(arguments: &Value) -> Result<Value, PluginSdkError> {
@@ -1098,6 +1258,7 @@ fn execution_record_mut(
     match kind {
         PluginExecutionKind::WebApi => &mut diagnostics.last_web_api_dispatch,
         PluginExecutionKind::Tool => &mut diagnostics.last_tool_execution,
+        PluginExecutionKind::Cron => &mut diagnostics.last_cron_execution,
     }
 }
 
