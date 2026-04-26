@@ -1,0 +1,21 @@
+{
+  "id": "builtin-hello-liteyuki",
+  "name": "plugin.hello_liteyuki.name",
+  "description": "plugin.hello_liteyuki.description",
+  "type": "application",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "hello_liteyuki",
+    "options": {
+      "event_handler": "liteyuki_handle_event"
+    }
+  },
+  "extra": {
+    "version": "0.1.0",
+    "repository": "https://github.com/Nanaloveyuki/RsLiteyukiBot"
+  },
+  "permissions": ["adapter.reply"],
+  "sdk": {
+    "api_version": "0.1"
+  }
+}

@@ -9,7 +9,7 @@ use liteyukibot_core::{
     AdapterConfig, AdapterEndpoint, AdapterManager, AdapterTransport, ChannelRegistry,
     LifecycleContext, Plugin, PluginAbiMethod, PluginContext, PluginHostBridge, PluginLoadError,
     PluginLoadState, PluginManager, PluginManifestLoader, PluginMetadata, PluginRuntimeKind,
-    PluginSdk, PluginType, RuntimeTarget, SessionRouter, SharedStore,
+    PluginSdk, PluginType, RuntimeTarget, SessionRouter, SharedStore, recent_buffered_logs,
 };
 use liteyukibot_core::{BotEvent, Logger, LoggerConfig};
 use liteyukibot_core::{RuntimeCapabilities, RuntimeFlavor};
@@ -18,7 +18,7 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, sleep, timeout};
 
 struct CountingPlugin {
     id: String,
@@ -1654,6 +1654,172 @@ async def liteecho(event: MessageEvent):
     assert!(
         updated_config.contains("hit: true"),
         "slash-prefixed command should trigger legacy on_startswith handler"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_manager_legacy_on_message_dispatches_all_messages() {
+    if !python_command_available() {
+        return;
+    }
+
+    let manager = PluginManager::new();
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("legacy_on_message");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+    let config_path = dir.path.join("legacy-on-message-config.yaml");
+    std::fs::write(&config_path, "plugin:\n  hit: false\n").expect("config file should be written");
+
+    std::fs::write(
+        plugin_dir.join("hello_liteyuki.py"),
+        r#"# -*- coding: utf-8 -*-
+from liteyuki.session.on import on_message
+from liteyuki.session.event import MessageEvent
+
+@on_message().handle()
+async def handle_message(event: MessageEvent):
+    event._sdk.config_set("plugin.hit", True)
+"#,
+    )
+    .expect("python module should be written");
+    let config_path_json = config_path.to_string_lossy().replace('\\', "/");
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        format!(
+            r#"{{
+  "id": "legacy-on-message",
+  "name": "Legacy On Message",
+  "type": "application",
+  "permissions": ["config.write"],
+  "runtime": {{
+    "kind": "python",
+    "entrypoint": "hello_liteyuki",
+    "options": {{
+      "event_handler": "liteyuki_handle_event",
+      "config_path": "{}"
+    }}
+  }}
+}}"#,
+            config_path_json
+        ),
+    )
+    .expect("manifest should be written");
+
+    let context = plugin_context();
+    let discovered = manager
+        .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+        .expect("manifest discovery should succeed");
+    assert_eq!(discovered, vec!["legacy-on-message".to_string()]);
+
+    manager
+        .load_plugins(discovered, context.clone())
+        .await
+        .expect("legacy on_message plugin should load");
+
+    context.sdk.dispatch_event(
+        &BotEvent::new(
+            100,
+            "runtime.lifecycle",
+            json!({
+                "phase": "loaded"
+            }),
+        ),
+        &context.logger,
+    );
+    let unchanged_config =
+        std::fs::read_to_string(&config_path).expect("config should stay readable");
+    assert!(
+        unchanged_config.contains("hit: false"),
+        "on_message handler should skip non-message runtime events"
+    );
+
+    context.sdk.dispatch_event(
+        &BotEvent::new(
+            101,
+            "adapter.inbound",
+            json!({
+                "_adapter_id": "missing-adapter",
+                "_adapter_protocol": "onebot.v11",
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": "20001",
+                "raw_message": "hello liteyuki"
+            }),
+        ),
+        &context.logger,
+    );
+
+    let updated_config =
+        std::fs::read_to_string(config_path).expect("updated config should stay readable");
+    assert!(
+        updated_config.contains("hit: true"),
+        "on_message handler should receive matching adapter messages"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_manager_loads_builtin_hello_liteyuki_python_plugin() {
+    if !python_command_available() {
+        return;
+    }
+
+    let manager = PluginManager::new();
+    let plugin_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("builtin_plugin");
+    let context = plugin_context();
+    let discovered = manager
+        .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+        .expect("builtin manifest discovery should succeed");
+    assert!(
+        discovered
+            .iter()
+            .any(|plugin_id| plugin_id == "builtin-hello-liteyuki"),
+        "builtin root discovery should include hello_liteyuki"
+    );
+
+    manager
+        .load_plugins(["builtin-hello-liteyuki".to_string()], context.clone())
+        .await
+        .expect("builtin hello_liteyuki plugin should load");
+
+    let loaded = manager.loaded_plugins();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].descriptor.metadata.id, "builtin-hello-liteyuki");
+    assert_eq!(loaded[0].load_plan.runtime_kind, PluginRuntimeKind::Python);
+    assert_eq!(loaded[0].load_plan.state, PluginLoadState::Ready);
+
+    context.sdk.dispatch_event(
+        &BotEvent::new(
+            102,
+            "adapter.inbound",
+            json!({
+                "_adapter_id": "missing-adapter",
+                "_adapter_protocol": "onebot.v11",
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": "20001",
+                "raw_message": "你好轻雪"
+            }),
+        ),
+        &context.logger,
+    );
+
+    let mut reply_attempted = false;
+    for _ in 0..10 {
+        reply_attempted = recent_buffered_logs(30).iter().any(|entry| {
+            entry.module == "plugin.python"
+                && entry.message.contains("builtin-hello-liteyuki")
+                && entry.message.contains("onebot reply send failed")
+        });
+        if reply_attempted {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        reply_attempted,
+        "hello_liteyuki should reach event.reply and attempt a onebot reply"
     );
 }
 

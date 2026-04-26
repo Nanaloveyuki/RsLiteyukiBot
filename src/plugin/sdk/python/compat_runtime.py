@@ -59,6 +59,16 @@ def _extract_message_text(payload):
     return ""
 
 
+def _is_message_payload(payload):
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("post_type", "") or "").lower() == "message":
+        return True
+    if str(payload.get("message_type", "") or "").strip():
+        return True
+    return any(key in payload for key in ("raw_message", "message", "text"))
+
+
 def _coerce_text_output(value):
     if value is None:
         return ""
@@ -474,9 +484,12 @@ async def _dispatch_legacy_handlers(event, sdk, module_globals):
     message_event = MessageEvent(event, sdk)
     for item in list(handlers):
         handler = item.get("handler")
+        kind = item.get("kind")
         prefixes = item.get("prefixes", [])
         rule = item.get("rule")
         if not callable(handler):
+            continue
+        if kind == "message" and not _is_message_payload(message_event.payload):
             continue
         if prefixes and not any(_legacy_startswith(message_event.raw_message, prefix) for prefix in prefixes):
             continue
@@ -529,6 +542,32 @@ class _OnStartswith:
 
 def on_startswith(prefixes, rule=None):
     return _OnStartswith(prefixes, rule=rule)
+
+
+class _OnMessage:
+    def __init__(self, rule=None):
+        self._rule = rule
+
+    def handle(self):
+        def decorator(func):
+            module_globals = getattr(func, "__globals__", {})
+            handlers = module_globals.setdefault("__liteyuki_legacy_handlers__", [])
+            handlers.append(
+                {
+                    "kind": "message",
+                    "prefixes": [],
+                    "rule": self._rule,
+                    "handler": func,
+                }
+            )
+            _ensure_legacy_dispatcher(module_globals)
+            return func
+
+        return decorator
+
+
+def on_message(rule=None):
+    return _OnMessage(rule=rule)
 
 
 def _legacy_startswith(raw_message, prefix):
@@ -2070,6 +2109,7 @@ def _install_compat_modules(sdk):
     liteyuki_root.PluginType = PluginType
     liteyuki_root.PluginMetadata = PluginMetadata
     liteyuki_root.MessageEvent = MessageEvent
+    liteyuki_root.on_message = on_message
     liteyuki_root.on_startswith = on_startswith
     liteyuki_root.is_su_rule = is_su_rule
     liteyuki_root._cleanup_astrbot_plugin_runtime = _cleanup_astrbot_plugin_runtime
@@ -2093,6 +2133,7 @@ def _install_compat_modules(sdk):
     liteyuki_session_on = _ensure_module("liteyuki.session.on")
     liteyuki_session_event = _ensure_module("liteyuki.session.event")
     liteyuki_session_rule = _ensure_module("liteyuki.session.rule")
+    liteyuki_session_on.on_message = on_message
     liteyuki_session_on.on_startswith = on_startswith
     liteyuki_session_event.MessageEvent = MessageEvent
     liteyuki_session_rule.is_su_rule = is_su_rule
