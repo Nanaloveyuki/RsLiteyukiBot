@@ -1,0 +1,13 @@
+services:
+  liteyuki-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: liteyukibot-web:local
+    ports:
+      - "14500:14500"
+    volumes:
+      - ./docker-data:/data
+    environment:
+      LY_RUNTIME_TARGET: docker-web
+    restart: unless-stopped

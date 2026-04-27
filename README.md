@@ -107,6 +107,107 @@ TUI(Terminal User Interface)
 cargo run
 ```
 
+## Docker 部署
+
+当前仓库提供的是仅 `Web` + `后端` 形式的 Image 文件.
+
+### 1. 构建镜像
+
+```bash
+docker build -t liteyukibot-web .
+```
+~~你可能需要花上五六分钟来编译~~
+
+### 2. 启动容器
+
+Linux / macOS:
+
+```bash
+docker run -d \
+  --name liteyukibot-web \
+  -p 14500:14500 \
+  -v "$(pwd)/docker-data:/data" \
+  --restart unless-stopped \
+  liteyukibot-web
+```
+
+PowerShell:
+
+```powershell
+docker run -d `
+  --name liteyukibot-web `
+  -p 14500:14500 `
+  -v "${PWD}/docker-data:/data" `
+  --restart unless-stopped `
+  liteyukibot-web
+```
+
+启动后可通过以下地址访问：
+
+- WebUI: `http://127.0.0.1:14500/`
+- 健康检查: `http://127.0.0.1:14500/api/health`
+
+### 3. 使用 docker compose
+
+仓库已附带 [`docker-compose.yml`](./docker-compose.yml)，可直接启动：
+
+```bash
+docker compose up -d --build
+```
+
+停止：
+
+```bash
+docker compose down
+```
+
+### 4. 数据目录说明
+
+容器内所有运行时数据默认写入挂载卷 `/data/.liteyuki/`。
+
+常用路径：
+
+- 主配置：`/data/.liteyuki/configs/config.yaml`
+- LLM 配置：`/data/.liteyuki/configs/llm-config.yaml`
+- WebUI 密码：`/data/.liteyuki/configs/password.json`
+- 插件目录：`/data/.liteyuki/plugins/`
+
+如果你已经有现成配置，可在启动前放到宿主机挂载目录中：
+
+- `./docker-data/.liteyuki/configs/config.yaml`
+- `./docker-data/.liteyuki/configs/llm-config.yaml`
+- `./docker-data/.liteyuki/plugins/`
+
+### 5. 容器默认行为
+
+- 只启动共享 WebHost
+- 默认运行目标为 `docker-web`
+- 默认对外暴露 `14500` 端口
+- 以非 root 用户运行
+- 镜像内保留 Python 运行时，便于当前 Python bridge / AstrBot 兼容层继续工作
+
+### 6. 常用维护命令
+
+查看日志：
+
+```bash
+docker logs -f liteyukibot-web
+```
+
+重启容器：
+
+```bash
+docker restart liteyukibot-web
+```
+
+删除容器：
+
+```bash
+docker rm -f liteyukibot-web
+```
+
+如果你的 OneBot / WebSocket / SSE 适配器需要额外对外端口，请按实际配置追加 `-p` 或在 `docker-compose.yml` 中补充 `ports` 映射。
+
 ## 鸣谢
 
 [@Snowykami](https://sfkm.me): Liteyuki 文档站支持和授权

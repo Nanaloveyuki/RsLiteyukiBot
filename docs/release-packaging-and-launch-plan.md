@@ -83,6 +83,7 @@ Already present:
 - Tauri injects `window.__LITEYUKI_RUNTIME_API_BASE__` and `window.__LITEYUKI_LOCAL_TOKEN__` into the frontend.
 - WebHost can serve `frontend/dist` or redirect non-API routes to the Vite dev server through `LY_WEB_DEV_SERVER`.
 - A Docker image workflow exists at `.github/workflows/build-image.yml`.
+- A root `Dockerfile` and `docker-compose.yml` now exist for the Web-only container runtime.
 
 Missing or incomplete:
 
@@ -91,7 +92,6 @@ Missing or incomplete:
 - `CliWeb` exists as a target enum but is not implemented as a shared TUI + Web launcher.
 - `config.yaml` does not currently own a launch-mode field.
 - Tauri bundling is not enabled because `src-tauri/tauri.conf.json` has `"bundle": { "active": false }`.
-- No root `Dockerfile` was found in the current worktree, so the existing Docker workflow has no complete image contract.
 - Release workflows for Windows, macOS, GNU/Linux, AppImage, and portable CLI archives are not present yet.
 
 ## Launch Mode Contract
@@ -235,7 +235,6 @@ Portable archive examples:
 
 Work items:
 
-- add a root `Dockerfile`
 - build frontend assets in the image or copy prebuilt assets from CI
 - compile the Rust runtime in a builder stage
 - run the final image with a minimal runtime layer
@@ -354,4 +353,3 @@ The release plan should be considered implemented only when all of these are tru
 4. Enable Tauri bundle output and test native packaging locally.
 5. Add root Dockerfile and make Docker default to `docker-web`.
 6. Add CI release artifacts after the local commands are stable.
-
