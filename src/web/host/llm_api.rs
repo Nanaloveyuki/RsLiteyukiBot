@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 
 use crate::app_config::{LlmManagedModelConfig, LlmManagedProviderConfig};
 use crate::config_edit::LlmConfigPatch;
-use crate::config_paths::resolve_default_llm_config_path;
+use crate::config_paths::{resolve_default_app_config_path, resolve_default_llm_config_path};
 use crate::llm::client::extract_output_text;
 use crate::llm::service::{
     LlmProviderApiFamily, current_active_prompt_profile, current_llm_runtime_config,
@@ -72,6 +72,18 @@ pub(super) fn route_llm_api(
         }
 
         let body = match save_llm_manager_state(request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/LLM/UpdateEnabled" {
+        if let Some(response) = reject_non_post_method(method, "LLM/UpdateEnabled", is_head) {
+            return Some(response);
+        }
+
+        let body = match update_llm_enabled_state(request) {
             Ok(payload) => napcat_ok(&payload),
             Err(err) => napcat_err(-1, err.as_str()),
         };
@@ -331,6 +343,22 @@ fn save_llm_manager_state(request: &[u8]) -> Result<Value, String> {
     ensure_llm_config_file(path.as_path())?;
     crate::config_edit::persist_llm_config(path.as_path(), &patch)?;
     llm_manager_state_payload()
+}
+
+fn update_llm_enabled_state(request: &[u8]) -> Result<Value, String> {
+    let enabled = parse_json_body(request)
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "enabled flag is required".to_string())?;
+    let path = resolve_llm_enabled_write_path_for_web()?;
+    crate::config_edit::persist_llm_config(
+        path.as_path(),
+        &LlmConfigPatch {
+            enabled: Some(enabled),
+            ..Default::default()
+        },
+    )?;
+    llm_settings_payload()
 }
 
 fn llm_fetch_models_payload(request: &[u8]) -> Result<Value, String> {
@@ -2046,6 +2074,18 @@ fn resolve_llm_config_write_path_for_web() -> std::path::PathBuf {
     resolve_llm_config_path().unwrap_or_else(resolve_default_llm_config_path)
 }
 
+fn resolve_llm_enabled_write_path_for_web() -> Result<std::path::PathBuf, String> {
+    if let Some(path) = resolve_llm_config_path() {
+        return Ok(path);
+    }
+
+    crate::app_config::ensure_default_config_files().map_err(|err| err.to_string())?;
+    Ok(
+        crate::app_config::resolve_app_config_path()
+            .unwrap_or_else(resolve_default_app_config_path),
+    )
+}
+
 fn load_managed_providers_from_doc(
     doc: &crate::app_config::AppConfigDoc,
     runtime: &crate::app_config::LlmRuntimeConfig,
@@ -3720,5 +3760,82 @@ mod tests {
         let text = String::from_utf8(response).expect("response should be utf8");
         assert!(text.contains("LLM/SaveManagerState only accepts POST"));
         assert!(reject_non_post_method("POST", "LLM/SaveManagerState", false).is_none());
+    }
+
+    #[test]
+    fn resolve_llm_enabled_write_path_uses_active_app_config_without_overlay() {
+        let root = std::env::temp_dir().join(format!(
+            "rsliteyukibot-llm-enabled-{}",
+            std::process::id()
+        ));
+        let config_dir = root.join(".liteyuki").join("configs");
+        fs::create_dir_all(&config_dir).expect("config dir should be created");
+
+        let userprofile_guard = EnvVarGuard::set("USERPROFILE", &root);
+        let home_guard = EnvVarGuard::remove("HOME");
+        let llm_guard = EnvVarGuard::remove("LY_LLM_CONFIG_PATH");
+        let cwd_guard = CurrentDirGuard::set(&root);
+
+        let path =
+            resolve_llm_enabled_write_path_for_web().expect("app config fallback should resolve");
+
+        assert_eq!(path, config_dir.join("config.yaml"));
+        assert!(!config_dir.join("llm-config.yaml").exists());
+
+        drop(llm_guard);
+        drop(home_guard);
+        drop(userprofile_guard);
+        drop(cwd_guard);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    struct CurrentDirGuard {
+        previous: std::path::PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::current_dir().expect("current dir should resolve");
+            std::env::set_current_dir(path).expect("current dir should switch");
+            Self { previous }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous);
+        }
     }
 }

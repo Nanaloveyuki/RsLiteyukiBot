@@ -8,7 +8,6 @@ import { Controller, useForm } from 'react-hook-form';
 import toast from 'react-hot-toast';
 
 import SaveButtons from '@/components/button/save_buttons';
-import GUIDManager from '@/components/guid_manager';
 import PageLoading from '@/components/page_loading';
 
 import QQManager from '@/controllers/qq_manager';
@@ -216,14 +215,6 @@ const LoginConfigCard = () => {
         <div className='mt-2 text-xs text-default-500'>
           重启进程将关闭当前 Worker 进程，等待 3 秒后启动新进程
         </div>
-      </div>
-      <Divider className='mt-6' />
-      <div className='flex-shrink-0 w-full mt-4'>
-        <div className='mb-3 text-sm text-default-600'>设备 GUID 管理</div>
-        <div className='text-xs text-default-400 mb-3'>
-          GUID 是设备登录唯一识别码，存储在 Registry20 文件中。修改后需重启生效。
-        </div>
-        <GUIDManager showRestart={false} />
       </div>
     </>
   );

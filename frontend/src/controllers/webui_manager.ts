@@ -328,6 +328,21 @@ export default class WebUIManager {
     return data.data;
   }
 
+  public static async getWebUIAppearance () {
+    const { data } = await serverRequest.get<ServerResponse<WebUIAppearanceState>>(
+      '/WebUIConfig/GetAppearance'
+    );
+    return data.data;
+  }
+
+  public static async updateWebUIAppearance (appearance: WebUIAppearanceState) {
+    const { data } = await serverRequest.post<ServerResponse<WebUIAppearanceState>>(
+      '/WebUIConfig/UpdateAppearance',
+      appearance
+    );
+    return data.data;
+  }
+
   // 获取是否禁用WebUI
   public static async getDisableWebUI () {
     const { data } = await serverRequest.get<ServerResponse<boolean>>(
@@ -356,6 +371,21 @@ export default class WebUIManager {
     const { data } = await serverRequest.post<ServerResponse<DesktopSettings>>(
       '/Desktop/UpdateSettings',
       settings
+    );
+    return data.data;
+  }
+
+  public static async getActiveAppConfig () {
+    const { data } = await serverRequest.get<ServerResponse<ActiveAppConfigState>>(
+      '/AppConfig/GetActive'
+    );
+    return data.data;
+  }
+
+  public static async replaceActiveAppConfig (content: string) {
+    const { data } = await serverRequest.post<ServerResponse<ActiveAppConfigState>>(
+      '/AppConfig/ReplaceActive',
+      { content }
     );
     return data.data;
   }
@@ -393,37 +423,6 @@ export default class WebUIManager {
   public static async deleteSSLCert () {
     const { data } = await serverRequest.post<ServerResponse<{ message: string; }>>(
       '/WebUIConfig/DeleteSSLCert'
-    );
-    return data.data;
-  }
-
-  // Passkey相关方法
-  public static async generatePasskeyRegistrationOptions () {
-    const { data } = await serverRequest.post<ServerResponse<any>>(
-      '/auth/passkey/generate-registration-options'
-    );
-    return data.data;
-  }
-
-  public static async verifyPasskeyRegistration (response: any) {
-    const { data } = await serverRequest.post<ServerResponse<any>>(
-      '/auth/passkey/verify-registration',
-      { response }
-    );
-    return data.data;
-  }
-
-  public static async generatePasskeyAuthenticationOptions () {
-    const { data } = await serverRequest.post<ServerResponse<any>>(
-      '/auth/passkey/generate-authentication-options'
-    );
-    return data.data;
-  }
-
-  public static async verifyPasskeyAuthentication (response: any) {
-    const { data } = await serverRequest.post<ServerResponse<any>>(
-      '/auth/passkey/verify-authentication',
-      { response }
     );
     return data.data;
   }

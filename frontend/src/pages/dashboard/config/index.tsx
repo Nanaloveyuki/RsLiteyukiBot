@@ -8,15 +8,25 @@ import key from '@/const/key';
 
 import ChangePasswordCard from './change_password';
 import LoginConfigCard from './login';
-import OneBotConfigCard from './onebot';
 import ServerConfigCard from './server';
 import SSLConfigCard from './ssl';
 import ThemeConfigCard from './theme';
 import WebUIConfigCard from './webui';
 import BackupConfigCard from './backup';
-import BypassConfigCard from './bypass';
 import CoreConfigCard from './core';
 import DesktopConfigCard from './desktop';
+
+const VALID_TABS = new Set([
+  'server',
+  'ssl',
+  'webui',
+  'login',
+  'token',
+  'theme',
+  'backup',
+  'core',
+  'desktop',
+]);
 
 export interface ConfigPageProps {
   children?: React.ReactNode;
@@ -53,9 +63,10 @@ const ConfigPageItem: React.FC<ConfigPageProps> = ({
 export default function ConfigPage () {
   const navigate = useNavigate();
   const search = useSearchParams({
-    tab: 'onebot',
+    tab: 'server',
   })[0];
-  const tab = search.get('tab') ?? 'onebot';
+  const tab = search.get('tab') ?? 'server';
+  const activeTab = VALID_TABS.has(tab) ? tab : 'server';
 
   return (
     <section className='w-full max-w-[1200px] mx-auto py-4 md:py-8 px-2 md:px-6 relative'>
@@ -64,7 +75,7 @@ export default function ConfigPage () {
         aria-label='config tab'
         fullWidth={false}
         className='w-full'
-        selectedKey={tab}
+        selectedKey={activeTab}
         onSelectionChange={(key) => {
           navigate(`/config?tab=${key}`);
         }}
@@ -77,11 +88,6 @@ export default function ConfigPage () {
           panel: 'w-full relative p-0',
         }}
       >
-        <Tab title='OneBot配置' key='onebot'>
-          <ConfigPageItem>
-            <OneBotConfigCard />
-          </ConfigPageItem>
-        </Tab>
         <Tab title='服务器配置' key='server'>
           <ConfigPageItem>
             <ServerConfigCard />
@@ -126,11 +132,6 @@ export default function ConfigPage () {
         <Tab title='桌面配置' key='desktop'>
           <ConfigPageItem>
             <DesktopConfigCard />
-          </ConfigPageItem>
-        </Tab>
-        <Tab title='反检测' key='bypass'>
-          <ConfigPageItem>
-            <BypassConfigCard />
           </ConfigPageItem>
         </Tab>
       </Tabs>

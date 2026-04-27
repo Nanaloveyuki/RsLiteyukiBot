@@ -9,6 +9,25 @@ pub(super) fn route_webui_config_api(
     is_head: bool,
     peer_ip: IpAddr,
 ) -> Option<Vec<u8>> {
+    if api_path == "/AppConfig/GetActive" {
+        let body = match active_app_config_payload() {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/AppConfig/ReplaceActive" {
+        if let Some(response) = reject_non_post_method(method, "AppConfig/ReplaceActive", is_head) {
+            return Some(response);
+        }
+        let body = match replace_active_app_config(request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
     if api_path == "/OB11Config/GetConfig" {
         let config = load_onebot_config();
         let body = napcat_ok(&config);
@@ -73,16 +92,45 @@ pub(super) fn route_webui_config_api(
 
     if api_path == "/NapCatConfig/SetConfig" || api_path == "/NapCatConfig/SetUinConfig" {
         let body = parse_json_body(request);
-        if let Ok(config) = serde_json::from_value::<NapCatConfig>(body) {
-            let _ = save_napcat_config(api_path == "/NapCatConfig/SetUinConfig", &config);
-        }
-        let body = napcat_ok(&serde_json::Value::Null);
+        let use_uin_config = api_path == "/NapCatConfig/SetUinConfig";
+        let current = load_napcat_config(use_uin_config);
+        let current_value = serde_json::to_value(&current)
+            .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
+        let merged_value = merge_json_objects(current_value, body);
+        let body = match serde_json::from_value::<NapCatConfig>(merged_value) {
+            Ok(config) => match save_napcat_config(use_uin_config, &config) {
+                Ok(()) => napcat_ok(&serde_json::Value::Null),
+                Err(err) => napcat_err(-1, err.as_str()),
+            },
+            Err(err) => napcat_err(-1, format!("invalid NapCat config payload: {err}").as_str()),
+        };
         return Some(napcat_response(body, is_head));
     }
 
     if api_path == "/WebUIConfig/GetConfig" {
         let config = load_webui_server_config(service.bind_addr.port());
         let body = napcat_ok(&config);
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/WebUIConfig/GetAppearance" {
+        let body = napcat_ok(&load_webui_appearance_config());
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/WebUIConfig/UpdateAppearance" {
+        if let Some(response) =
+            reject_non_post_method(method, "WebUIConfig/UpdateAppearance", is_head)
+        {
+            return Some(response);
+        }
+        let body = match parse_webui_appearance_update(&load_webui_appearance_config(), request) {
+            Ok(next) => match save_webui_appearance_config(&next) {
+                Ok(()) => napcat_ok(&next),
+                Err(err) => napcat_err(-1, err.as_str()),
+            },
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
         return Some(napcat_response(body, is_head));
     }
 
@@ -243,4 +291,244 @@ pub(super) fn route_webui_config_api(
     let _ = method;
     let _ = raw_path;
     None
+}
+
+fn reject_non_post_method(method: &str, route_name: &str, is_head: bool) -> Option<Vec<u8>> {
+    if method.eq_ignore_ascii_case("POST") {
+        return None;
+    }
+
+    let body = napcat_err(-1, format!("{route_name} only accepts POST").as_str());
+    Some(napcat_response(body, is_head))
+}
+
+fn parse_webui_appearance_update(
+    current: &WebUiAppearanceConfigDoc,
+    request: &[u8],
+) -> Result<WebUiAppearanceConfigDoc, String> {
+    let body = parse_json_object_body(request, "WebUIConfig/UpdateAppearance")?;
+    let mut next = current.clone();
+
+    if let Some(background_image) = body.get("backgroundImage").and_then(Value::as_str) {
+        next.background_image = normalize_webui_data_url(background_image).unwrap_or_default();
+    }
+
+    if let Some(custom_icons) = body.get("customIcons").and_then(Value::as_object) {
+        next.custom_icons = custom_icons
+            .iter()
+            .filter_map(|(key, value)| {
+                value
+                    .as_str()
+                    .and_then(normalize_webui_data_url)
+                    .map(|icon| (key.to_string(), icon))
+            })
+            .collect();
+    }
+
+    Ok(next)
+}
+
+fn parse_json_object_body(
+    request: &[u8],
+    route_name: &str,
+) -> Result<serde_json::Map<String, Value>, String> {
+    let body = serde_json::from_slice::<Value>(extract_body(request))
+        .map_err(|err| format!("invalid {route_name} payload: {err}"))?;
+    body.as_object()
+        .cloned()
+        .ok_or_else(|| format!("{route_name} payload must be a JSON object"))
+}
+
+fn normalize_webui_data_url(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if value.starts_with("data:image/") {
+        return Some(value.to_string());
+    }
+
+    if value.starts_with("http://") || value.starts_with("https://") || value.starts_with('/') {
+        return None;
+    }
+
+    None
+}
+
+fn active_app_config_path() -> Result<PathBuf, String> {
+    crate::app_config::ensure_default_config_files().map_err(|err| err.to_string())?;
+    Ok(
+        crate::app_config::resolve_app_config_path()
+            .unwrap_or_else(crate::config_paths::resolve_default_app_config_path),
+    )
+}
+
+fn validate_active_app_config_content(path: &Path, content: &str) -> Result<(), String> {
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    let doc = match ext.as_deref() {
+        Some("yaml") | Some("yml") => serde_yaml::from_str::<crate::app_config::AppConfigDoc>(content)
+            .map_err(|err| format!("invalid YAML config: {err}"))?,
+        Some("toml") => toml::from_str::<crate::app_config::AppConfigDoc>(content)
+            .map_err(|err| format!("invalid TOML config: {err}"))?,
+        _ => {
+            return Err(format!(
+                "unsupported config extension for {}",
+                path.display()
+            ));
+        }
+    };
+
+    if !has_known_app_config_sections(&doc) {
+        return Err("config does not contain any recognized top-level settings".to_string());
+    }
+
+    let warnings = crate::app_config::validate_app_config(&doc);
+    if !warnings.is_empty() {
+        return Err(format!("config validation failed: {}", warnings.join("; ")));
+    }
+
+    Ok(())
+}
+
+fn has_known_app_config_sections(doc: &crate::app_config::AppConfigDoc) -> bool {
+    doc.rust.is_some()
+        || doc.runtime.is_some()
+        || doc.log.is_some()
+        || doc.adapters.is_some()
+        || doc.connect.is_some()
+        || doc.tui.is_some()
+        || doc.i18n.is_some()
+        || doc.llm.is_some()
+        || doc.commands.is_some()
+        || doc.plugins.is_some()
+        || doc.desktop.is_some()
+        || doc.onebot_v11.is_some()
+}
+
+fn active_app_config_payload() -> Result<Value, String> {
+    let path = active_app_config_path()?;
+    let content = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read active config {}: {err}", path.display()))?;
+    Ok(serde_json::json!({
+        "configPath": path.display().to_string(),
+        "content": content,
+    }))
+}
+
+fn replace_active_app_config(request: &[u8]) -> Result<Value, String> {
+    let body = parse_json_object_body(request, "AppConfig/ReplaceActive")?;
+    let content = body
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "config content is required".to_string())?;
+    let path = active_app_config_path()?;
+    validate_active_app_config_content(path.as_path(), content)?;
+    crate::config_edit::write_text_file_atomically(&path, content)
+        .map_err(|err| format!("failed to write active config {}: {err}", path.display()))?;
+    active_app_config_payload()
+}
+
+fn merge_json_objects(base: Value, patch: Value) -> Value {
+    match (base, patch) {
+        (Value::Object(mut base_map), Value::Object(patch_map)) => {
+            for (key, value) in patch_map {
+                let next = match base_map.remove(&key) {
+                    Some(existing) => merge_json_objects(existing, value),
+                    None => value,
+                };
+                base_map.insert(key, next);
+            }
+            Value::Object(base_map)
+        }
+        (_, patch_value) => patch_value,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_json_objects_preserves_unspecified_fields() {
+        let base = serde_json::json!({
+            "fileLog": true,
+            "bypass": {
+                "hook": true,
+                "window": false
+            }
+        });
+        let patch = serde_json::json!({
+            "bypass": {
+                "window": true
+            }
+        });
+
+        let merged = merge_json_objects(base, patch);
+
+        assert_eq!(merged["fileLog"], Value::Bool(true));
+        assert_eq!(merged["bypass"]["hook"], Value::Bool(true));
+        assert_eq!(merged["bypass"]["window"], Value::Bool(true));
+    }
+
+    #[test]
+    fn parse_webui_appearance_update_keeps_only_image_data_urls() {
+        let current = WebUiAppearanceConfigDoc {
+            background_image: "data:image/png;base64,old".to_string(),
+            custom_icons: HashMap::from([
+                ("dashboard".to_string(), "data:image/png;base64,icon".to_string()),
+            ]),
+        };
+        let request = b"POST /api/WebUIConfig/UpdateAppearance HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\r\n{\"backgroundImage\":\"\",\"customIcons\":{\"dashboard\":\"data:image/png;base64,new\",\"tools\":\"/assets/icon.png\"}}";
+
+        let next =
+            parse_webui_appearance_update(&current, request).expect("payload should parse");
+
+        assert!(next.background_image.is_empty());
+        assert_eq!(
+            next.custom_icons.get("dashboard").map(String::as_str),
+            Some("data:image/png;base64,new")
+        );
+        assert!(!next.custom_icons.contains_key("tools"));
+    }
+
+    #[test]
+    fn validate_active_app_config_content_rejects_invalid_yaml() {
+        let path = PathBuf::from("config.yaml");
+        let err = validate_active_app_config_content(path.as_path(), "rust:\n  runtime: [")
+            .expect_err("invalid yaml should be rejected");
+        assert!(err.contains("invalid YAML config"));
+    }
+
+    #[test]
+    fn validate_active_app_config_content_rejects_unknown_only_config() {
+        let path = PathBuf::from("config.yaml");
+        let err = validate_active_app_config_content(path.as_path(), "unknown:\n  value: true\n")
+            .expect_err("unknown-only config should be rejected");
+        assert!(err.contains("recognized top-level settings"));
+    }
+
+    #[test]
+    fn parse_webui_appearance_update_rejects_invalid_json() {
+        let current = WebUiAppearanceConfigDoc::default();
+        let request = b"POST /api/WebUIConfig/UpdateAppearance HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\r\n{\"backgroundImage\":";
+
+        let err = parse_webui_appearance_update(&current, request)
+            .expect_err("invalid payload should be rejected");
+
+        assert!(err.contains("invalid WebUIConfig/UpdateAppearance payload"));
+    }
+
+    #[test]
+    fn reject_non_post_method_returns_method_error_response() {
+        let response =
+            reject_non_post_method("GET", "AppConfig/ReplaceActive", false).expect("response");
+        let text = String::from_utf8(response).expect("response should be utf8");
+        assert!(text.contains("AppConfig/ReplaceActive only accepts POST"));
+        assert!(reject_non_post_method("POST", "AppConfig/ReplaceActive", false).is_none());
+    }
 }

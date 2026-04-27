@@ -6,12 +6,14 @@ import SaveButtons from '@/components/button/save_buttons';
 import PageLoading from '@/components/page_loading';
 import SwitchCard from '@/components/switch_card';
 
+import LlmManager from '@/controllers/llm_manager';
 import QQManager from '@/controllers/qq_manager';
 
 interface CoreFormData {
   fileLog: boolean;
   consoleLog: boolean;
   autoTimeSync: boolean;
+  llmEnabled: boolean;
 }
 
 const CoreConfigCard = () => {
@@ -26,10 +28,14 @@ const CoreConfigCard = () => {
   const loadConfig = async (showTip = false) => {
     try {
       setLoading(true);
-      const config = await QQManager.getNapCatUinConfig();
+      const [config, llmSettings] = await Promise.all([
+        QQManager.getNapCatUinConfig(),
+        LlmManager.getSettings(),
+      ]);
       setValue('fileLog', config.fileLog ?? false);
       setValue('consoleLog', config.consoleLog ?? true);
       setValue('autoTimeSync', config.autoTimeSync ?? true);
+      setValue('llmEnabled', llmSettings.enabled ?? false);
       if (showTip) toast.success('刷新成功');
     } catch (error) {
       const msg = (error as Error).message;
@@ -41,8 +47,17 @@ const CoreConfigCard = () => {
 
   const onSubmit = handleSubmit(async (data) => {
     try {
-      await QQManager.setNapCatUinConfig(data);
-      toast.success('保存成功，重启后生效');
+      await QQManager.setNapCatUinConfig({
+        fileLog: data.fileLog,
+        consoleLog: data.consoleLog,
+        autoTimeSync: data.autoTimeSync,
+      });
+      try {
+        await LlmManager.updateEnabled(data.llmEnabled);
+      } catch (llmError) {
+        throw new Error(`NapCat 配置已保存，但 LLM 开关保存失败: ${(llmError as Error).message}`);
+      }
+      toast.success('保存成功');
     } catch (error) {
       const msg = (error as Error).message;
       toast.error(`保存失败: ${msg}`);
@@ -69,10 +84,21 @@ const CoreConfigCard = () => {
       <div className='flex flex-col gap-1 mb-2'>
         <h3 className='text-lg font-semibold text-default-700'>Liteyuki 核心配置</h3>
         <p className='text-sm text-default-500'>
-          控制 Liteyuki 框架底层的核心行为设定，修改后需重启生效。
+          控制 Liteyuki 核心能力，以及当前 NapCat 运行实例的基础行为。
         </p>
       </div>
       <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3'>
+        <Controller
+          control={control}
+          name='llmEnabled'
+          render={({ field }) => (
+            <SwitchCard
+              {...field}
+              label='启用模型能力'
+              description='控制 LLM 对话与能力面板是否可用'
+            />
+          )}
+        />
         <Controller
           control={control}
           name='autoTimeSync'

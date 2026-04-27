@@ -1,8 +1,12 @@
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 use liteyukibot_core::{LogLevel, emit_console_log};
 
 use crate::app_config::{LlmManagedModelConfig, LlmManagedProviderConfig};
+
+static ATOMIC_WRITE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 pub fn persist_onebot_v11_whitelist(path: &Path, entries: &[String]) -> Result<(), String> {
     let content = std::fs::read_to_string(path)
@@ -202,13 +206,64 @@ pub fn persist_llm_config(path: &Path, patch: &LlmConfigPatch) -> Result<(), Str
     Ok(())
 }
 
+pub fn write_text_file_atomically(path: &Path, content: &str) -> Result<(), String> {
+    let _lock = ATOMIC_WRITE_LOCK
+        .lock()
+        .map_err(|_| format!("atomic write lock poisoned for {}", path.display()))?;
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create config directory {}: {err}", parent.display()))?;
+    }
+
+    let temp_path = atomic_write_temp_path(path);
+    let backup_path = atomic_write_backup_path(path);
+    let mut file = std::fs::File::create(&temp_path)
+        .map_err(|err| format!("failed to create temp file {}: {err}", temp_path.display()))?;
+    file.write_all(content.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|err| {
+            let _ = std::fs::remove_file(&temp_path);
+            format!("failed to flush temp file {}: {err}", temp_path.display())
+        })?;
+    drop(file);
+
+    if backup_path.exists() {
+        let _ = std::fs::remove_file(&backup_path);
+    }
+    if path.exists() {
+        std::fs::rename(path, &backup_path).map_err(|err| {
+            let _ = std::fs::remove_file(&temp_path);
+            format!(
+                "failed to stage existing config {} for replacement: {err}",
+                path.display()
+            )
+        })?;
+    }
+    if let Err(err) = std::fs::rename(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        if backup_path.exists() {
+            let _ = std::fs::rename(&backup_path, path);
+        }
+        return Err(format!(
+            "failed to replace config {} with staged file: {err}",
+            path.display()
+        ));
+    }
+    if backup_path.exists() {
+        let _ = std::fs::remove_file(&backup_path);
+    }
+    Ok(())
+}
+
 fn persist_rendered_config(
     config_kind: &str,
     path: &Path,
     detail: &str,
     updated: String,
 ) -> Result<(), String> {
-    match std::fs::write(path, updated) {
+    match write_text_file_atomically(path, &updated) {
         Ok(()) => {
             emit_console_log(
                 LogLevel::Info,
@@ -234,6 +289,22 @@ fn log_config_persist_failure(config_kind: &str, path: &Path, detail: &str, err:
             path.display()
         ),
     );
+}
+
+fn atomic_write_temp_path(path: &Path) -> PathBuf {
+    atomic_write_sidecar_path(path, "tmp")
+}
+
+fn atomic_write_backup_path(path: &Path) -> PathBuf {
+    atomic_write_sidecar_path(path, "bak")
+}
+
+fn atomic_write_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("config");
+    path.with_file_name(format!("{file_name}.{suffix}"))
 }
 
 fn describe_llm_patch(patch: &LlmConfigPatch) -> String {
@@ -1576,6 +1647,21 @@ mod tests {
         };
         let updated = update_yaml_llm_document(source, &patch);
         assert!(updated.contains("provider_urls: []"));
+    }
+
+    #[test]
+    fn update_yaml_llm_enabled_only_preserves_existing_provider_fields() {
+        let source = "llm:\n  enabled: false\n  provider: 'openai'\n  model: 'gpt-5-mini'\n";
+        let patch = LlmConfigPatch {
+            enabled: Some(true),
+            ..Default::default()
+        };
+
+        let updated = update_yaml_llm_document(source, &patch);
+
+        assert!(updated.contains("enabled: true"));
+        assert!(updated.contains("provider: 'openai'"));
+        assert!(updated.contains("model: 'gpt-5-mini'"));
     }
 
     #[test]

@@ -22,6 +22,8 @@ import { siteConfig } from '@/config/site';
 import QQManager from '@/controllers/qq_manager';
 import ProcessManager from '@/controllers/process_manager';
 import { waitForBackendReady } from '@/utils/process_utils';
+import { applyWebUiAppearanceToStorage } from '@/utils/webui_appearance';
+import WebUIManager from '@/controllers/webui_manager';
 
 const menus: MenuItem[] = siteConfig.navItems;
 
@@ -49,7 +51,8 @@ const Layout: React.FC<{ children: React.ReactNode; }> = ({ children }) => {
   const location = useLocation();
   const contentRef = useRef<HTMLDivElement>(null);
   const [openSideBar, setOpenSideBar] = useLocalStorage(key.sideBarOpen, true);
-  const [b64img] = useLocalStorage(key.backgroundImage, '');
+  const [b64img, setB64img] = useLocalStorage(key.backgroundImage, '');
+  const [, setCustomIcons] = useLocalStorage<Record<string, string>>(key.customIcons, {});
   const navigate = useNavigate();
   const { isAuth, revokeAuth } = useAuth();
   const dialog = useDialog();
@@ -118,6 +121,21 @@ const Layout: React.FC<{ children: React.ReactNode; }> = ({ children }) => {
       behavior: 'smooth',
     });
   }, [location.pathname]);
+
+  useEffect(() => {
+    if (!isAuth) {
+      return;
+    }
+
+    WebUIManager.getWebUIAppearance()
+      .then((appearance) => {
+        applyWebUiAppearanceToStorage(appearance);
+        setB64img(appearance.backgroundImage ?? '');
+        setCustomIcons(appearance.customIcons ?? {});
+      })
+      .catch(() => undefined);
+  }, [isAuth, setB64img, setCustomIcons]);
+
   const title = useMemo(() => {
     return findTitle(menus, location.pathname);
   }, [location.pathname]);

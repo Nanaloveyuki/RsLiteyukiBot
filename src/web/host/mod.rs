@@ -75,6 +75,7 @@ const ONEBOT_CONFIG_FILE: &str = "config/webui/onebot-v11.json";
 const NAPCAT_CONFIG_FILE: &str = "config/webui/napcat.json";
 const NAPCAT_UIN_CONFIG_FILE: &str = "config/webui/napcat-uin.json";
 const WEBUI_SERVER_CONFIG_FILE: &str = "config/webui/server.json";
+const WEBUI_APPEARANCE_CONFIG_FILE: &str = "config/webui/appearance.json";
 const THEME_CONFIG_FILE: &str = "config/webui/theme.json";
 const MIRROR_CONFIG_FILE: &str = "config/webui/mirrors.json";
 const SSL_CERT_FILE: &str = "config/webui/cert.pem";

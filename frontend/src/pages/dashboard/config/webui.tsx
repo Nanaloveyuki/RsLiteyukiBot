@@ -1,100 +1,104 @@
 import { Button } from '@heroui/button';
+import { Chip } from '@heroui/chip';
 import { useLocalStorage } from '@uidotdev/usehooks';
 import { useEffect, useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import toast from 'react-hot-toast';
+import { useNavigate } from 'react-router-dom';
 
 import key from '@/const/key';
 
 import SaveButtons from '@/components/button/save_buttons';
 import ImageInput from '@/components/input/image_input';
+import PageLoading from '@/components/page_loading';
 
 import { siteConfig } from '@/config/site';
 import WebUIManager from '@/controllers/webui_manager';
+import { applyWebUiAppearanceToStorage } from '@/utils/webui_appearance';
 
-// Base64URL to Uint8Array converter
-function base64UrlToUint8Array (base64Url: string): Uint8Array {
-  const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-  const rawData = window.atob(base64);
-  const outputArray = new Uint8Array(rawData.length);
-  for (let i = 0; i < rawData.length; ++i) {
-    outputArray[i] = rawData.charCodeAt(i);
-  }
-  return outputArray;
-}
-
-// Uint8Array to Base64URL converter
-function uint8ArrayToBase64Url (uint8Array: Uint8Array): string {
-  const base64 = window.btoa(String.fromCharCode(...uint8Array));
-  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+interface WebUiAppearanceFormData {
+  backgroundImage: string;
+  customIcons: Record<string, string>;
 }
 
 const WebUIConfigCard = () => {
-  const {
-    control,
-    handleSubmit: handleWebuiSubmit,
-    formState: { isSubmitting },
-    setValue: setWebuiValue,
-  } = useForm({
-    defaultValues: {
-      background: '',
-      customIcons: {} as Record<string, string>,
-    },
-  });
-
-  const [b64img, setB64img] = useLocalStorage(key.backgroundImage, '');
-  const [customIcons, setCustomIcons] = useLocalStorage<Record<string, string>>(
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(true);
+  const [authState, setAuthState] = useState<WebUiAuthState | null>(null);
+  const [, setBackgroundImage] = useLocalStorage(key.backgroundImage, '');
+  const [, setCustomIconsStorage] = useLocalStorage<Record<string, string>>(
     key.customIcons,
     {}
   );
-  const [registrationOptions, setRegistrationOptions] = useState<any>(null);
-  const [isLoadingOptions, setIsLoadingOptions] = useState(false);
+  const {
+    control,
+    handleSubmit,
+    formState: { isSubmitting },
+    setValue,
+  } = useForm<WebUiAppearanceFormData>({
+    defaultValues: {
+      backgroundImage: '',
+      customIcons: {},
+    },
+  });
 
-  // 预先获取注册选项（可以在任何时候调用）
-  const preloadRegistrationOptions = async () => {
-    setIsLoadingOptions(true);
+  const applyAppearance = (appearance: WebUIAppearanceState) => {
+    setValue('backgroundImage', appearance.backgroundImage ?? '');
+    setValue('customIcons', appearance.customIcons ?? {});
+    applyWebUiAppearanceToStorage(appearance);
+    setBackgroundImage(appearance.backgroundImage ?? '');
+    setCustomIconsStorage(appearance.customIcons ?? {});
+  };
+
+  const loadState = async (showTip = false) => {
     try {
-      console.log('预先获取注册选项...');
-      const options = await WebUIManager.generatePasskeyRegistrationOptions();
-      setRegistrationOptions(options);
-      console.log('✅ 注册选项已获取并存储');
-      toast.success('注册选项已准备就绪，请点击注册按钮');
+      setLoading(true);
+      const [appearance, nextAuthState] = await Promise.all([
+        WebUIManager.getWebUIAppearance(),
+        WebUIManager.getAuthState(),
+      ]);
+      applyAppearance(appearance);
+      setAuthState(nextAuthState);
+      if (showTip) {
+        toast.success('刷新成功');
+      }
     } catch (error) {
-      console.error('❌ 获取注册选项失败:', error);
-      toast.error('获取注册选项失败，请重试');
+      toast.error(`加载失败: ${(error as Error).message}`);
     } finally {
-      setIsLoadingOptions(false);
+      setLoading(false);
     }
   };
 
-  const reset = () => {
-    setWebuiValue('customIcons', customIcons);
-    setWebuiValue('background', b64img);
-  };
-
-  const onSubmit = handleWebuiSubmit((data) => {
+  const onSubmit = handleSubmit(async (data) => {
     try {
-      setCustomIcons(data.customIcons);
-      setB64img(data.background);
+      const appearance = await WebUIManager.updateWebUIAppearance({
+        backgroundImage: data.backgroundImage ?? '',
+        customIcons: data.customIcons ?? {},
+      });
+      applyAppearance(appearance);
       toast.success('保存成功');
     } catch (error) {
-      const msg = (error as Error).message;
-      toast.error(`保存失败: ${msg}`);
+      toast.error(`保存失败: ${(error as Error).message}`);
     }
   });
 
   useEffect(() => {
-    reset();
-  }, [customIcons, b64img]);
+    void loadState();
+  }, []);
+
+  if (loading) return <PageLoading loading />;
 
   return (
     <>
       <title>WebUI配置 - Liteyuki WebUI</title>
+
       <div className='flex flex-col gap-2'>
-        <div className='flex-shrink-0 w-full font-bold text-default-600 dark:text-default-400 px-1'>背景图</div>
+        <div className='flex items-center justify-between gap-3'>
+          <div className='font-bold text-default-600 dark:text-default-400 px-1'>背景图</div>
+        </div>
         <Controller
           control={control}
-          name='background'
+          name='backgroundImage'
           render={({ field }) => (
             <ImageInput
               {...field}
@@ -102,8 +106,9 @@ const WebUIConfigCard = () => {
           )}
         />
       </div>
+
       <div className='flex flex-col gap-2'>
-        <div className='flex-shrink-0 w-full font-bold text-default-600 dark:text-default-400 px-1'>自定义图标</div>
+        <div className='font-bold text-default-600 dark:text-default-400 px-1'>自定义图标</div>
         {siteConfig.navItems.map((item) => (
           <Controller
             key={item.label}
@@ -118,140 +123,51 @@ const WebUIConfigCard = () => {
           />
         ))}
       </div>
-      <div className='flex flex-col gap-2'>
-        <div className='flex-shrink-0 w-full font-bold text-default-600 dark:text-default-400 px-1'>Passkey认证</div>
 
-        {!window.isSecureContext ? (
-          <div className='text-sm text-warning-500 bg-warning-50 p-2 rounded-md border border-warning-200'>
-            ⚠️ 当前处于非安全环境（即既非 HTTPS 也非 localhost），浏览器已禁用 WebAuthn 功能。<br />
-            如果您是通过局域网 IP 访问 WebUI，将无法注册和使用 Passkey。
+      <div className='flex flex-col gap-3 rounded-2xl border border-default-200/70 bg-default-50/60 p-4 dark:border-white/10 dark:bg-white/5'>
+        <div className='flex items-center justify-between gap-3'>
+          <div>
+            <div className='text-sm font-semibold text-default-700 dark:text-default-200'>WebUI 登录</div>
           </div>
-        ) : (
-          <>
-            <div className='text-sm text-default-400 mb-2'>
-              注册Passkey后，您可以更便捷地登录WebUI，无需每次输入token
-            </div>
-            <div className='flex gap-2'>
-              <Button
-                color='secondary'
-                variant='flat'
-                onPress={preloadRegistrationOptions}
-                isLoading={isLoadingOptions}
-                className='w-fit'
-              >
-                {!isLoadingOptions}
-                准备选项
-              </Button>
-              <Button
-                color='primary'
-                variant='flat'
-                onPress={() => {
-                  // 必须在用户手势的同步上下文中立即调用WebAuthn API
-                  if (!registrationOptions) {
-                    toast.error('请先点击"准备选项"按钮获取注册选项');
-                    return;
-                  }
-
-                  console.log('开始Passkey注册...');
-                  console.log('使用预先获取的选项:', registrationOptions);
-
-                  if (!navigator.credentials || !navigator.credentials.create) {
-                    toast.error('当前浏览器环境不支持 Passkey 注册。');
-                    return;
-                  }
-
-                  // 立即调用WebAuthn API，不要用async/await
-                  navigator.credentials.create({
-                    publicKey: {
-                      challenge: base64UrlToUint8Array(registrationOptions.challenge) as BufferSource,
-                      rp: {
-                        name: registrationOptions.rp.name,
-                        id: registrationOptions.rp.id,
-                      },
-                      user: {
-                        id: base64UrlToUint8Array(registrationOptions.user.id) as BufferSource,
-                        name: registrationOptions.user.name,
-                        displayName: registrationOptions.user.displayName,
-                      },
-                      pubKeyCredParams: registrationOptions.pubKeyCredParams,
-                      timeout: 30000,
-                      excludeCredentials: registrationOptions.excludeCredentials?.map((cred: any) => ({
-                        id: base64UrlToUint8Array(cred.id) as BufferSource,
-                        type: cred.type,
-                        transports: cred.transports,
-                      })) || [],
-                      attestation: registrationOptions.attestation,
-                    },
-                  }).then(async (credential) => {
-                    console.log('✅ 注册成功！凭据已创建');
-                    console.log('凭据ID:', (credential as PublicKeyCredential).id);
-                    console.log('凭据类型:', (credential as PublicKeyCredential).type);
-
-                    // Prepare response for verification - convert to expected format
-                    const cred = credential as PublicKeyCredential;
-                    const response = {
-                      id: cred.id,  // 保持为base64url字符串
-                      rawId: uint8ArrayToBase64Url(new Uint8Array(cred.rawId)),  // 转换为base64url字符串
-                      response: {
-                        attestationObject: uint8ArrayToBase64Url(new Uint8Array((cred.response as AuthenticatorAttestationResponse).attestationObject)),  // 转换为base64url字符串
-                        clientDataJSON: uint8ArrayToBase64Url(new Uint8Array(cred.response.clientDataJSON)),  // 转换为base64url字符串
-                        transports: (cred.response as AuthenticatorAttestationResponse).getTransports?.() || [],
-                      },
-                      type: cred.type,
-                    };
-
-                    console.log('准备验证响应:', response);
-
-                    try {
-                      // Verify registration
-                      const result = await WebUIManager.verifyPasskeyRegistration(response);
-
-                      if (result.verified) {
-                        toast.success('Passkey注册成功！现在您可以使用Passkey自动登录');
-                        setRegistrationOptions(null); // 清除已使用的选项
-                      } else {
-                        throw new Error('Passkey registration failed');
-                      }
-                    } catch (verifyError) {
-                      console.error('❌ 验证失败:', verifyError);
-                      const err = verifyError as Error;
-                      toast.error(`Passkey验证失败: ${err.message}`);
-                    }
-                  }).catch((error) => {
-                    console.error('❌ 注册失败:', error);
-                    const err = error as Error;
-                    console.error('错误名称:', err.name);
-                    console.error('错误信息:', err.message);
-
-                    // Provide more specific error messages
-                    if (err.name === 'NotAllowedError') {
-                      toast.error('Passkey注册被拒绝。请确保您允许了生物识别认证权限。');
-                    } else if (err.name === 'NotSupportedError') {
-                      toast.error('您的浏览器不支持Passkey功能。');
-                    } else if (err.name === 'SecurityError') {
-                      toast.error('安全错误：请确保使用HTTPS或localhost环境。');
-                    } else {
-                      toast.error(`Passkey注册失败: ${err.message}`);
-                    }
-                  });
-                }}
-                disabled={!registrationOptions}
-                className='w-fit'
-              >
-                注册Passkey
-              </Button>
-            </div>
-            {registrationOptions && (
-              <div className='text-xs text-green-600'>
-                注册选项已准备就绪，可以开始注册
-              </div>
-            )}
-          </>
-        )}
+          <div className='flex flex-wrap justify-end gap-2'>
+            <Chip
+              size='sm'
+              variant='flat'
+              color={authState?.tokenLoginEnabled ? 'secondary' : 'default'}
+            >
+              {authState?.tokenLoginEnabled ? '临时 Token 已启用' : '临时 Token 已关闭'}
+            </Chip>
+            <Chip
+              size='sm'
+              variant='flat'
+              color={authState?.passwordConfigured ? 'success' : 'warning'}
+            >
+              {authState?.passwordConfigured ? '已设置登录密码' : '未设置登录密码'}
+            </Chip>
+          </div>
+        </div>
+        <div className='flex flex-wrap gap-2'>
+          <Button
+            size='sm'
+            color='primary'
+            variant='flat'
+            onPress={() => navigate('/config?tab=token')}
+          >
+            管理登录密码
+          </Button>
+          <Button
+            size='sm'
+            variant='light'
+            onPress={() => void loadState(true)}
+          >
+            刷新状态
+          </Button>
+        </div>
       </div>
+
       <SaveButtons
         onSubmit={onSubmit}
-        reset={reset}
+        reset={() => void loadState()}
         isSubmitting={isSubmitting}
       />
     </>

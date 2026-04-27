@@ -203,6 +203,13 @@ export default class LlmManager {
     return data.data;
   }
 
+  public static async updateEnabled (enabled: boolean) {
+    const { data } = await serverRequest.post<ServerResponse<LlmChatSettings>>('/LLM/UpdateEnabled', {
+      enabled,
+    });
+    return data.data;
+  }
+
   public static async fetchModels (provider: LlmManagedProvider) {
     const { data } = await serverRequest.post<ServerResponse<LlmManagerFetchModelsResponse>>('/LLM/FetchModels', {
       provider,

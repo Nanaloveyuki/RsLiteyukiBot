@@ -19,6 +19,15 @@ impl Default for ThemeConfigDoc {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub(super) struct WebUiAppearanceConfigDoc {
+    #[serde(rename = "backgroundImage")]
+    pub background_image: String,
+    #[serde(rename = "customIcons")]
+    pub custom_icons: HashMap<String, String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub(super) struct MirrorConfigDoc {
@@ -57,15 +66,9 @@ where
 }
 
 fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
-    }
     let body = serde_json::to_string_pretty(value)
         .map_err(|err| format!("failed to serialize {}: {err}", path.display()))?;
-    match fs::write(path, body) {
+    match crate::config_edit::write_text_file_atomically(path, &body) {
         Ok(()) => {
             emit_console_log(
                 LogLevel::Info,
@@ -106,6 +109,14 @@ pub(super) fn load_webui_server_config(port: u16) -> NapCatWebUIConfig {
 
 pub(super) fn save_webui_server_config(config: &NapCatWebUIConfig) -> Result<(), String> {
     write_json_file(state_path(WEBUI_SERVER_CONFIG_FILE).as_path(), config)
+}
+
+pub(super) fn load_webui_appearance_config() -> WebUiAppearanceConfigDoc {
+    read_json_file(state_path(WEBUI_APPEARANCE_CONFIG_FILE).as_path())
+}
+
+pub(super) fn save_webui_appearance_config(config: &WebUiAppearanceConfigDoc) -> Result<(), String> {
+    write_json_file(state_path(WEBUI_APPEARANCE_CONFIG_FILE).as_path(), config)
 }
 
 pub(super) fn load_mirror_config() -> MirrorConfigDoc {

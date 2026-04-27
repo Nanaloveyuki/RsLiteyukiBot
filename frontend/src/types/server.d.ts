@@ -199,8 +199,18 @@ interface WebUIConfig {
   enableXForwardedFor: boolean;
 }
 
+interface WebUIAppearanceState {
+  backgroundImage: string;
+  customIcons: Record<string, string>;
+}
+
 interface DesktopSettings {
   closeToTray: boolean;
   configured: boolean;
   configPath?: string | null;
+}
+
+interface ActiveAppConfigState {
+  configPath: string;
+  content: string;
 }
