@@ -358,10 +358,8 @@ fn normalize_webui_data_url(raw: &str) -> Option<String> {
 
 fn active_app_config_path() -> Result<PathBuf, String> {
     crate::app_config::ensure_default_config_files().map_err(|err| err.to_string())?;
-    Ok(
-        crate::app_config::resolve_app_config_path()
-            .unwrap_or_else(crate::config_paths::resolve_default_app_config_path),
-    )
+    Ok(crate::app_config::resolve_app_config_path()
+        .unwrap_or_else(crate::config_paths::resolve_default_app_config_path))
 }
 
 fn validate_active_app_config_content(path: &Path, content: &str) -> Result<(), String> {
@@ -371,8 +369,10 @@ fn validate_active_app_config_content(path: &Path, content: &str) -> Result<(), 
         .map(|value| value.to_ascii_lowercase());
 
     let doc = match ext.as_deref() {
-        Some("yaml") | Some("yml") => serde_yaml::from_str::<crate::app_config::AppConfigDoc>(content)
-            .map_err(|err| format!("invalid YAML config: {err}"))?,
+        Some("yaml") | Some("yml") => {
+            serde_yaml::from_str::<crate::app_config::AppConfigDoc>(content)
+                .map_err(|err| format!("invalid YAML config: {err}"))?
+        }
         Some("toml") => toml::from_str::<crate::app_config::AppConfigDoc>(content)
             .map_err(|err| format!("invalid TOML config: {err}"))?,
         _ => {
@@ -479,14 +479,14 @@ mod tests {
     fn parse_webui_appearance_update_keeps_only_image_data_urls() {
         let current = WebUiAppearanceConfigDoc {
             background_image: "data:image/png;base64,old".to_string(),
-            custom_icons: HashMap::from([
-                ("dashboard".to_string(), "data:image/png;base64,icon".to_string()),
-            ]),
+            custom_icons: HashMap::from([(
+                "dashboard".to_string(),
+                "data:image/png;base64,icon".to_string(),
+            )]),
         };
         let request = b"POST /api/WebUIConfig/UpdateAppearance HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\r\n{\"backgroundImage\":\"\",\"customIcons\":{\"dashboard\":\"data:image/png;base64,new\",\"tools\":\"/assets/icon.png\"}}";
 
-        let next =
-            parse_webui_appearance_update(&current, request).expect("payload should parse");
+        let next = parse_webui_appearance_update(&current, request).expect("payload should parse");
 
         assert!(next.background_image.is_empty());
         assert_eq!(

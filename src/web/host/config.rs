@@ -115,7 +115,9 @@ pub(super) fn load_webui_appearance_config() -> WebUiAppearanceConfigDoc {
     read_json_file(state_path(WEBUI_APPEARANCE_CONFIG_FILE).as_path())
 }
 
-pub(super) fn save_webui_appearance_config(config: &WebUiAppearanceConfigDoc) -> Result<(), String> {
+pub(super) fn save_webui_appearance_config(
+    config: &WebUiAppearanceConfigDoc,
+) -> Result<(), String> {
     write_json_file(state_path(WEBUI_APPEARANCE_CONFIG_FILE).as_path(), config)
 }
 

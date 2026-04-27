@@ -118,6 +118,16 @@ docker build -t liteyukibot-web .
 ```
 ~~你可能需要花上五六分钟来编译~~
 
+如果当前环境无法直连 `docker.io`, 可以直接覆写基础镜像来源而不用修改 `Dockerfile`:
+
+```powershell
+docker build `
+  --build-arg NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:22-bookworm-slim `
+  --build-arg RUST_BASE_IMAGE=docker.m.daocloud.io/library/rust:1-bookworm `
+  --build-arg RUNTIME_BASE_IMAGE=docker.m.daocloud.io/library/debian:bookworm-slim `
+  -t liteyukibot-web .
+```
+
 ### 2. 启动容器
 
 Linux / macOS:

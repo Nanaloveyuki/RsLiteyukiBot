@@ -21,6 +21,10 @@ pub(super) fn route_http_request(
         return options_response();
     }
 
+    if let Some(location) = canonical_webui_entry(raw_path, path) {
+        return build_redirect_response("307 Temporary Redirect", location.as_str(), is_head);
+    }
+
     if path == HEALTH_ROUTE {
         let body = serde_json::to_vec_pretty(&service.health())
             .unwrap_or_else(|_| b"{\"status\":\"serialization-error\"}".to_vec());
@@ -186,6 +190,19 @@ pub(super) fn route_napcat_api(
 
     let body = napcat_err(-1, "not found");
     napcat_response(body, is_head)
+}
+
+fn canonical_webui_entry(raw_path: &str, path: &str) -> Option<String> {
+    match path {
+        "/" => Some(format!("/webui/{}", raw_path.trim_start_matches('/'))),
+        "/webui" => Some(format!(
+            "/webui/{}",
+            raw_path
+                .trim_start_matches("/webui")
+                .trim_start_matches('/')
+        )),
+        _ => None,
+    }
 }
 
 fn dev_frontend_redirect(

@@ -18,6 +18,7 @@ use self::config::*;
 use self::http::*;
 use self::terminal::*;
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
@@ -1720,7 +1721,9 @@ impl WebHostAssets {
     }
 
     fn asset_for_path(&self, path: &str) -> Option<WebHostAsset> {
-        if path == "/" {
+        let resolved_path = resolve_webui_asset_path(path);
+
+        if resolved_path == "/" {
             return self
                 .asset_dir
                 .as_ref()
@@ -1728,16 +1731,24 @@ impl WebHostAssets {
                 .or_else(|| Some(self.index.clone()));
         }
 
-        if let Some(asset) = self.static_assets.get(path) {
+        if let Some(asset) = self
+            .static_assets
+            .get(path)
+            .or_else(|| self.static_assets.get(resolved_path.as_ref()))
+        {
             return Some(asset.clone());
         }
 
         if let Some(directory) = &self.asset_dir {
-            if let Some(asset) = load_directory_asset_for_request(directory, path) {
+            if let Some(asset) = load_directory_asset_for_request(directory, path).or_else(|| {
+                (resolved_path.as_ref() != path)
+                    .then(|| load_directory_asset_for_request(directory, resolved_path.as_ref()))
+                    .flatten()
+            }) {
                 return Some(asset);
             }
 
-            if directory.spa_fallback_to_index && should_fallback_to_index(path) {
+            if directory.spa_fallback_to_index && should_fallback_to_index(resolved_path.as_ref()) {
                 return load_directory_index_asset(directory).or_else(|| Some(self.index.clone()));
             }
         }
@@ -1746,7 +1757,11 @@ impl WebHostAssets {
     }
 
     fn static_asset_for_path(&self, path: &str) -> Option<WebHostAsset> {
-        self.static_assets.get(path).cloned()
+        let resolved_path = resolve_webui_asset_path(path);
+        self.static_assets
+            .get(path)
+            .or_else(|| self.static_assets.get(resolved_path.as_ref()))
+            .cloned()
     }
 }
 
@@ -1853,6 +1868,14 @@ impl WebHostService {
 
     pub fn external_url_hint(&self) -> String {
         format!("http://<host-ip>:{}/", self.bind_addr.port())
+    }
+
+    pub fn desktop_webui_url(&self) -> String {
+        format!("{}webui/", self.desktop_url())
+    }
+
+    pub fn external_webui_url_hint(&self) -> String {
+        format!("{}webui/", self.external_url_hint())
     }
 
     /// Returns the local auto-login token that the Tauri shell can inject into
@@ -2198,6 +2221,18 @@ fn normalize_asset_path(path: impl Into<String>) -> String {
     } else {
         format!("/{path}")
     }
+}
+
+fn resolve_webui_asset_path(path: &str) -> Cow<'_, str> {
+    if path == "/webui" || path == "/webui/" {
+        return Cow::Borrowed("/");
+    }
+
+    if let Some(stripped) = path.strip_prefix("/webui/") {
+        return Cow::Owned(format!("/{}", stripped.trim_start_matches('/')));
+    }
+
+    Cow::Borrowed(path)
 }
 
 fn load_directory_index_asset(directory: &WebHostAssetDirectory) -> Option<WebHostAsset> {
@@ -3043,17 +3078,19 @@ class CapabilityRoutePlugin(star.Star):
     }
 
     #[test]
-    fn root_route_returns_injected_html() {
+    fn root_route_redirects_to_webui_prefix() {
         let response = test_server().route_http_request(
             b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
             IpAddr::V4(Ipv4Addr::LOCALHOST),
         );
         let (headers, body) = split_response(response);
-        let body = String::from_utf8(body).expect("body should be utf8");
 
-        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
-        assert!(headers.contains("Content-Type: text/html; charset=utf-8\r\n"));
-        assert_eq!(body, TEST_HTML);
+        assert!(headers.starts_with("HTTP/1.1 307 Temporary Redirect\r\n"));
+        assert!(headers.contains("Location: /webui/\r\n"));
+        assert_eq!(
+            String::from_utf8(body).expect("body should be utf8"),
+            "redirecting"
+        );
     }
 
     #[test]
@@ -4947,6 +4984,17 @@ class CapabilityRoutePlugin(star.Star):
         assert!(js_headers.contains("Content-Type: text/javascript; charset=utf-8\r\n"));
         assert_eq!(js_body, "console.log('ok');");
 
+        let prefixed_js_response = server.route_http_request(
+            b"GET /webui/assets/app.js HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (prefixed_js_headers, prefixed_js_body) = split_response(prefixed_js_response);
+        let prefixed_js_body =
+            String::from_utf8(prefixed_js_body).expect("prefixed js body should be utf8");
+        assert!(prefixed_js_headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(prefixed_js_headers.contains("Content-Type: text/javascript; charset=utf-8\r\n"));
+        assert_eq!(prefixed_js_body, "console.log('ok');");
+
         let spa_response = server.route_http_request(
             b"GET /dashboard HTTP/1.1\r\nHost: localhost\r\n\r\n",
             IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -4955,6 +5003,16 @@ class CapabilityRoutePlugin(star.Star):
         let spa_body = String::from_utf8(spa_body).expect("spa body should be utf8");
         assert!(spa_headers.starts_with("HTTP/1.1 200 OK\r\n"));
         assert_eq!(spa_body, "<!doctype html><title>Dist</title>");
+
+        let prefixed_spa_response = server.route_http_request(
+            b"GET /webui/dashboard HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        );
+        let (prefixed_spa_headers, prefixed_spa_body) = split_response(prefixed_spa_response);
+        let prefixed_spa_body =
+            String::from_utf8(prefixed_spa_body).expect("prefixed spa body should be utf8");
+        assert!(prefixed_spa_headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert_eq!(prefixed_spa_body, "<!doctype html><title>Dist</title>");
 
         let _ = fs::remove_file(root.join("assets").join("app.js"));
         let _ = fs::remove_file(root.join("index.html"));

@@ -1,10 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use liteyukibot_core::web_ui::{
-    APP_SHELL_WINDOW_ICON_ICO,
-};
 use liteyukibot_core::web::runtime::EmbeddedWebRuntime;
+use liteyukibot_core::web_ui::APP_SHELL_WINDOW_ICON_ICO;
 use liteyukibot_core::{
     LogLevel, RuntimeTarget, emit_console_log, persist_desktop_close_to_tray_preference,
     resolve_desktop_close_behavior,
@@ -66,10 +64,10 @@ pub fn run() {
         LogLevel::Info,
         "tauri.web",
         format!(
-            "shared HTTP host listening on {} (desktop: {}, external: {})",
+            "shared HTTP host listening on {} | desktop UI {} | external UI {}",
             server.bind_addr(),
-            server.desktop_url(),
-            server.external_url_hint(),
+            server.desktop_webui_url(),
+            server.external_webui_url_hint(),
         ),
     );
     let close_state = Arc::new(DesktopCloseState::new());
@@ -172,9 +170,7 @@ fn handle_main_window_event<R: Runtime>(
     event: &WindowEvent,
     close_state: &DesktopCloseState,
 ) {
-    if window.label() != MAIN_WINDOW_LABEL
-        || close_state.allow_app_exit.load(Ordering::Relaxed)
-    {
+    if window.label() != MAIN_WINDOW_LABEL || close_state.allow_app_exit.load(Ordering::Relaxed) {
         return;
     }
 
@@ -248,9 +244,7 @@ fn liteyuki_close_to_background(
     state: State<'_, Arc<DesktopCloseState>>,
     always_remember: bool,
 ) -> Result<(), String> {
-    if always_remember
-        && let Err(err) = persist_desktop_close_to_tray_preference(true)
-    {
+    if always_remember && let Err(err) = persist_desktop_close_to_tray_preference(true) {
         state.prompt_pending.store(false, Ordering::Relaxed);
         return Err(err);
     }
@@ -265,9 +259,7 @@ fn liteyuki_exit_app(
     state: State<'_, Arc<DesktopCloseState>>,
     always_remember: bool,
 ) -> Result<(), String> {
-    if always_remember
-        && let Err(err) = persist_desktop_close_to_tray_preference(false)
-    {
+    if always_remember && let Err(err) = persist_desktop_close_to_tray_preference(false) {
         state.prompt_pending.store(false, Ordering::Relaxed);
         return Err(err);
     }
@@ -447,7 +439,10 @@ mod tests {
         assert_eq!(tauri_config.build.before_dev_command, "pnpm dev");
         assert_eq!(tauri_config.build.before_build_command, "pnpm build");
         assert_eq!(tauri_config.build.dev_url, "http://127.0.0.1:1420");
-        assert_eq!(Path::new(&tauri_config.build.frontend_dist), Path::new("../frontend/dist"));
+        assert_eq!(
+            Path::new(&tauri_config.build.frontend_dist),
+            Path::new("../frontend/dist")
+        );
 
         for command in [
             tauri_config.build.before_dev_command.as_str(),
@@ -504,5 +499,4 @@ mod tests {
             "window.__LITEYUKI_RUNTIME_API_BASE__ = \"http://127.0.0.1:14500\";"
         );
     }
-
 }

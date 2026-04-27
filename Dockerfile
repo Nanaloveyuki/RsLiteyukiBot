@@ -1,4 +1,8 @@
-FROM node:22-bookworm-slim AS frontend-builder
+ARG NODE_BASE_IMAGE=node:22-bookworm-slim
+ARG RUST_BASE_IMAGE=rust:1-bookworm
+ARG RUNTIME_BASE_IMAGE=debian:bookworm-slim
+
+FROM ${NODE_BASE_IMAGE} AS frontend-builder
 
 WORKDIR /workspace
 
@@ -7,7 +11,7 @@ COPY frontend ./frontend
 
 RUN corepack enable && pnpm install --frozen-lockfile && pnpm build
 
-FROM rust:1-bookworm AS rust-builder
+FROM ${RUST_BASE_IMAGE} AS rust-builder
 
 WORKDIR /workspace
 
@@ -26,7 +30,7 @@ COPY src ./src
 
 RUN cargo build --release --locked --bin web -j 1
 
-FROM debian:bookworm-slim
+FROM ${RUNTIME_BASE_IMAGE}
 
 WORKDIR /app
 

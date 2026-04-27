@@ -213,8 +213,12 @@ pub fn write_text_file_atomically(path: &Path, content: &str) -> Result<(), Stri
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create config directory {}: {err}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create config directory {}: {err}",
+                parent.display()
+            )
+        })?;
     }
 
     let temp_path = atomic_write_temp_path(path);

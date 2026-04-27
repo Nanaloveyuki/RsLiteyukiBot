@@ -15,10 +15,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LogLevel::Info,
         "web.host",
         format!(
-            "shared web host listening on {} (desktop: {}, external: {})",
+            "shared web host listening on {} | desktop UI {} | external UI {}",
             server.bind_addr(),
-            server.desktop_url(),
-            server.external_url_hint(),
+            server.desktop_webui_url(),
+            server.external_webui_url_hint(),
         ),
     );
     emit_console_log(

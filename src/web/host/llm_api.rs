@@ -1901,14 +1901,10 @@ fn validate_sampling_args(
     if top_k.is_some_and(|value| value == 0) {
         return Err("topK should be > 0".to_string());
     }
-    if frequency_penalty
-        .is_some_and(|value| !value.is_finite() || !(-2.0..=2.0).contains(&value))
-    {
+    if frequency_penalty.is_some_and(|value| !value.is_finite() || !(-2.0..=2.0).contains(&value)) {
         return Err("frequencyPenalty should be within -2..=2".to_string());
     }
-    if presence_penalty
-        .is_some_and(|value| !value.is_finite() || !(-2.0..=2.0).contains(&value))
-    {
+    if presence_penalty.is_some_and(|value| !value.is_finite() || !(-2.0..=2.0).contains(&value)) {
         return Err("presencePenalty should be within -2..=2".to_string());
     }
     Ok(())
@@ -3697,8 +3693,9 @@ mod tests {
 
     #[test]
     fn validate_sampling_args_accepts_penalty_range() {
-        assert!(validate_sampling_args(Some(1.0), Some(0.9), Some(40), Some(-2.0), Some(2.0))
-            .is_ok());
+        assert!(
+            validate_sampling_args(Some(1.0), Some(0.9), Some(40), Some(-2.0), Some(2.0)).is_ok()
+        );
         assert_eq!(
             validate_sampling_args(None, None, None, Some(2.1), None).unwrap_err(),
             "frequencyPenalty should be within -2..=2"
@@ -3887,10 +3884,8 @@ mod tests {
 
     #[test]
     fn resolve_llm_enabled_write_path_uses_active_app_config_without_overlay() {
-        let root = std::env::temp_dir().join(format!(
-            "rsliteyukibot-llm-enabled-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("rsliteyukibot-llm-enabled-{}", std::process::id()));
         let config_dir = root.join(".liteyuki").join("configs");
         fs::create_dir_all(&config_dir).expect("config dir should be created");
 

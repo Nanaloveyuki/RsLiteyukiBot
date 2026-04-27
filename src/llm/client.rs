@@ -648,12 +648,13 @@ impl OpenAiResponsesClient {
                             .unwrap_or("response.failed")
                             .to_string();
                         let status = response_error
-                            .map(|error| infer_embedded_upstream_status(error.get("code"), detail.as_str()))
-                            .unwrap_or_else(|| infer_embedded_upstream_status(None, detail.as_str()));
-                        return Err(LlmClientError::Upstream {
-                            status,
-                            detail,
-                        });
+                            .map(|error| {
+                                infer_embedded_upstream_status(error.get("code"), detail.as_str())
+                            })
+                            .unwrap_or_else(|| {
+                                infer_embedded_upstream_status(None, detail.as_str())
+                            });
+                        return Err(LlmClientError::Upstream { status, detail });
                     }
                     "error" => {
                         let detail = payload
@@ -663,10 +664,7 @@ impl OpenAiResponsesClient {
                             .to_string();
                         let status =
                             infer_embedded_upstream_status(payload.get("code"), detail.as_str());
-                        return Err(LlmClientError::Upstream {
-                            status,
-                            detail,
-                        });
+                        return Err(LlmClientError::Upstream { status, detail });
                     }
                     _ => {}
                 }
@@ -799,8 +797,8 @@ impl OpenAiResponsesClient {
             });
         }
 
-        let payload =
-            serde_json::from_str(&body).map_err(|err| LlmClientError::InvalidResponse(err.to_string()))?;
+        let payload = serde_json::from_str(&body)
+            .map_err(|err| LlmClientError::InvalidResponse(err.to_string()))?;
         if let Some((status, detail)) = extract_embedded_upstream_error(&payload) {
             return Err(LlmClientError::Upstream { status, detail });
         }
@@ -1555,14 +1553,14 @@ fn make_schema_nullable(schema: &mut Value) {
             let original = kind.clone();
             object.insert(
                 "type".to_string(),
-                Value::Array(vec![Value::String(original), Value::String("null".to_string())]),
+                Value::Array(vec![
+                    Value::String(original),
+                    Value::String("null".to_string()),
+                ]),
             );
         }
         Some(Value::Array(items)) => {
-            if !items
-                .iter()
-                .any(|item| item.as_str() == Some("null"))
-            {
+            if !items.iter().any(|item| item.as_str() == Some("null")) {
                 items.push(Value::String("null".to_string()));
             }
         }
@@ -2352,7 +2350,10 @@ mod tests {
         required.sort_unstable();
         assert_eq!(required, vec!["max_depth", "path"]);
         assert_eq!(parameters["additionalProperties"], Value::Bool(false));
-        assert_eq!(parameters["properties"]["path"]["type"], json!(["string", "null"]));
+        assert_eq!(
+            parameters["properties"]["path"]["type"],
+            json!(["string", "null"])
+        );
         assert_eq!(
             parameters["properties"]["max_depth"]["type"],
             json!(["integer", "null"])
