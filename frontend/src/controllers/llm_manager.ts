@@ -38,6 +38,8 @@ export interface LlmProviderParameterSupport {
   temperature: LlmParameterSupportState;
   topP: LlmParameterSupportState;
   topK: LlmParameterSupportState;
+  frequencyPenalty?: LlmParameterSupportState;
+  presencePenalty?: LlmParameterSupportState;
   streaming: LlmParameterSupportState;
   imageInput: LlmParameterSupportState;
   textFileInput?: LlmParameterSupportState;
@@ -96,6 +98,8 @@ export interface LlmChatSettings {
     temperature: boolean;
     topP: boolean;
     topK: boolean;
+    frequencyPenalty?: boolean;
+    presencePenalty?: boolean;
     reasoningEffort: boolean;
     imageInput?: boolean;
     textFileInput?: boolean;
@@ -112,6 +116,8 @@ export interface LlmChatRequest {
   temperature?: number;
   topP?: number;
   topK?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
   reasoningEffort?: string;
 }
 

@@ -34,6 +34,14 @@ pub trait OpenAiRuntimeConfig {
         None
     }
 
+    fn frequency_penalty(&self) -> Option<f32> {
+        None
+    }
+
+    fn presence_penalty(&self) -> Option<f32> {
+        None
+    }
+
     fn parallel_tool_calls(&self) -> bool {
         true
     }
@@ -58,6 +66,8 @@ pub struct OpenAiResponsesClient {
     temperature: Option<f32>,
     top_p: Option<f32>,
     top_k: Option<u32>,
+    frequency_penalty: Option<f32>,
+    presence_penalty: Option<f32>,
     parallel_tool_calls: bool,
     reasoning_effort: Option<String>,
     default_headers: HashMap<String, String>,
@@ -234,6 +244,8 @@ impl OpenAiResponsesClient {
             temperature: config.temperature(),
             top_p: config.top_p(),
             top_k: config.top_k(),
+            frequency_penalty: config.frequency_penalty(),
+            presence_penalty: config.presence_penalty(),
             parallel_tool_calls: config.parallel_tool_calls(),
             reasoning_effort: config
                 .reasoning_effort()
@@ -452,6 +464,10 @@ impl OpenAiResponsesClient {
         dispatcher: &mut EventDispatcher<'_>,
     ) -> Result<ProviderTurn, LlmClientError> {
         let payload = self.send_json(endpoint, &request).await?;
+        if let Some((status, detail)) = extract_embedded_upstream_error(&payload) {
+            return Err(LlmClientError::Upstream { status, detail });
+        }
+
         let tool_calls = extract_responses_tool_calls(&payload);
         for tool_call in &tool_calls {
             dispatcher.emit(LlmStreamEvent::ToolCall {
@@ -484,6 +500,10 @@ impl OpenAiResponsesClient {
         dispatcher: &mut EventDispatcher<'_>,
     ) -> Result<ProviderTurn, LlmClientError> {
         let payload = self.send_json(endpoint, &request).await?;
+        if let Some((status, detail)) = extract_embedded_upstream_error(&payload) {
+            return Err(LlmClientError::Upstream { status, detail });
+        }
+
         let tool_calls = extract_chat_tool_calls(&payload);
         for tool_call in &tool_calls {
             dispatcher.emit(LlmStreamEvent::ToolCall {
@@ -548,6 +568,10 @@ impl OpenAiResponsesClient {
 
                 let payload: Value = serde_json::from_str(data)
                     .map_err(|err| LlmClientError::InvalidResponse(err.to_string()))?;
+                if let Some((status, detail)) = extract_embedded_upstream_error(&payload) {
+                    return Err(LlmClientError::Upstream { status, detail });
+                }
+
                 let Some(event_type) = payload.get("type").and_then(Value::as_str) else {
                     continue;
                 };
@@ -617,13 +641,17 @@ impl OpenAiResponsesClient {
                         completed_response = payload.get("response").cloned();
                     }
                     "response.failed" => {
-                        let detail = payload
-                            .pointer("/response/error/message")
+                        let response_error = payload.pointer("/response/error");
+                        let detail = response_error
+                            .and_then(|error| error.get("message"))
                             .and_then(Value::as_str)
                             .unwrap_or("response.failed")
                             .to_string();
+                        let status = response_error
+                            .map(|error| infer_embedded_upstream_status(error.get("code"), detail.as_str()))
+                            .unwrap_or_else(|| infer_embedded_upstream_status(None, detail.as_str()));
                         return Err(LlmClientError::Upstream {
-                            status: 500,
+                            status,
                             detail,
                         });
                     }
@@ -633,8 +661,10 @@ impl OpenAiResponsesClient {
                             .and_then(Value::as_str)
                             .unwrap_or("response stream error")
                             .to_string();
+                        let status =
+                            infer_embedded_upstream_status(payload.get("code"), detail.as_str());
                         return Err(LlmClientError::Upstream {
-                            status: 500,
+                            status,
                             detail,
                         });
                     }
@@ -712,6 +742,9 @@ impl OpenAiResponsesClient {
 
                 let payload: Value = serde_json::from_str(data)
                     .map_err(|err| LlmClientError::InvalidResponse(err.to_string()))?;
+                if let Some((status, detail)) = extract_embedded_upstream_error(&payload) {
+                    return Err(LlmClientError::Upstream { status, detail });
+                }
                 apply_chat_stream_chunk(&payload, &mut text, &mut tool_calls, dispatcher)?;
             }
         }
@@ -766,7 +799,12 @@ impl OpenAiResponsesClient {
             });
         }
 
-        serde_json::from_str(&body).map_err(|err| LlmClientError::InvalidResponse(err.to_string()))
+        let payload =
+            serde_json::from_str(&body).map_err(|err| LlmClientError::InvalidResponse(err.to_string()))?;
+        if let Some((status, detail)) = extract_embedded_upstream_error(&payload) {
+            return Err(LlmClientError::Upstream { status, detail });
+        }
+        Ok(payload)
     }
 
     fn apply_default_headers(
@@ -835,6 +873,12 @@ impl OpenAiResponsesClient {
         {
             body.insert("top_k".to_string(), json!(top_k));
         }
+        if let Some(frequency_penalty) = self.frequency_penalty {
+            body.insert("frequency_penalty".to_string(), json!(frequency_penalty));
+        }
+        if let Some(presence_penalty) = self.presence_penalty {
+            body.insert("presence_penalty".to_string(), json!(presence_penalty));
+        }
         if let Some(reasoning_effort) = self.reasoning_effort.as_deref() {
             body.insert(
                 "reasoning".to_string(),
@@ -879,6 +923,12 @@ impl OpenAiResponsesClient {
             .filter(|_| supports_compat_top_k(self.base_url.as_str()))
         {
             body.insert("top_k".to_string(), json!(top_k));
+        }
+        if let Some(frequency_penalty) = self.frequency_penalty {
+            body.insert("frequency_penalty".to_string(), json!(frequency_penalty));
+        }
+        if let Some(presence_penalty) = self.presence_penalty {
+            body.insert("presence_penalty".to_string(), json!(presence_penalty));
         }
         if let Some(reasoning_effort) = self.reasoning_effort.as_deref() {
             body.insert(
@@ -1027,7 +1077,10 @@ fn encode_responses_tool(tool: &LlmFunctionTool) -> Value {
     let mut value = Map::new();
     value.insert("type".to_string(), Value::String("function".to_string()));
     value.insert("name".to_string(), Value::String(tool.name.clone()));
-    value.insert("parameters".to_string(), tool.parameters.clone());
+    value.insert(
+        "parameters".to_string(),
+        normalize_openai_tool_parameters(&tool.parameters, tool.strict),
+    );
     value.insert("strict".to_string(), Value::Bool(tool.strict));
     if let Some(description) = tool.description.as_ref() {
         value.insert(
@@ -1041,7 +1094,10 @@ fn encode_responses_tool(tool: &LlmFunctionTool) -> Value {
 fn encode_chat_tool(tool: &LlmFunctionTool) -> Value {
     let mut function = Map::new();
     function.insert("name".to_string(), Value::String(tool.name.clone()));
-    function.insert("parameters".to_string(), tool.parameters.clone());
+    function.insert(
+        "parameters".to_string(),
+        normalize_openai_tool_parameters(&tool.parameters, tool.strict),
+    );
     function.insert("strict".to_string(), Value::Bool(tool.strict));
     if let Some(description) = tool.description.as_ref() {
         function.insert(
@@ -1331,6 +1387,189 @@ fn supports_compat_top_k(base_url: &str) -> bool {
         .contains("api.openai.com")
 }
 
+fn extract_embedded_upstream_error(payload: &Value) -> Option<(u16, String)> {
+    let error = payload.get("error")?;
+    if let Some(message) = error.as_str() {
+        let detail = message.trim();
+        if detail.is_empty() {
+            return None;
+        }
+        return Some((
+            infer_embedded_upstream_status(None, detail),
+            truncate_text(detail, OUTPUT_TRUNCATE_LIMIT),
+        ));
+    }
+
+    let message = error.get("message").and_then(Value::as_str)?.trim();
+    if message.is_empty() {
+        return None;
+    }
+
+    let status = infer_embedded_upstream_status(error.get("code"), message);
+    Some((status, truncate_text(message, OUTPUT_TRUNCATE_LIMIT)))
+}
+
+fn infer_embedded_upstream_status(code: Option<&Value>, message: &str) -> u16 {
+    parse_upstream_status_code(code)
+        .or_else(|| should_fallback_to_chat_completions(400, message).then_some(400))
+        .unwrap_or(500)
+}
+
+fn parse_upstream_status_code(code: Option<&Value>) -> Option<u16> {
+    let code = code?;
+    if let Some(status) = code
+        .as_i64()
+        .filter(|status| (100..=599).contains(status))
+        .map(|status| status as u16)
+    {
+        return Some(status);
+    }
+
+    code.as_str()
+        .and_then(|raw| raw.trim().parse::<u16>().ok())
+        .filter(|status| (100..=599).contains(status))
+}
+
+fn normalize_openai_tool_parameters(parameters: &Value, strict: bool) -> Value {
+    let mut normalized = normalize_openai_schema_shape(parameters);
+    if strict {
+        enforce_strict_openai_schema(&mut normalized);
+    }
+    normalized
+}
+
+fn normalize_openai_schema_shape(schema: &Value) -> Value {
+    match schema {
+        Value::Object(map) => {
+            let mut normalized = Map::new();
+            for (key, value) in map {
+                normalized.insert(key.clone(), normalize_openai_schema_shape(value));
+            }
+            if normalized.get("type").and_then(Value::as_str) == Some("array")
+                && !normalized.contains_key("items")
+            {
+                normalized.insert("items".to_string(), json!({ "type": "string" }));
+            }
+            Value::Object(normalized)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(normalize_openai_schema_shape)
+                .collect::<Vec<_>>(),
+        ),
+        _ => schema.clone(),
+    }
+}
+
+fn enforce_strict_openai_schema(schema: &mut Value) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+
+    if let Some(any_of) = object.get_mut("anyOf").and_then(Value::as_array_mut) {
+        for branch in any_of {
+            enforce_strict_openai_schema(branch);
+        }
+        return;
+    }
+
+    if let Some(items) = object.get_mut("items") {
+        enforce_strict_openai_schema(items);
+    }
+
+    if object.get("type").and_then(Value::as_str) != Some("object") {
+        return;
+    }
+
+    object
+        .entry("additionalProperties".to_string())
+        .or_insert_with(|| Value::Bool(false));
+
+    let mut property_keys = Vec::new();
+    if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+        property_keys = properties.keys().cloned().collect::<Vec<_>>();
+        for key in &property_keys {
+            if let Some(property) = properties.get_mut(key) {
+                make_schema_nullable(property);
+                enforce_strict_openai_schema(property);
+            }
+        }
+    }
+
+    if property_keys.is_empty() {
+        object
+            .entry("required".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        return;
+    }
+
+    let existing_required = object
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let required = property_keys
+        .iter()
+        .map(|key| Value::String(key.clone()))
+        .collect::<Vec<_>>();
+    object.insert("required".to_string(), Value::Array(required));
+
+    if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+        for key in &property_keys {
+            if existing_required.contains(key) {
+                continue;
+            }
+            if let Some(property) = properties.get_mut(key) {
+                make_schema_nullable(property);
+            }
+        }
+    }
+}
+
+fn make_schema_nullable(schema: &mut Value) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+
+    if let Some(any_of) = object.get_mut("anyOf").and_then(Value::as_array_mut) {
+        if any_of
+            .iter()
+            .any(|branch| branch.get("type").and_then(Value::as_str) == Some("null"))
+        {
+            return;
+        }
+        any_of.push(json!({ "type": "null" }));
+        return;
+    }
+
+    match object.get_mut("type") {
+        Some(Value::String(kind)) if kind != "null" => {
+            let original = kind.clone();
+            object.insert(
+                "type".to_string(),
+                Value::Array(vec![Value::String(original), Value::String("null".to_string())]),
+            );
+        }
+        Some(Value::Array(items)) => {
+            if !items
+                .iter()
+                .any(|item| item.as_str() == Some("null"))
+            {
+                items.push(Value::String("null".to_string()));
+            }
+        }
+        _ => {}
+    }
+}
+
 fn llm_endpoint(base_url: &str, path_suffix: &str) -> String {
     let base = base_url.trim().trim_end_matches('/');
     if base.to_ascii_lowercase().ends_with("/v1") {
@@ -1571,6 +1810,8 @@ mod tests {
         temperature: Option<f32>,
         top_p: Option<f32>,
         top_k: Option<u32>,
+        frequency_penalty: Option<f32>,
+        presence_penalty: Option<f32>,
     }
 
     impl OpenAiRuntimeConfig for TestConfig {
@@ -1605,6 +1846,14 @@ mod tests {
         fn top_k(&self) -> Option<u32> {
             self.top_k
         }
+
+        fn frequency_penalty(&self) -> Option<f32> {
+            self.frequency_penalty
+        }
+
+        fn presence_penalty(&self) -> Option<f32> {
+            self.presence_penalty
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1633,6 +1882,8 @@ mod tests {
             temperature: Some(0.3),
             top_p: Some(0.9),
             top_k: Some(40),
+            frequency_penalty: None,
+            presence_penalty: None,
         };
         let client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
             .expect("client should build");
@@ -1701,6 +1952,8 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
         };
         let client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
             .expect("client should build");
@@ -1760,6 +2013,8 @@ mod tests {
             temperature: Some(0.4),
             top_p: Some(0.85),
             top_k: Some(32),
+            frequency_penalty: None,
+            presence_penalty: None,
         };
         let client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
             .expect("client should build");
@@ -1836,6 +2091,8 @@ mod tests {
             temperature: None,
             top_p: None,
             top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
         };
         let client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
             .expect("client should build");
@@ -1899,6 +2156,8 @@ mod tests {
             temperature: Some(0.2),
             top_p: Some(0.8),
             top_k: Some(64),
+            frequency_penalty: None,
+            presence_penalty: None,
         };
         let client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
             .expect("client should build");
@@ -1948,6 +2207,8 @@ mod tests {
             temperature: Some(0.2),
             top_p: Some(0.8),
             top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
         };
         let client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
             .expect("client should build");
@@ -2032,5 +2293,281 @@ mod tests {
             400,
             r#"{"detail":"Instructions are required"}"#
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn strict_tool_schema_marks_optional_fields_nullable_and_required() {
+        let response = json!({
+            "id": "chatcmpl_1",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "ok"
+                    }
+                }
+            ]
+        });
+        let (addr, requests) = spawn_mock_http_server(vec![http_json_response(response)]);
+        let config = TestConfig {
+            base_url: format!("http://{addr}"),
+            stream: false,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+        };
+        let client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
+            .expect("client should build");
+        let tool = LlmFunctionTool::new(
+            "workspace_list_files",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "max_depth": { "type": "integer" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            |_arguments| async move { Ok(LlmToolOutput::Text("[]".to_string())) },
+        );
+
+        let completion = client
+            .complete_with_chat_completions("hello", &[tool], None)
+            .await
+            .expect("chat completions request should succeed");
+        assert_eq!(completion.text, "ok");
+
+        let captured = requests.lock().expect("request capture should lock");
+        let body = request_body_json(&captured[0]);
+        let parameters = &body["tools"][0]["function"]["parameters"];
+        let mut required = parameters["required"]
+            .as_array()
+            .expect("required should be an array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        required.sort_unstable();
+        assert_eq!(required, vec!["max_depth", "path"]);
+        assert_eq!(parameters["additionalProperties"], Value::Bool(false));
+        assert_eq!(parameters["properties"]["path"]["type"], json!(["string", "null"]));
+        assert_eq!(
+            parameters["properties"]["max_depth"]["type"],
+            json!(["integer", "null"])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn custom_openai_endpoint_keeps_reasoning_when_tools_are_present() {
+        let response = json!({
+            "id": "chatcmpl_1",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "ok"
+                    }
+                }
+            ]
+        });
+        let (addr, requests) = spawn_mock_http_server(vec![http_json_response(response)]);
+        let config = TestConfig {
+            base_url: format!("http://{addr}/proxy/openai"),
+            stream: false,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+        };
+        let mut client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
+            .expect("client should build");
+        client.reasoning_effort = Some("medium".to_string());
+        let tool = LlmFunctionTool::new(
+            "lookup_weather",
+            json!({
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string" }
+                },
+                "required": ["city"]
+            }),
+            |_arguments| async move { Ok(LlmToolOutput::Text("ok".to_string())) },
+        );
+
+        client
+            .complete_with_chat_completions("hello", &[tool], None)
+            .await
+            .expect("chat request should succeed");
+
+        let captured = requests.lock().expect("request capture should lock");
+        let body = request_body_json(&captured[0]);
+        assert_eq!(body["reasoning"]["effort"], "medium");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn success_status_json_error_is_reported_as_upstream_failure() {
+        let response = json!({
+            "error": {
+                "message": "Copilot API error: Bad Request",
+                "code": 400
+            }
+        });
+        let (addr, _) = spawn_mock_http_server(vec![http_json_response(response)]);
+        let config = TestConfig {
+            base_url: format!("http://{addr}"),
+            stream: false,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+        };
+        let client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
+            .expect("client should build");
+
+        let err = client
+            .complete_with_chat_completions("hello", &[], None)
+            .await
+            .expect_err("embedded error should fail the request");
+        match err {
+            LlmClientError::Upstream { status, detail } => {
+                assert_eq!(status, 400);
+                assert!(detail.contains("Bad Request"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn embedded_instruction_error_without_numeric_code_falls_back_to_chat() {
+        let responses_error = json!({
+            "error": {
+                "message": "Instructions are required"
+            }
+        });
+        let chat_response = json!({
+            "id": "chatcmpl_1",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "fallback ok"
+                    }
+                }
+            ]
+        });
+        let (addr, requests) = spawn_mock_http_server(vec![
+            http_json_response(responses_error),
+            http_json_response(chat_response),
+        ]);
+        let config = TestConfig {
+            base_url: format!("http://{addr}"),
+            stream: false,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+        };
+        let client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
+            .expect("client should build");
+
+        let completion = client
+            .complete("hello", &[], None)
+            .await
+            .expect("instruction error should fall back to chat");
+        assert_eq!(completion.text, "fallback ok");
+
+        let captured = requests.lock().expect("request capture should lock");
+        assert_eq!(captured.len(), 2);
+        assert!(captured[0].contains("POST /v1/responses HTTP/1.1"));
+        assert!(captured[1].contains("POST /v1/chat/completions HTTP/1.1"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn responses_stream_instruction_error_is_classified_as_bad_request() {
+        let events = vec![json!({
+            "type": "response.failed",
+            "response": {
+                "error": {
+                    "message": "Instructions are required"
+                }
+            }
+        })];
+        let (addr, _) = spawn_mock_http_server(vec![http_sse_response(&events)]);
+        let config = TestConfig {
+            base_url: format!("http://{addr}"),
+            stream: true,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+        };
+        let client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
+            .expect("client should build");
+        let request = client.build_responses_request(
+            &ResponsesTurnInput::Initial {
+                input: Value::String("hello".to_string()),
+            },
+            &[],
+            true,
+        );
+        let mut dispatcher = EventDispatcher::new(None);
+
+        let err = client
+            .send_responses_stream(
+                llm_endpoint(client.base_url.as_str(), "responses").as_str(),
+                request,
+                &mut dispatcher,
+            )
+            .await
+            .expect_err("response.failed event should fail the stream");
+        match err {
+            LlmClientError::Upstream { status, detail } => {
+                assert_eq!(status, 400);
+                assert!(detail.contains("Instructions are required"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chat_stream_reports_embedded_sse_errors() {
+        let events = vec![json!({
+            "error": {
+                "message": "Copilot API error: Bad Request",
+                "code": 400
+            }
+        })];
+        let (addr, _) = spawn_mock_http_server(vec![http_sse_response(&events)]);
+        let config = TestConfig {
+            base_url: format!("http://{addr}"),
+            stream: false,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+        };
+        let client = OpenAiResponsesClient::from_runtime_with_api_key(&config, "sk-test")
+            .expect("client should build");
+        let mut seen = Vec::new();
+
+        let err = client
+            .complete_with_chat_completions("hello", &[], Some(&mut |event| seen.push(event)))
+            .await
+            .expect_err("embedded SSE error should fail the request");
+        assert!(seen.is_empty());
+        match err {
+            LlmClientError::Upstream { status, detail } => {
+                assert_eq!(status, 400);
+                assert!(detail.contains("Bad Request"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 }

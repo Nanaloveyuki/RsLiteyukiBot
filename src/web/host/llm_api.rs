@@ -617,8 +617,7 @@ fn llm_chat_payload(service: &WebHostService, request: &[u8]) -> Result<Value, S
     let reasoning_effort = chat_request
         .reasoning_effort
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(normalize_reasoning_effort_input)
         .map(ToString::to_string);
     let request_summary = summarize_frontend_chat_request(
         &chat_request,
@@ -633,6 +632,8 @@ fn llm_chat_payload(service: &WebHostService, request: &[u8]) -> Result<Value, S
         chat_request.temperature,
         chat_request.top_p,
         chat_request.top_k,
+        chat_request.frequency_penalty,
+        chat_request.presence_penalty,
     )
     .map_err(|err| {
         emit_console_log(
@@ -815,6 +816,8 @@ async fn send_openai_compatible_chat(
         temperature: request.temperature.or(llm_config.temperature),
         top_p: request.top_p.or(llm_config.top_p),
         top_k: request.top_k.or(llm_config.top_k),
+        frequency_penalty: request.frequency_penalty.or(llm_config.frequency_penalty),
+        presence_penalty: request.presence_penalty.or(llm_config.presence_penalty),
         parallel_tool_calls: llm_config.parallel_tool_calls,
         reasoning_effort: reasoning_effort.map(ToString::to_string),
         default_headers: llm_config.headers.clone(),
@@ -867,6 +870,8 @@ async fn send_chat_completions_family_chat(
         temperature: request.temperature.or(llm_config.temperature),
         top_p: request.top_p.or(llm_config.top_p),
         top_k: request.top_k.or(llm_config.top_k),
+        frequency_penalty: request.frequency_penalty.or(llm_config.frequency_penalty),
+        presence_penalty: request.presence_penalty.or(llm_config.presence_penalty),
         parallel_tool_calls: llm_config.parallel_tool_calls,
         reasoning_effort: reasoning_effort.map(ToString::to_string),
         default_headers: llm_config.headers.clone(),
@@ -1136,6 +1141,8 @@ fn build_openrouter_request(
     model: &str,
     temperature: Option<f32>,
     top_p: Option<f32>,
+    frequency_penalty: Option<f32>,
+    presence_penalty: Option<f32>,
     reasoning_effort: Option<&str>,
 ) -> Result<Value, String> {
     let mut body = Map::new();
@@ -1154,6 +1161,12 @@ fn build_openrouter_request(
     }
     if let Some(top_p) = top_p {
         body.insert("top_p".to_string(), json!(top_p));
+    }
+    if let Some(frequency_penalty) = frequency_penalty {
+        body.insert("frequency_penalty".to_string(), json!(frequency_penalty));
+    }
+    if let Some(presence_penalty) = presence_penalty {
+        body.insert("presence_penalty".to_string(), json!(presence_penalty));
     }
     if let Some(reasoning_effort) = reasoning_effort {
         body.insert(
@@ -1740,6 +1753,10 @@ struct WebLlmChatRequest {
     top_p: Option<f32>,
     #[serde(default, rename = "topK")]
     top_k: Option<u32>,
+    #[serde(default, rename = "frequencyPenalty")]
+    frequency_penalty: Option<f32>,
+    #[serde(default, rename = "presencePenalty")]
+    presence_penalty: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1778,6 +1795,8 @@ struct WebLlmRuntimeConfig {
     temperature: Option<f32>,
     top_p: Option<f32>,
     top_k: Option<u32>,
+    frequency_penalty: Option<f32>,
+    presence_penalty: Option<f32>,
     parallel_tool_calls: bool,
     reasoning_effort: Option<String>,
     default_headers: HashMap<String, String>,
@@ -1814,6 +1833,14 @@ impl OpenAiRuntimeConfig for WebLlmRuntimeConfig {
 
     fn top_k(&self) -> Option<u32> {
         self.top_k
+    }
+
+    fn frequency_penalty(&self) -> Option<f32> {
+        self.frequency_penalty
+    }
+
+    fn presence_penalty(&self) -> Option<f32> {
+        self.presence_penalty
     }
 
     fn parallel_tool_calls(&self) -> bool {
@@ -1862,6 +1889,8 @@ fn validate_sampling_args(
     temperature: Option<f32>,
     top_p: Option<f32>,
     top_k: Option<u32>,
+    frequency_penalty: Option<f32>,
+    presence_penalty: Option<f32>,
 ) -> Result<(), String> {
     if temperature.is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value)) {
         return Err("temperature should be within 0..=2".to_string());
@@ -1872,7 +1901,26 @@ fn validate_sampling_args(
     if top_k.is_some_and(|value| value == 0) {
         return Err("topK should be > 0".to_string());
     }
+    if frequency_penalty
+        .is_some_and(|value| !value.is_finite() || !(-2.0..=2.0).contains(&value))
+    {
+        return Err("frequencyPenalty should be within -2..=2".to_string());
+    }
+    if presence_penalty
+        .is_some_and(|value| !value.is_finite() || !(-2.0..=2.0).contains(&value))
+    {
+        return Err("presencePenalty should be within -2..=2".to_string());
+    }
     Ok(())
+}
+
+fn normalize_reasoning_effort_input(raw: &str) -> Option<&str> {
+    let value = raw.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn build_responses_input(
@@ -2624,6 +2672,8 @@ fn prepare_provider_request(
         temperature: None,
         top_p: None,
         top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
         parallel_tool_calls: false,
         reasoning_effort: None,
         default_headers: provider.headers.clone().unwrap_or_default(),
@@ -2744,6 +2794,8 @@ fn build_probe_chat_request() -> WebLlmChatRequest {
         temperature: None,
         top_p: None,
         top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
     }
 }
 
@@ -3108,6 +3160,8 @@ fn current_provider_supports(
             "temperature": true,
             "topP": true,
             "topK": false,
+            "frequencyPenalty": true,
+            "presencePenalty": true,
             "reasoningEffort": !reasoning_options.is_empty(),
             "imageInput": true,
             "textFileInput": true,
@@ -3118,6 +3172,8 @@ fn current_provider_supports(
             "temperature": true,
             "topP": true,
             "topK": true,
+            "frequencyPenalty": false,
+            "presencePenalty": false,
             "reasoningEffort": false,
             "imageInput": true,
             "textFileInput": true,
@@ -3128,6 +3184,8 @@ fn current_provider_supports(
             "temperature": true,
             "topP": true,
             "topK": true,
+            "frequencyPenalty": false,
+            "presencePenalty": false,
             "reasoningEffort": false,
             "imageInput": true,
             "textFileInput": true,
@@ -3138,6 +3196,8 @@ fn current_provider_supports(
             "temperature": true,
             "topP": true,
             "topK": false,
+            "frequencyPenalty": true,
+            "presencePenalty": true,
             "reasoningEffort": false,
             "imageInput": true,
             "textFileInput": true,
@@ -3148,6 +3208,8 @@ fn current_provider_supports(
             "temperature": true,
             "topP": true,
             "topK": true,
+            "frequencyPenalty": true,
+            "presencePenalty": true,
             "reasoningEffort": false,
             "imageInput": false,
             "textFileInput": true,
@@ -3158,6 +3220,8 @@ fn current_provider_supports(
             "temperature": true,
             "topP": true,
             "topK": true,
+            "frequencyPenalty": true,
+            "presencePenalty": true,
             "reasoningEffort": false,
             "imageInput": false,
             "textFileInput": true,
@@ -3168,6 +3232,8 @@ fn current_provider_supports(
             "temperature": true,
             "topP": true,
             "topK": !base_url.to_ascii_lowercase().contains("api.openai.com"),
+            "frequencyPenalty": true,
+            "presencePenalty": true,
             "reasoningEffort": !reasoning_options.is_empty(),
             "imageInput": false,
             "textFileInput": true,
@@ -3219,12 +3285,13 @@ fn model_options_for_provider(provider_id: &str) -> Vec<String> {
 }
 
 fn reasoning_options_for_provider(provider_id: &str, model: &str) -> Vec<String> {
-    if provider_id != "openai" {
+    if !matches!(provider_id, "openai" | "openai-compatible") {
         return Vec::new();
     }
     let model = model.to_ascii_lowercase();
     if model.starts_with("gpt-5") {
         return vec![
+            "none".to_string(),
             "minimal".to_string(),
             "low".to_string(),
             "medium".to_string(),
@@ -3251,6 +3318,8 @@ fn provider_catalog() -> Vec<Value> {
                 "temperature": "supported",
                 "topP": "supported",
                 "topK": "unsupported",
+                "frequencyPenalty": "supported",
+                "presencePenalty": "supported",
                 "streaming": "supported",
                 "imageInput": "supported",
                 "textFileInput": "supported",
@@ -3258,7 +3327,8 @@ fn provider_catalog() -> Vec<Value> {
                 "reasoning": {
                     "mode": "effort",
                     "requestField": "reasoning.effort",
-                    "options": ["minimal", "low", "medium", "high", "xhigh"],
+                    "options": ["none", "minimal", "low", "medium", "high", "xhigh"],
+                    "disableValue": "none",
                     "notes": [
                         "不同 OpenAI 模型支持的 effort 集合不同，应按模型再裁剪",
                         "topK 未出现在 OpenAI 官方参数文档中，这里按 direct OpenAI 不支持处理"
@@ -3280,6 +3350,8 @@ fn provider_catalog() -> Vec<Value> {
                 "temperature": "conditional",
                 "topP": "conditional",
                 "topK": "conditional",
+                "frequencyPenalty": "unsupported",
+                "presencePenalty": "unsupported",
                 "streaming": "supported",
                 "imageInput": "supported",
                 "textFileInput": "unsupported",
@@ -3309,6 +3381,8 @@ fn provider_catalog() -> Vec<Value> {
                 "temperature": "supported",
                 "topP": "supported",
                 "topK": "supported",
+                "frequencyPenalty": "unsupported",
+                "presencePenalty": "unsupported",
                 "streaming": "supported",
                 "imageInput": "supported",
                 "textFileInput": "supported",
@@ -3339,6 +3413,8 @@ fn provider_catalog() -> Vec<Value> {
                 "temperature": "conditional",
                 "topP": "conditional",
                 "topK": "conditional",
+                "frequencyPenalty": "conditional",
+                "presencePenalty": "conditional",
                 "streaming": "supported",
                 "imageInput": "conditional",
                 "textFileInput": "conditional",
@@ -3366,6 +3442,8 @@ fn provider_catalog() -> Vec<Value> {
                 "temperature": "conditional",
                 "topP": "conditional",
                 "topK": "conditional",
+                "frequencyPenalty": "conditional",
+                "presencePenalty": "conditional",
                 "streaming": "supported",
                 "imageInput": "supported",
                 "textFileInput": "supported",
@@ -3398,6 +3476,8 @@ fn provider_catalog() -> Vec<Value> {
                 "temperature": "conditional",
                 "topP": "conditional",
                 "topK": "unknown",
+                "frequencyPenalty": "conditional",
+                "presencePenalty": "conditional",
                 "streaming": "supported",
                 "imageInput": "conditional",
                 "textFileInput": "conditional",
@@ -3424,6 +3504,18 @@ mod tests {
         assert_eq!(
             reasoning_options_for_provider("openai", "gpt-5-mini"),
             vec![
+                "none".to_string(),
+                "minimal".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "xhigh".to_string(),
+            ]
+        );
+        assert_eq!(
+            reasoning_options_for_provider("openai-compatible", "gpt-5-mini"),
+            vec![
+                "none".to_string(),
                 "minimal".to_string(),
                 "low".to_string(),
                 "medium".to_string(),
@@ -3579,6 +3671,8 @@ mod tests {
             "openai/gpt-5",
             Some(0.5),
             Some(0.9),
+            Some(0.2),
+            Some(-0.3),
             Some("high"),
         )
         .expect("openrouter payload should build");
@@ -3590,7 +3684,36 @@ mod tests {
             payload["messages"][1]["content"][1]["image_url"]["url"],
             "data:image/png;base64,abc"
         );
+        let frequency_penalty = payload["frequency_penalty"]
+            .as_f64()
+            .expect("frequency penalty should be numeric");
+        let presence_penalty = payload["presence_penalty"]
+            .as_f64()
+            .expect("presence penalty should be numeric");
+        assert!((frequency_penalty - 0.2).abs() < 1e-6);
+        assert!((presence_penalty + 0.3).abs() < 1e-6);
         assert_eq!(payload["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn validate_sampling_args_accepts_penalty_range() {
+        assert!(validate_sampling_args(Some(1.0), Some(0.9), Some(40), Some(-2.0), Some(2.0))
+            .is_ok());
+        assert_eq!(
+            validate_sampling_args(None, None, None, Some(2.1), None).unwrap_err(),
+            "frequencyPenalty should be within -2..=2"
+        );
+        assert_eq!(
+            validate_sampling_args(None, None, None, None, Some(-2.1)).unwrap_err(),
+            "presencePenalty should be within -2..=2"
+        );
+    }
+
+    #[test]
+    fn normalize_reasoning_effort_maps_none_to_absent() {
+        assert_eq!(normalize_reasoning_effort_input("none"), None);
+        assert_eq!(normalize_reasoning_effort_input(" None "), None);
+        assert_eq!(normalize_reasoning_effort_input("medium"), Some("medium"));
     }
 
     #[test]

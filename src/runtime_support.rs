@@ -600,6 +600,12 @@ pub(crate) fn merge_llm_config_sections(
     if overlay.top_k.is_some() {
         merged.top_k = overlay.top_k;
     }
+    if overlay.frequency_penalty.is_some() {
+        merged.frequency_penalty = overlay.frequency_penalty;
+    }
+    if overlay.presence_penalty.is_some() {
+        merged.presence_penalty = overlay.presence_penalty;
+    }
     if overlay.parallel_tool_calls.is_some() {
         merged.parallel_tool_calls = overlay.parallel_tool_calls;
     }

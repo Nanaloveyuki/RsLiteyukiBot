@@ -348,6 +348,10 @@ pub(crate) struct LlmConfigSection {
     #[serde(default)]
     pub(crate) top_k: Option<u32>,
     #[serde(default)]
+    pub(crate) frequency_penalty: Option<f32>,
+    #[serde(default)]
+    pub(crate) presence_penalty: Option<f32>,
+    #[serde(default)]
     pub(crate) parallel_tool_calls: Option<bool>,
     #[serde(default)]
     pub(crate) system_prompt: Option<String>,
@@ -400,6 +404,8 @@ pub(crate) struct LlmRuntimeConfig {
     pub(crate) temperature: Option<f32>,
     pub(crate) top_p: Option<f32>,
     pub(crate) top_k: Option<u32>,
+    pub(crate) frequency_penalty: Option<f32>,
+    pub(crate) presence_penalty: Option<f32>,
     pub(crate) parallel_tool_calls: bool,
     pub(crate) system_prompt: Option<String>,
     pub(crate) command_prefix: String,
@@ -432,6 +438,14 @@ impl llm::OpenAiRuntimeConfig for LlmRuntimeConfig {
 
     fn top_k(&self) -> Option<u32> {
         self.top_k
+    }
+
+    fn frequency_penalty(&self) -> Option<f32> {
+        self.frequency_penalty
+    }
+
+    fn presence_penalty(&self) -> Option<f32> {
+        self.presence_penalty
     }
 
     fn parallel_tool_calls(&self) -> bool {
@@ -706,6 +720,8 @@ llm:
   # temperature: 0.7
   # top_p: 1.0
   # top_k: 40 # compatibility providers only; ignored for official OpenAI Responses
+  # frequency_penalty: 0.0
+  # presence_penalty: 0.0
   # parallel_tool_calls: true
   command_prefix: /ask
   # provider_urls:
@@ -803,6 +819,8 @@ timeout_seconds = 20
 # temperature = 0.7
 # top_p = 1.0
 # top_k = 40 # compatibility providers only; ignored for official OpenAI Responses
+# frequency_penalty = 0.0
+# presence_penalty = 0.0
 # parallel_tool_calls = true
 command_prefix = "/ask"
 # provider_urls = ["https://api.openai.com"]
@@ -1185,6 +1203,16 @@ pub(crate) fn resolve_llm_config(app_config: &AppConfigDoc) -> LlmRuntimeConfig 
         .and_then(|raw| raw.trim().parse::<u32>().ok())
         .or_else(|| section.and_then(|cfg| cfg.top_k))
         .filter(|value| *value > 0);
+    let frequency_penalty = std::env::var("LY_LLM_FREQUENCY_PENALTY")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f32>().ok())
+        .or_else(|| section.and_then(|cfg| cfg.frequency_penalty))
+        .filter(|value| value.is_finite() && (-2.0..=2.0).contains(value));
+    let presence_penalty = std::env::var("LY_LLM_PRESENCE_PENALTY")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f32>().ok())
+        .or_else(|| section.and_then(|cfg| cfg.presence_penalty))
+        .filter(|value| value.is_finite() && (-2.0..=2.0).contains(value));
 
     let parallel_tool_calls = std::env::var("LY_LLM_PARALLEL_TOOL_CALLS")
         .ok()
@@ -1221,6 +1249,8 @@ pub(crate) fn resolve_llm_config(app_config: &AppConfigDoc) -> LlmRuntimeConfig 
         temperature,
         top_p,
         top_k,
+        frequency_penalty,
+        presence_penalty,
         parallel_tool_calls,
         system_prompt,
         command_prefix,
@@ -1858,6 +1888,26 @@ pub(crate) fn validate_app_config(doc: &AppConfigDoc) -> Vec<String> {
                 locale,
                 "config.warn.should_be_positive",
                 &[("field", "llm.top_k")],
+            ));
+        }
+        if llm
+            .frequency_penalty
+            .is_some_and(|value| !value.is_finite() || !(-2.0..=2.0).contains(&value))
+        {
+            warnings.push(trf_for(
+                locale,
+                "config.warn.invalid_range",
+                &[("field", "llm.frequency_penalty"), ("range", "-2..=2")],
+            ));
+        }
+        if llm
+            .presence_penalty
+            .is_some_and(|value| !value.is_finite() || !(-2.0..=2.0).contains(&value))
+        {
+            warnings.push(trf_for(
+                locale,
+                "config.warn.invalid_range",
+                &[("field", "llm.presence_penalty"), ("range", "-2..=2")],
             ));
         }
         if llm

@@ -926,6 +926,8 @@ fn resolve_llm_config_reads_values_from_config() {
             temperature: Some(0.7),
             top_p: Some(0.95),
             top_k: Some(32),
+            frequency_penalty: Some(0.4),
+            presence_penalty: Some(-0.3),
             parallel_tool_calls: Some(false),
             system_prompt: Some("system".to_string()),
             command_prefix: Some("/ask".to_string()),
@@ -948,6 +950,8 @@ fn resolve_llm_config_reads_values_from_config() {
     assert_eq!(config.temperature, Some(0.7));
     assert_eq!(config.top_p, Some(0.95));
     assert_eq!(config.top_k, Some(32));
+    assert_eq!(config.frequency_penalty, Some(0.4));
+    assert_eq!(config.presence_penalty, Some(-0.3));
     assert!(!config.parallel_tool_calls);
 }
 

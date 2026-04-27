@@ -36,6 +36,7 @@ import LlmManager, {
   type LlmConversationMessage,
   type LlmProviderCatalogItem,
 } from '@/controllers/llm_manager';
+import { useTheme } from '@/hooks/use-theme';
 
 interface ChatMessage {
   id: string;
@@ -66,6 +67,8 @@ interface LlmChatPreferences {
   temperature: string;
   topP: string;
   topK: string;
+  frequencyPenalty: string;
+  presencePenalty: string;
   reasoningEffort: string;
 }
 
@@ -75,7 +78,9 @@ const DEFAULT_PREFERENCES: LlmChatPreferences = {
   temperature: '',
   topP: '',
   topK: '',
-  reasoningEffort: 'medium',
+  frequencyPenalty: '',
+  presencePenalty: '',
+  reasoningEffort: '',
 };
 
 const DEFAULT_SUPPORTS = {
@@ -83,6 +88,8 @@ const DEFAULT_SUPPORTS = {
   temperature: true,
   topP: true,
   topK: true,
+  frequencyPenalty: true,
+  presencePenalty: true,
   reasoningEffort: true,
   imageInput: true,
   textFileInput: true,
@@ -426,9 +433,11 @@ function AttachmentCard ({
 }
 
 function MessageBubble ({
+  assistantBubbleClass,
   hasBackground,
   message,
 }: {
+  assistantBubbleClass: string;
   hasBackground: boolean;
   message: ChatMessage;
 }) {
@@ -443,11 +452,7 @@ function MessageBubble ({
           className={clsx(
             'max-w-[92%] rounded-[26px] px-4 py-3 shadow-sm md:max-w-[78%]',
             isUser && 'bg-primary text-primary-foreground',
-            isAssistant && (
-              hasBackground
-                ? 'border border-white/10 bg-white/12 text-white'
-                : 'border border-white/20 bg-white/85 text-default-700 dark:border-white/10 dark:bg-black/30 dark:text-default-100'
-            ),
+            isAssistant && assistantBubbleClass,
             message.role === 'system' && 'border border-danger/20 bg-danger/10 text-danger'
           )}
         >
@@ -494,6 +499,7 @@ function MessageBubble ({
 }
 
 export default function LlmChatPage () {
+  const { isDark } = useTheme();
   const [storedConfig, setStoredConfig] = useLocalStorage<LlmChatPreferences>(
     key.llmChatConfig,
     DEFAULT_PREFERENCES
@@ -587,10 +593,6 @@ export default function LlmChatPage () {
     () => detectProviderId(currentBaseUrl),
     [currentBaseUrl]
   );
-  const selectedProviderCatalog = useMemo(
-    () => providerCatalog.find((item) => item.id === selectedProviderId),
-    [providerCatalog, selectedProviderId]
-  );
   const modelOptions = useMemo(() => {
     if (selectedProviderOption?.modelOptions?.length) {
       return selectedProviderOption.modelOptions;
@@ -623,8 +625,57 @@ export default function LlmChatPage () {
     (option) => option.baseUrl === currentBaseUrl
   )?.label || settings?.provider || (currentBaseUrl ? compactBaseUrl(currentBaseUrl) : '未配置 Provider');
   const acceptedAttachments = acceptedFileTypes(supports);
-  const providerNotes = selectedProviderCatalog?.parameterSupport.reasoning?.notes ?? [];
   const canSend = chatReady && !submitting && (draft.trim().length > 0 || attachments.length > 0);
+  const themePanelClass = hasBackground
+    ? isDark
+      ? 'border-white/20 bg-black/30 text-white'
+      : 'border-black/10 bg-white/72 text-default-700'
+    : 'border-white/40 bg-white/60 text-default-700 dark:border-white/10 dark:bg-black/30 dark:text-default-100';
+  const themeSurfaceClass = hasBackground
+    ? isDark
+      ? 'border-white/12 bg-black/25'
+      : 'border-black/8 bg-white/58'
+    : 'border-white/40 bg-white/60 dark:border-white/10 dark:bg-black/30';
+  const themeSubtleSurfaceClass = hasBackground
+    ? isDark
+      ? 'border-white/10 bg-white/5'
+      : 'border-black/8 bg-white/45'
+    : 'border-white/20 bg-white/30 dark:bg-white/5';
+  const mutedTextClass = hasBackground
+    ? isDark
+      ? 'text-white/70'
+      : 'text-default-500'
+    : 'text-default-500 dark:text-default-400';
+  const quietTextClass = hasBackground
+    ? isDark
+      ? 'text-white/60'
+      : 'text-default-400'
+    : 'text-default-400 dark:text-default-500';
+  const faintTextClass = hasBackground
+    ? isDark
+      ? 'text-white/50'
+      : 'text-default-400'
+    : 'text-default-400 dark:text-default-500';
+  const strongTextClass = hasBackground
+    ? isDark
+      ? 'text-white'
+      : 'text-default-700'
+    : 'text-default-700 dark:text-default-100';
+  const assistantBubbleClass = hasBackground
+    ? isDark
+      ? 'border border-white/12 bg-black/25 text-white'
+      : 'border border-black/10 bg-white/74 text-default-700'
+    : 'border border-white/20 bg-white/85 text-default-700 dark:border-white/10 dark:bg-black/30 dark:text-default-100';
+  const composerShellClass = hasBackground
+    ? isDark
+      ? 'border-white/15 bg-black/22'
+      : 'border-black/10 bg-white/76'
+    : 'border-default-200/60 bg-white/80 dark:border-white/10 dark:bg-black/25';
+  const composerInputClass = hasBackground
+    ? isDark
+      ? 'text-white placeholder:text-white/45'
+      : 'text-default-700 placeholder:text-default-400'
+    : 'text-default-700 placeholder:text-default-400 dark:text-default-100 dark:placeholder:text-default-500';
 
   useEffect(() => {
     if (!supports.reasoningEffort) {
@@ -634,8 +685,8 @@ export default function LlmChatPage () {
       return;
     }
 
-    if (reasoningOptions.length > 0 && !reasoningOptions.includes(config.reasoningEffort)) {
-      setConfigField('reasoningEffort', reasoningOptions[0]);
+    if (config.reasoningEffort && reasoningOptions.length > 0 && !reasoningOptions.includes(config.reasoningEffort)) {
+      setConfigField('reasoningEffort', '');
     }
   }, [config.reasoningEffort, reasoningOptions, supports.reasoningEffort]);
 
@@ -758,7 +809,6 @@ export default function LlmChatPage () {
       ...DEFAULT_PREFERENCES,
       baseUrl: settings.baseUrl,
       model: settings.model,
-      reasoningEffort: 'medium',
     });
     toast.success('模型设置已重置');
   };
@@ -861,7 +911,9 @@ export default function LlmChatPage () {
         temperature: supports.temperature ? parseOptionalNumber(config.temperature, Number) : undefined,
         topP: supports.topP ? parseOptionalNumber(config.topP, Number) : undefined,
         topK: supports.topK ? parseOptionalNumber(config.topK, (value) => parseInt(value, 10)) : undefined,
-        reasoningEffort: supports.reasoningEffort ? config.reasoningEffort : undefined,
+        frequencyPenalty: supports.frequencyPenalty ? parseOptionalNumber(config.frequencyPenalty, Number) : undefined,
+        presencePenalty: supports.presencePenalty ? parseOptionalNumber(config.presencePenalty, Number) : undefined,
+        reasoningEffort: supports.reasoningEffort ? (config.reasoningEffort || undefined) : undefined,
       });
 
       replaceConversationMessages(
@@ -901,20 +953,14 @@ export default function LlmChatPage () {
       <div className='flex h-[calc(100vh-4rem)] flex-col overflow-hidden p-2 md:p-4'>
         <div className='mx-auto flex h-full w-full max-w-6xl min-h-0 flex-col gap-3'>
           <div
-            className={clsx(
+          className={clsx(
               'flex flex-wrap items-center justify-between gap-3 rounded-[28px] border px-4 py-3 backdrop-blur-xl',
-              hasBackground
-                ? 'border-white/30 bg-white/10 text-white'
-                : 'border-white/40 bg-white/60 text-default-700 dark:border-white/10 dark:bg-black/30 dark:text-default-100'
+              themePanelClass
             )}
           >
             <div className='min-w-0'>
               <div className='text-sm font-semibold'>模型对话</div>
-              <div className={clsx(
-                'text-xs',
-                hasBackground ? 'text-white/70' : 'text-default-500'
-              )}
-              >
+              <div className={clsx('text-xs', mutedTextClass)}>
                 Ask LiteyukiBot
                 {settings?.promptProfile ? ` · 配置 ${settings.promptProfile}` : ''}
               </div>
@@ -962,26 +1008,18 @@ export default function LlmChatPage () {
           <div
             className={clsx(
               'flex min-h-0 flex-1 flex-col overflow-hidden rounded-[32px] border backdrop-blur-xl',
-              hasBackground
-                ? 'border-white/30 bg-white/10'
-                : 'border-white/40 bg-white/60 dark:border-white/10 dark:bg-black/30'
+              themeSurfaceClass
             )}
           >
             <div className='flex min-h-0 flex-1 flex-col md:flex-row'>
               <aside
                 className={clsx(
                   'shrink-0 border-b p-3 md:w-64 md:border-b-0 md:border-r',
-                  hasBackground
-                    ? 'border-white/10 bg-white/5'
-                    : 'border-white/20 bg-white/30 dark:bg-white/5'
+                  themeSubtleSurfaceClass
                 )}
               >
                 <div className='mb-3 flex items-center justify-between gap-2'>
-                  <div className={clsx(
-                    'text-xs font-semibold uppercase tracking-[0.18em]',
-                    hasBackground ? 'text-white/60' : 'text-default-400'
-                  )}
-                  >
+                  <div className={clsx('text-xs font-semibold uppercase tracking-[0.18em]', quietTextClass)}>
                     对话
                   </div>
                   <Button
@@ -1008,10 +1046,14 @@ export default function LlmChatPage () {
                           'group flex min-w-56 items-center gap-2 rounded-2xl border p-2 transition md:min-w-0',
                           isActive
                             ? hasBackground
-                              ? 'border-white/30 bg-white/20 shadow-sm'
+                              ? isDark
+                                ? 'border-white/20 bg-white/12 shadow-sm'
+                                : 'border-black/10 bg-white/72 shadow-sm'
                               : 'border-primary/20 bg-primary/10 shadow-sm'
                             : hasBackground
-                              ? 'border-white/10 bg-white/5 hover:bg-white/10'
+                              ? isDark
+                                ? 'border-white/10 bg-white/5 hover:bg-white/10'
+                                : 'border-black/8 bg-white/42 hover:bg-white/60'
                               : 'border-white/30 bg-white/45 hover:bg-white/75 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10'
                         )}
                       >
@@ -1022,14 +1064,14 @@ export default function LlmChatPage () {
                         >
                           <div className={clsx(
                             'truncate text-sm font-semibold',
-                            hasBackground ? 'text-white' : 'text-default-700 dark:text-default-100'
+                            strongTextClass
                           )}
                           >
                             {conversation.title}
                           </div>
                           <div className={clsx(
                             'mt-1 flex items-center gap-2 truncate text-xs',
-                            hasBackground ? 'text-white/55' : 'text-default-400'
+                            quietTextClass
                           )}
                           >
                             <span>{conversation.messages.length} 条</span>
@@ -1038,7 +1080,7 @@ export default function LlmChatPage () {
                           </div>
                           <div className={clsx(
                             'mt-1 truncate text-xs',
-                            hasBackground ? 'text-white/45' : 'text-default-400'
+                            faintTextClass
                           )}
                           >
                             {conversation.model || currentModel || '未选择模型'}
@@ -1072,14 +1114,14 @@ export default function LlmChatPage () {
                     <div className='w-full max-w-2xl px-4 text-center'>
                       <div className={clsx(
                         'mb-4 text-3xl font-semibold tracking-tight md:text-4xl',
-                        hasBackground ? 'text-white' : 'text-default-700 dark:text-default-100'
+                        strongTextClass
                       )}
                       >
                         Ask LiteyukiBot
                       </div>
                       <p className={clsx(
                         'mx-auto max-w-xl text-sm leading-7 md:text-base',
-                        hasBackground ? 'text-white/70' : 'text-default-500'
+                        mutedTextClass
                       )}
                       >
                         从这里开始一轮新的对话。
@@ -1104,6 +1146,7 @@ export default function LlmChatPage () {
                   <div className='space-y-4'>
                     {messages.map((message) => (
                       <MessageBubble
+                        assistantBubbleClass={assistantBubbleClass}
                         key={message.id}
                         hasBackground={hasBackground}
                         message={message}
@@ -1115,7 +1158,7 @@ export default function LlmChatPage () {
 
             <div className={clsx(
               'border-t p-3 md:p-4',
-              hasBackground ? 'border-white/10 bg-white/5' : 'border-white/20 bg-white/40 dark:bg-white/5'
+              themeSubtleSurfaceClass
             )}
             >
               <div className='mx-auto w-full max-w-4xl'>
@@ -1140,7 +1183,7 @@ export default function LlmChatPage () {
                   <Chip size='sm' variant='flat' color='default'>
                     {currentModel || '未选择模型'}
                   </Chip>
-                  {supports.reasoningEffort && config.reasoningEffort && (
+                  {supports.reasoningEffort && config.reasoningEffort && config.reasoningEffort !== 'none' && (
                     <Chip size='sm' variant='flat' color='secondary'>
                       推理 {config.reasoningEffort}
                     </Chip>
@@ -1149,9 +1192,7 @@ export default function LlmChatPage () {
 
                 <div className={clsx(
                   'rounded-[30px] border p-2 shadow-sm',
-                  hasBackground
-                    ? 'border-white/15 bg-white/10'
-                    : 'border-default-200/60 bg-white/80 dark:border-white/10 dark:bg-black/25'
+                  composerShellClass
                 )}
                 >
                   <Textarea
@@ -1172,10 +1213,7 @@ export default function LlmChatPage () {
                     variant='flat'
                     classNames={{
                       inputWrapper: 'border-none bg-transparent shadow-none px-2 py-1 data-[hover=true]:bg-transparent group-data-[focus=true]:bg-transparent',
-                      input: clsx(
-                        'resize-none text-sm md:text-base',
-                        hasBackground ? 'text-white placeholder:text-white/45' : 'text-default-700 placeholder:text-default-400 dark:text-default-100 dark:placeholder:text-default-500'
-                      ),
+                      input: clsx('resize-none text-sm md:text-base', composerInputClass),
                     }}
                   />
 
@@ -1242,12 +1280,7 @@ export default function LlmChatPage () {
           <ModalContent>
             {(onClose) => (
               <>
-                <ModalHeader className='flex flex-col gap-1'>
-                  <span>模型设置</span>
-                  <span className='text-xs font-normal text-default-400'>
-                    当前页面会按后端真实支持能力收缩可用参数
-                  </span>
-                </ModalHeader>
+                <ModalHeader>模型设置</ModalHeader>
                 <ModalBody className='gap-4'>
                   {providerOptions.length > 0
                     ? (
@@ -1337,7 +1370,7 @@ export default function LlmChatPage () {
                     </Select>
                   )}
 
-                  <div className='grid gap-4 md:grid-cols-3'>
+                  <div className='grid gap-4 md:grid-cols-3 xl:grid-cols-5'>
                     {supports.temperature && (
                       <Input
                         label='Temperature'
@@ -1365,23 +1398,23 @@ export default function LlmChatPage () {
                         variant='bordered'
                       />
                     )}
-                  </div>
-
-                  <div className='rounded-2xl border border-default-200/60 bg-default-50/70 px-4 py-3 text-sm text-default-500 dark:border-white/10 dark:bg-white/5'>
-                    当前配置档案: {settings?.promptProfile || 'default'}
-                    <br />
-                    附件支持:
-                    {' '}
-                    {supports.imageInput ? '图片' : '无图片'}
-                    {' / '}
-                    {supports.textFileInput ? '文本文件' : '无文本文件'}
-                    {' / '}
-                    {supports.binaryFileInput ? '普通文件' : '无普通文件'}
-                    {providerNotes.length > 0 && (
-                      <>
-                        <br />
-                        {providerNotes[0]}
-                      </>
+                    {supports.frequencyPenalty && (
+                      <Input
+                        label='Frequency Penalty'
+                        value={config.frequencyPenalty}
+                        onChange={(event) => setConfigField('frequencyPenalty', event.target.value)}
+                        placeholder='默认'
+                        variant='bordered'
+                      />
+                    )}
+                    {supports.presencePenalty && (
+                      <Input
+                        label='Presence Penalty'
+                        value={config.presencePenalty}
+                        onChange={(event) => setConfigField('presencePenalty', event.target.value)}
+                        placeholder='默认'
+                        variant='bordered'
+                      />
                     )}
                   </div>
                 </ModalBody>
