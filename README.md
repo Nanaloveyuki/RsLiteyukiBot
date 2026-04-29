@@ -232,7 +232,7 @@ docker rm -f liteyukibot-web
 
 ### 自动发布规则
 
-- push 到 `main` 时, GitHub Actions 会构建并推送 `latest` 与 `sha-*` tag.
+- push 到 `stable` 时, GitHub Actions 会构建并推送 `latest` 与 `sha-*` tag.
 - push `v*` tag 时, GitHub Actions 会额外推送对应版本 tag, 例如 `v0.1.0`.
 - 整个构建与 push 过程都在 GitHub Actions 上完成, 不依赖本地 Docker 网络环境.
 
