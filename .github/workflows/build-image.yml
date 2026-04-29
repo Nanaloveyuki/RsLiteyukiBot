@@ -2,12 +2,8 @@ name: Docker Image Build
 
 on:
   push:
-    branches:
-      - stable
     tags:
       - "v*"
-  pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
