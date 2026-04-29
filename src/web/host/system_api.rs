@@ -7,7 +7,11 @@ pub(super) fn route_system_api(
     request: &[u8],
     is_head: bool,
 ) -> Option<Vec<u8>> {
-    if api_path == "/base/GetNapCatVersion" {
+    if let Some(response) = super::release_api::route_release_api(api_path, raw_path, is_head) {
+        return Some(response);
+    }
+
+    if api_path == "/base/GetAppVersion" || api_path == "/base/GetNapCatVersion" {
         #[derive(Serialize)]
         struct PackageInfo {
             version: String,
@@ -20,47 +24,6 @@ pub(super) fn route_system_api(
                 .unwrap_or("unknown")
                 .to_string(),
         });
-        return Some(napcat_response(body, is_head));
-    }
-
-    if api_path == "/base/getLatestTag" {
-        let body = napcat_ok(&env!("CARGO_PKG_VERSION"));
-        return Some(napcat_response(body, is_head));
-    }
-
-    if api_path == "/base/getAllReleases" {
-        #[derive(Serialize)]
-        struct Pagination {
-            page: u32,
-            #[serde(rename = "pageSize")]
-            page_size: u32,
-            total: u32,
-            #[serde(rename = "totalPages")]
-            total_pages: u32,
-        }
-        #[derive(Serialize)]
-        struct Releases {
-            versions: Vec<serde_json::Value>,
-            pagination: Pagination,
-        }
-        let body = napcat_ok(&Releases {
-            versions: vec![],
-            pagination: Pagination {
-                page: 1,
-                page_size: 20,
-                total: 0,
-                total_pages: 0,
-            },
-        });
-        return Some(napcat_response(body, is_head));
-    }
-
-    if api_path == "/base/getMirrors" {
-        #[derive(Serialize)]
-        struct Mirrors {
-            mirrors: Vec<String>,
-        }
-        let body = napcat_ok(&Mirrors { mirrors: vec![] });
         return Some(napcat_response(body, is_head));
     }
 
@@ -169,7 +132,7 @@ pub(super) fn route_system_api(
         return Some(napcat_response(body, is_head));
     }
 
-    if api_path == "/base/GetNapCatFileHash" {
+    if api_path == "/base/GetAppFileHash" || api_path == "/base/GetNapCatFileHash" {
         let body = napcat_ok(&serde_json::json!({
             "hash": "",
             "file": "",
@@ -187,13 +150,6 @@ pub(super) fn route_system_api(
 
     if api_path == "/Process/Restart" {
         let body = napcat_ok(&serde_json::json!({ "message": "restart requested" }));
-        return Some(napcat_response(body, is_head));
-    }
-
-    if api_path == "/UpdateNapCat/update" {
-        let body = napcat_ok(&serde_json::json!({
-            "message": "Update not supported in Liteyuki"
-        }));
         return Some(napcat_response(body, is_head));
     }
 
@@ -269,6 +225,7 @@ pub(super) fn route_system_api(
         || api_path == "/QQLogin/GetNewDeviceQRCode"
         || api_path == "/QQLogin/PollNewDeviceQR"
         || api_path == "/QQLogin/ResetDeviceID"
+        || api_path == "/AppRuntime/Restart"
         || api_path == "/QQLogin/RestartNapCat"
         || api_path == "/QQLogin/SetDeviceGUID"
         || api_path == "/QQLogin/RestoreGUIDBackup"

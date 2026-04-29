@@ -25,13 +25,8 @@ interface LoginListItem {
 }
 
 interface PackageInfo {
-  name: string;
   version: string;
-  private: boolean;
-  type: string;
-  scripts: Record<string, string>;
-  dependencies: Record<string, string>;
-  devDependencies: Record<string, string>;
+  buildTime: string;
 }
 
 interface SystemStatus {

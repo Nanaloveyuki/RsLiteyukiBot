@@ -13,6 +13,60 @@ export interface Log {
   message: string;
 }
 
+export interface ReleaseAssetInfo {
+  name: string;
+  contentType: string;
+  size: number;
+  downloadCount: number;
+  downloadUrl: string;
+  mirrorDownloadUrl?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReleaseVersionInfo {
+  tag: string;
+  name?: string;
+  type: 'release' | 'prerelease';
+  htmlUrl: string;
+  mirrorHtmlUrl?: string;
+  body?: string;
+  createdAt: string;
+  publishedAt?: string;
+  assets: ReleaseAssetInfo[];
+  recommendedAsset?: ReleaseAssetInfo;
+}
+
+export interface ReleasePlatformInfo {
+  os: string;
+  arch: string;
+  displayName: string;
+}
+
+export interface ReleaseListResponse {
+  platform: ReleasePlatformInfo;
+  currentVersion: string;
+  versions: ReleaseVersionInfo[];
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+  };
+  mirror?: string;
+  repoUrl: string;
+  releasesUrl: string;
+}
+
+export interface LatestReleaseResponse {
+  platform: ReleasePlatformInfo;
+  currentVersion: string;
+  latest: ReleaseVersionInfo;
+  mirror?: string;
+  repoUrl: string;
+  releasesUrl: string;
+}
+
 export interface EventStreamHandle {
   close: () => void;
 }
@@ -149,15 +203,17 @@ export default class WebUIManager {
     return data.data as ServerResponse<T>;
   }
 
-  public static async GetNapCatVersion () {
+  public static async getAppVersion () {
     const { data } =
-      await serverRequest.get<ServerResponse<PackageInfo>>('/base/GetNapCatVersion');
+      await serverRequest.get<ServerResponse<PackageInfo>>('/base/GetAppVersion');
     return data.data;
   }
 
-  public static async getLatestTag () {
+  public static async getLatestRelease (mirror?: string) {
     const { data } =
-      await serverRequest.get<ServerResponse<string>>('/base/getLatestTag');
+      await serverRequest.get<ServerResponse<LatestReleaseResponse>>('/base/GetLatestRelease', {
+        params: { mirror },
+      });
     return data.data;
   }
 
@@ -177,31 +233,12 @@ export default class WebUIManager {
   public static async getAllReleases (options: {
     page?: number;
     pageSize?: number;
-    type?: 'release' | 'action' | 'all';
+    type?: 'release' | 'prerelease' | 'all';
     search?: string;
     mirror?: string;
   } = {}) {
     const { page = 1, pageSize = 20, type = 'release', search = '', mirror } = options;
-    const { data } = await serverRequest.get<ServerResponse<{
-      versions: Array<{
-        tag: string;
-        type: 'release' | 'prerelease' | 'action';
-        artifactId?: number;
-        artifactName?: string;
-        createdAt?: string;
-        expiresAt?: string;
-        size?: number;
-        workflowRunId?: number;
-        headSha?: string;
-      }>;
-      pagination: {
-        page: number;
-        pageSize: number;
-        total: number;
-        totalPages: number;
-      };
-      mirror?: string;
-    }>>('/base/getAllReleases', {
+    const { data } = await serverRequest.get<ServerResponse<ReleaseListResponse>>('/base/getAllReleases', {
       params: { page, pageSize, type, search, mirror },
     });
     return data.data;
@@ -211,30 +248,6 @@ export default class WebUIManager {
     const { data } =
       await serverRequest.get<ServerResponse<{ mirrors: string[]; }>>('/base/getMirrors');
     return data.data;
-  }
-
-  public static async UpdateNapCat (mirror?: string) {
-    const { data } = await serverRequest.post<ServerResponse<any>>(
-      '/UpdateNapCat/update',
-      { mirror },
-      { timeout: 120000 } // 2分钟超时
-    );
-    return data;
-  }
-
-  /**
-   * 更新到指定版本
-   * @param targetVersion 目标版本 tag，如 "v4.9.9" 或 "action-123456"
-   * @param force 是否强制更新（允许降级）
-   * @param mirror 指定使用的镜像
-   */
-  public static async UpdateNapCatToVersion (targetVersion: string, force: boolean = false, mirror?: string) {
-    const { data } = await serverRequest.post<ServerResponse<any>>(
-      '/UpdateNapCat/update',
-      { targetVersion, force, mirror },
-      { timeout: 120000 } // 2分钟超时
-    );
-    return data;
   }
 
   public static async getQQVersion () {
@@ -427,9 +440,9 @@ export default class WebUIManager {
     return data.data;
   }
 
-  public static async GetNapCatFileHash () {
+  public static async getAppFileHash () {
     const { data } = await serverRequest.get<ServerResponse<{ hash: string; file: string; algorithm: string; }>>(
-      '/base/GetNapCatFileHash'
+      '/base/GetAppFileHash'
     );
     return data.data;
   }

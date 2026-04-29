@@ -480,13 +480,36 @@ pub fn resolve_dev_frontend_from_env() -> Option<WebHostDevServer> {
 pub fn resolve_frontend_dist_dir() -> Option<PathBuf> {
     let current_dir = std::env::current_dir().ok();
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    resolve_frontend_dist_dir_from_candidates([
-        current_dir.as_ref().map(|dir| dir.join(FRONTEND_DIST_DIR)),
-        current_dir
-            .as_ref()
-            .map(|dir| dir.join("..").join(FRONTEND_DIST_DIR)),
-        Some(manifest_dir.join(FRONTEND_DIST_DIR)),
-    ])
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    let mut candidates = Vec::new();
+
+    if let Some(dir) = current_dir.as_ref() {
+        candidates.push(dir.join(FRONTEND_DIST_DIR));
+        candidates.push(dir.join("..").join(FRONTEND_DIST_DIR));
+    }
+
+    candidates.push(manifest_dir.join(FRONTEND_DIST_DIR));
+
+    if let Some(dir) = exe_dir.as_deref() {
+        candidates.extend(packaged_frontend_dist_dir_candidates(dir));
+    }
+
+    resolve_frontend_dist_dir_from_candidates(candidates.into_iter().map(Some))
+}
+
+fn packaged_frontend_dist_dir_candidates(exe_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        exe_dir.join(FRONTEND_DIST_DIR),
+        exe_dir.join("resources").join(FRONTEND_DIST_DIR),
+        exe_dir.join("..").join("Resources").join(FRONTEND_DIST_DIR),
+        exe_dir
+            .join("..")
+            .join("Resources")
+            .join("resources")
+            .join(FRONTEND_DIST_DIR),
+    ]
 }
 
 fn resolve_frontend_dist_dir_from_candidates(

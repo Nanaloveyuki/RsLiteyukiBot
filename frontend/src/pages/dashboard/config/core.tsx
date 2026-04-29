@@ -29,7 +29,7 @@ const CoreConfigCard = () => {
     try {
       setLoading(true);
       const [config, llmSettings] = await Promise.all([
-        QQManager.getNapCatUinConfig(),
+        QQManager.getAccountRuntimeConfig(),
         LlmManager.getSettings(),
       ]);
       setValue('fileLog', config.fileLog ?? false);
@@ -47,7 +47,7 @@ const CoreConfigCard = () => {
 
   const onSubmit = handleSubmit(async (data) => {
     try {
-      await QQManager.setNapCatUinConfig({
+      await QQManager.setAccountRuntimeConfig({
         fileLog: data.fileLog,
         consoleLog: data.consoleLog,
         autoTimeSync: data.autoTimeSync,
@@ -55,7 +55,7 @@ const CoreConfigCard = () => {
       try {
         await LlmManager.updateEnabled(data.llmEnabled);
       } catch (llmError) {
-        throw new Error(`NapCat 配置已保存，但 LLM 开关保存失败: ${(llmError as Error).message}`);
+        throw new Error(`运行时配置已保存，但 LLM 开关保存失败: ${(llmError as Error).message}`);
       }
       toast.success('保存成功');
     } catch (error) {
@@ -84,7 +84,7 @@ const CoreConfigCard = () => {
       <div className='flex flex-col gap-1 mb-2'>
         <h3 className='text-lg font-semibold text-default-700'>Liteyuki 核心配置</h3>
         <p className='text-sm text-default-500'>
-          控制 Liteyuki 核心能力，以及当前 NapCat 运行实例的基础行为。
+          控制 Liteyuki 核心能力，以及当前运行实例的基础行为。
         </p>
       </div>
       <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3'>

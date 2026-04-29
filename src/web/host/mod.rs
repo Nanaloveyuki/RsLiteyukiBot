@@ -14,6 +14,7 @@ mod plugin_pages;
 mod plugin_runtime;
 mod plugin_store;
 mod realtime;
+mod release_api;
 mod router;
 mod skill_import;
 mod system_api;
