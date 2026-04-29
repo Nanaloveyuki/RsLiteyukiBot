@@ -20,10 +20,63 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
 
 jobs:
+  prepare-release:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+
+    steps:
+      - name: Ensure GitHub release exists
+        id: release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            if (!tag) {
+              core.setFailed('RELEASE_TAG is required');
+              return;
+            }
+
+            let release;
+            try {
+              const existing = await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag,
+              });
+              release = existing.data;
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+
+              const created = await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: tag,
+                name: `Liteyuki ${tag}`,
+                body: `Automated release for ${tag}.\nSee the attached assets for platform-specific installers and bundles.`,
+                draft: false,
+                prerelease: false,
+              });
+              release = created.data;
+            }
+
+            core.setOutput('release_id', String(release.id));
+
   publish-tauri:
     name: Build ${{ matrix.platform }}
+    needs: prepare-release
     runs-on: ${{ matrix.platform }}
 
     strategy:
@@ -85,10 +138,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
-          releaseName: Liteyuki ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
-          releaseBody: |
-            Automated release for ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}.
-            See the attached assets for platform-specific installers and bundles.
-          releaseDraft: false
-          prerelease: false
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseId: ${{ needs.prepare-release.outputs.release_id }}
+          uploadUpdaterJson: false
