@@ -23,7 +23,7 @@
     ]
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "icon": [
       "../assets/app-shell/bot.png",
       "../assets/app-shell/bot.ico"
