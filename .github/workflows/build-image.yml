@@ -1,16 +1,18 @@
 name: Docker Image Build
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows:
+      - Release
+    types:
+      - completed
 
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  group: docker-build-${{ github.ref }}
+  group: docker-build-${{ github.event.workflow_run.id || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -18,11 +20,27 @@ env:
 
 jobs:
   build:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: release_tag
+        shell: bash
+        run: |
+          git fetch --force --tags origin
+          TAG="$(git tag --points-at HEAD 'v*' | head -n 1)"
+          if [ -z "$TAG" ]; then
+            echo "No v* tag points at $GITHUB_SHA" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -36,15 +54,13 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
+            type=raw,value=${{ steps.release_tag.outputs.tag }}
             type=sha,format=short
           labels: |
             org.opencontainers.image.title=RsLiteyukiBot Web Runtime
             org.opencontainers.image.description=Web-only Docker runtime for RsLiteyukiBot
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -57,7 +73,7 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
