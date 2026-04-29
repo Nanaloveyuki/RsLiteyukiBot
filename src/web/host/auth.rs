@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use super::{
     HEALTH_ROUTE, extract_header, napcat_err, napcat_ok, napcat_response, parse_json_body,
 };
-use crate::config_paths::resolve_preferred_webui_password_path;
+use crate::utils::config_path::resolve_preferred_webui_password_path;
 
 const WEBUI_PASSWORD_VERSION: u8 = 1;
 const BOOTSTRAP_TOKEN_BYTES: usize = 24;
@@ -466,109 +466,5 @@ fn login_response_payload(result: Result<String, String>) -> Vec<u8> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    fn temp_password_path(name: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!("liteyuki-webui-auth-{name}-{}.json", now_ms()));
-        path
-    }
-
-    #[test]
-    fn load_or_init_creates_json_password_store() {
-        let path = temp_password_path("init");
-        ensure_webui_password_file(path.as_path()).expect("password file should initialize");
-
-        let content =
-            fs::read_to_string(&path).expect("initialized webui password file should exist");
-        let doc: WebUiPasswordDoc =
-            serde_json::from_str(content.as_str()).expect("password file should be valid json");
-
-        assert_eq!(doc.version, WEBUI_PASSWORD_VERSION);
-        assert!(doc.password_hash.is_none());
-
-        let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn default_webui_password_store_uses_user_configs_dir() {
-        let _lock = env_lock().lock().expect("env lock should be available");
-        let base = temp_password_path("user-config-root");
-        let _ = fs::remove_file(&base);
-        fs::create_dir_all(&base).expect("test home should be created");
-
-        let previous_userprofile = std::env::var("USERPROFILE").ok();
-        let previous_home = std::env::var("HOME").ok();
-        let previous_password_path = std::env::var("LY_WEBUI_PASSWORD_PATH").ok();
-        unsafe {
-            std::env::set_var("USERPROFILE", &base);
-            std::env::remove_var("HOME");
-            std::env::remove_var("LY_WEBUI_PASSWORD_PATH");
-        }
-
-        let path = resolve_webui_password_store_path();
-        assert_eq!(
-            path,
-            base.join(".liteyuki").join("configs").join("password.json")
-        );
-
-        match previous_userprofile {
-            Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
-            None => unsafe { std::env::remove_var("USERPROFILE") },
-        }
-        match previous_home {
-            Some(value) => unsafe { std::env::set_var("HOME", value) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-        match previous_password_path {
-            Some(value) => unsafe { std::env::set_var("LY_WEBUI_PASSWORD_PATH", value) },
-            None => unsafe { std::env::remove_var("LY_WEBUI_PASSWORD_PATH") },
-        }
-        let _ = fs::remove_dir_all(base);
-    }
-
-    #[test]
-    fn bootstrap_token_login_is_disabled_after_password_setup() {
-        let manager = WebUiAuthManager::in_memory_for_tests();
-        let bootstrap_hash =
-            sha256_hex(format!("{}.napcat", manager.bootstrap_login_token()).as_bytes());
-        let session = manager
-            .login_with_bootstrap_hash(bootstrap_hash.as_str())
-            .expect("bootstrap token should authenticate");
-
-        manager
-            .update_password(Some(session.as_str()), None, "Pass1234")
-            .expect("first password setup should succeed");
-
-        let err = manager
-            .login_with_bootstrap_hash(bootstrap_hash.as_str())
-            .expect_err("bootstrap token login should be disabled");
-        assert!(err.contains("disabled"));
-    }
-
-    #[test]
-    fn password_login_requires_correct_password() {
-        let manager = WebUiAuthManager::in_memory_for_tests();
-        let bootstrap_hash =
-            sha256_hex(format!("{}.napcat", manager.bootstrap_login_token()).as_bytes());
-        let session = manager
-            .login_with_bootstrap_hash(bootstrap_hash.as_str())
-            .expect("bootstrap token should authenticate");
-        manager
-            .update_password(Some(session.as_str()), None, "Pass1234")
-            .expect("first password setup should succeed");
-
-        let password_session = manager
-            .login_with_password("Pass1234")
-            .expect("password login should succeed");
-        assert!(manager.is_session_token_valid(password_session.as_str()));
-        assert!(manager.login_with_password("wrong").is_err());
-    }
-}
+#[path = "auth/tests.rs"]
+mod tests;

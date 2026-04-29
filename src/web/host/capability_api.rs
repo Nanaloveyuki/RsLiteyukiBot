@@ -7,16 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use crate::config_paths::resolve_preferred_mcp_config_path;
 use crate::llm::mcp::{McpManager, McpServerConfig};
 use crate::llm::skills::SkillManager;
-use crate::llm::tools::ToolManager;
-
-const NON_TOGGLEABLE_TOOLS: &[&str] = &[
-    "list_tool_categories",
-    "list_tools_in_category",
-    "get_tool_schema",
-];
+use crate::llm::tools::{NON_TOGGLEABLE_TOOL_NAMES, ToolManager};
+use crate::utils::config_path::resolve_preferred_mcp_config_path;
 
 pub(super) fn route_capability_api(
     method: &str,
@@ -129,12 +123,26 @@ pub(super) fn route_capability_api(
         return Some(napcat_response(body, is_head));
     }
 
+    if api_path == "/skills/import" {
+        if !method.eq_ignore_ascii_case("POST") {
+            let body = napcat_err(-1, "skills/import only accepts POST");
+            return Some(napcat_response(body, is_head));
+        }
+
+        let body = match super::skill_import::import_skills_payload(request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
     None
 }
 
 fn tools_payload() -> Result<serde_json::Value, String> {
     let manager = ToolManager::for_current_workspace()?;
-    let runtime = run_async_for_web_host(manager.describe_runtime_tools());
+    // Capability inventory is workspace-scoped and does not include request-scoped injected tools.
+    let runtime = run_async_for_web_host(manager.describe_runtime_tools(&[]));
     Ok(serde_json::json!({
         "tools": runtime.tools,
         "warnings": runtime.warnings,
@@ -149,7 +157,7 @@ fn toggle_tool_payload(request: &[u8]) -> Result<serde_json::Value, String> {
     if name.is_empty() {
         return Err("tool name should not be empty".to_string());
     }
-    if NON_TOGGLEABLE_TOOLS
+    if NON_TOGGLEABLE_TOOL_NAMES
         .iter()
         .any(|tool_name| tool_name == &name)
     {
@@ -162,13 +170,13 @@ fn toggle_tool_payload(request: &[u8]) -> Result<serde_json::Value, String> {
         .lock()
         .map_err(|_| "tool toggle lock poisoned".to_string())?;
     let mut manager = ToolManager::for_current_workspace()?;
-    let known_tools = run_async_for_web_host(manager.describe_runtime_tools());
+    let known_tools = run_async_for_web_host(manager.describe_runtime_tools(&[]));
     if !known_tools.tools.iter().any(|tool| tool.name == name) {
         return Err(format!("tool '{name}' was not found"));
     }
 
     manager.set_tool_active(name, payload.active)?;
-    let runtime = run_async_for_web_host(manager.describe_runtime_tools());
+    let runtime = run_async_for_web_host(manager.describe_runtime_tools(&[]));
 
     Ok(serde_json::json!({
         "name": name,
@@ -246,9 +254,11 @@ fn test_mcp_servers_payload(request: &[u8]) -> Result<serde_json::Value, String>
 fn skills_payload() -> Result<serde_json::Value, String> {
     let manager = ToolManager::for_current_workspace()?;
     let snapshot = manager.describe_skills();
+    let skill_manager = SkillManager::for_workspace(capability_workspace_root().as_path());
     Ok(serde_json::json!({
         "skills": snapshot.skills,
         "warnings": snapshot.warnings,
+        "managedRoot": display_workspace_relative_path(skill_manager.managed_root()),
     }))
 }
 
@@ -287,17 +297,26 @@ fn upload_skill_payload(request: &[u8]) -> Result<serde_json::Value, String> {
     let request_body = parse_json_body(request);
     let payload: WebSkillUploadRequest = serde_json::from_value(request_body)
         .map_err(|err| format!("invalid skills/upload payload: {err}"))?;
-    let skill_name = normalize_skill_name(payload.name.as_str())?;
+    let skill_name = super::skill_import::normalize_skill_name(payload.name.as_str())?;
     let content = payload.content.trim().to_string();
     if content.is_empty() {
         return Err("skill content should not be empty".to_string());
     }
 
     let root = capability_workspace_root();
-    let skill_dir = root.join("skills").join(skill_name.as_str());
+    let manager = SkillManager::for_workspace(root.as_path());
+    let skill_dir = manager.managed_root().join(skill_name.as_str());
     let entry_path = skill_dir.join("SKILL.md");
     if entry_path.exists() && !payload.overwrite {
         return Err(format!("skill '{}' already exists", skill_name));
+    }
+    if payload.overwrite && skill_dir.exists() {
+        fs::remove_dir_all(&skill_dir).map_err(|err| {
+            format!(
+                "failed to remove existing skill directory {}: {err}",
+                skill_dir.display()
+            )
+        })?;
     }
     fs::create_dir_all(&skill_dir).map_err(|err| {
         format!(
@@ -308,7 +327,6 @@ fn upload_skill_payload(request: &[u8]) -> Result<serde_json::Value, String> {
     fs::write(&entry_path, format!("{}\n", content))
         .map_err(|err| format!("failed to write skill file {}: {err}", entry_path.display()))?;
 
-    let manager = SkillManager::for_workspace(root.as_path());
     let skill = resolve_skill_info(&manager, skill_name.as_str())?;
     Ok(serde_json::json!({
         "name": skill.name,
@@ -363,37 +381,35 @@ fn resolve_skill_info(
         .ok_or_else(|| format!("skill '{}' was not found", skill_name))
 }
 
-fn normalize_skill_name(raw: &str) -> Result<String, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("skill name should not be empty".to_string());
+fn display_workspace_relative_path(path: &std::path::Path) -> String {
+    let workspace_root = capability_workspace_root();
+    if let Some(relative) = strip_display_prefix(path, workspace_root.as_path()) {
+        return relative;
     }
-    if trimmed.contains(['/', '\\']) {
-        return Err("skill name should not contain path separators".to_string());
+    let liteyuki_root = crate::utils::config_path::resolve_liteyuki_root_dir();
+    if let Some(relative) = strip_display_prefix(path, liteyuki_root.as_path()) {
+        return std::path::Path::new(".liteyuki")
+            .join(relative)
+            .display()
+            .to_string()
+            .replace('\\', "/");
     }
-    let mut normalized = String::with_capacity(trimmed.len());
-    for ch in trimmed.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-            normalized.push(ch);
-        } else if ch.is_whitespace() {
-            normalized.push('-');
-        } else {
-            return Err("skill name should use letters, numbers, '-' or '_'".to_string());
-        }
-    }
-    let normalized = normalized.trim_matches('-').trim_matches('_').to_string();
-    if normalized.is_empty() {
-        return Err("skill name should not be empty".to_string());
-    }
-    Ok(normalized)
+    path.display().to_string().replace('\\', "/")
 }
 
-fn display_workspace_relative_path(path: &std::path::Path) -> String {
-    path.strip_prefix(capability_workspace_root())
-        .unwrap_or(path)
-        .display()
-        .to_string()
-        .replace('\\', "/")
+fn strip_display_prefix(path: &std::path::Path, root: &std::path::Path) -> Option<String> {
+    if let Ok(relative) = path.strip_prefix(root) {
+        return Some(relative.display().to_string().replace('\\', "/"));
+    }
+    fs::canonicalize(path)
+        .ok()
+        .and_then(|canonical| {
+            canonical
+                .strip_prefix(root)
+                .ok()
+                .map(|relative| relative.to_path_buf())
+        })
+        .map(|relative| relative.display().to_string().replace('\\', "/"))
 }
 
 fn capability_workspace_root() -> PathBuf {

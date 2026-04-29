@@ -1,29 +1,18 @@
 use std::path::{Path, PathBuf};
 
-pub(crate) const APP_CONFIG_FILENAMES: [&str; 6] = [
-    "config.yaml",
-    "rust-config.yaml",
-    "rust-config.yml",
-    "rust-config.toml",
-    "config/rust-core.yaml",
-    "config/rust-core.toml",
-];
-pub(crate) const LLM_CONFIG_FILENAMES: [&str; 2] = ["llm-config.yaml", "llm-config.toml"];
-pub(crate) const PASSWORD_CONFIG_FILENAME: &str = "password.yaml";
-pub(crate) const WEBUI_PASSWORD_FILENAME: &str = "password.json";
-pub(crate) const LLM_PROMPT_STORE_FILENAME: &str = "llm-prompts.json";
-pub(crate) const MCP_CONFIG_FILENAME: &str = "mcp-servers.json";
-pub(crate) const TOOL_STATE_FILENAME: &str = "tool-state.json";
-pub(crate) const PLUGIN_CRON_STATE_FILENAME: &str = "plugin-cron-state.json";
-const LEGACY_WEBUI_PASSWORD_RELATIVE_PATH: &str = ".liteyuki/password.json";
-const LEGACY_LLM_PROMPT_STORE_PATH: &str = "llm-prompts.json";
+use crate::hardcode_data::config_path::{
+    APP_CONFIG_FILENAMES, LEGACY_LLM_PROMPT_STORE_PATH, LEGACY_WEBUI_PASSWORD_RELATIVE_PATH,
+    LLM_CONFIG_FILENAMES, LLM_PROMPT_STORE_FILENAME, MCP_CONFIG_FILENAME, PASSWORD_CONFIG_FILENAME,
+    PLUGIN_CRON_STATE_FILENAME, SKILLS_DIR_NAME, TOOL_STATE_FILENAME, WEBUI_PASSWORD_FILENAME,
+};
 
 pub(crate) fn resolve_env_path(key: &str) -> Option<PathBuf> {
-    std::env::var(key)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+    let value = std::env::var(key).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(trimmed))
 }
 
 pub(crate) fn resolve_user_home_dir() -> Option<PathBuf> {
@@ -45,6 +34,10 @@ pub(crate) fn resolve_liteyuki_root_dir() -> PathBuf {
 
 pub(crate) fn resolve_user_config_dir() -> PathBuf {
     resolve_liteyuki_root_dir().join("configs")
+}
+
+pub(crate) fn resolve_user_skills_dir() -> PathBuf {
+    resolve_liteyuki_root_dir().join(SKILLS_DIR_NAME)
 }
 
 pub(crate) fn resolve_user_config_file(filename: &str) -> PathBuf {
@@ -104,7 +97,7 @@ pub(crate) fn resolve_existing_user_named_config_path(user_filenames: &[&str]) -
         .find(|path| path.exists())
 }
 
-fn move_config_file(source: &Path, target: &Path) -> Result<(), String> {
+fn ensure_parent_dir(target: &Path) -> Result<(), String> {
     if let Some(parent) = target.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -115,6 +108,11 @@ fn move_config_file(source: &Path, target: &Path) -> Result<(), String> {
             )
         })?;
     }
+    Ok(())
+}
+
+fn move_config_file(source: &Path, target: &Path) -> Result<(), String> {
+    ensure_parent_dir(target)?;
 
     match std::fs::rename(source, target) {
         Ok(()) => Ok(()),
@@ -140,16 +138,7 @@ fn move_config_file(source: &Path, target: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn replace_config_file(source: &Path, target: &Path) -> Result<(), String> {
-    if let Some(parent) = target.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            format!(
-                "failed to create config parent directory {}: {err}",
-                parent.display()
-            )
-        })?;
-    }
+    ensure_parent_dir(target)?;
 
     if target.exists() {
         std::fs::remove_file(target).map_err(|err| {
@@ -168,10 +157,7 @@ fn migration_target_name(
     source_relative_path: &str,
     user_filenames: &[&str],
 ) -> Result<String, String> {
-    if user_filenames
-        .iter()
-        .any(|candidate| candidate == &source_relative_path)
-    {
+    if user_filenames.contains(&source_relative_path) {
         return Ok(source_relative_path.to_string());
     }
 

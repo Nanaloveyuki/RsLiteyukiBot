@@ -48,6 +48,7 @@ export interface SkillInventoryItem {
 export interface SkillsResponse {
   skills: SkillInventoryItem[];
   warnings: string[];
+  managedRoot?: string;
 }
 
 export interface SkillReadResponse extends SkillInventoryItem {
@@ -59,6 +60,12 @@ export interface SkillUploadRequest {
   name: string;
   content: string;
   overwrite: boolean;
+}
+
+export interface SkillImportResponse {
+  skills: SkillInventoryItem[];
+  count: number;
+  managedRoot?: string;
 }
 
 export default class CapabilityManager {
@@ -108,6 +115,20 @@ export default class CapabilityManager {
 
   public static async uploadSkill (payload: SkillUploadRequest) {
     const { data } = await serverRequest.post<ServerResponse<SkillInventoryItem>>('/skills/upload', payload);
+    return data.data;
+  }
+
+  public static async importSkills (files: File[], overwrite: boolean) {
+    const formData = new FormData();
+    files.forEach((file) => {
+      const relativePath = (file as File & { webkitRelativePath?: string; }).webkitRelativePath?.trim();
+      formData.append('skill', file, relativePath || file.name);
+    });
+    formData.append('overwrite', overwrite ? 'true' : 'false');
+
+    const { data } = await serverRequest.post<ServerResponse<SkillImportResponse>>('/skills/import', formData, {
+      timeout: 120000,
+    });
     return data.data;
   }
 }

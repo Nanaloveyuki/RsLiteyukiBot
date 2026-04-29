@@ -2119,6 +2119,278 @@ class NeoDemoPlugin(BasePlugin):
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn plugin_manager_python_contract_smoke_test_exercises_capabilities_and_execution() {
+    if !python_command_available() {
+        return;
+    }
+
+    let manager = PluginManager::new();
+    let dir = TempDir::create();
+    let plugin_dir = dir.path.join("python_contract_smoke");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+
+    std::fs::write(
+        plugin_dir.join("contract_smoke_plugin.py"),
+        r#"from astrbot.api import FunctionTool, star
+
+
+class ContractSmokePlugin(star.Star):
+    async def initialize(self):
+        self.context.register_web_api(
+            "/contract-smoke",
+            self.handle_api,
+            ["POST"],
+            "contract smoke api",
+        )
+        self.context.add_llm_tools(
+            FunctionTool(
+                name="contract_smoke_tool",
+                description="contract smoke tool",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"},
+                    },
+                    "required": ["value"],
+                },
+                handler=self.run_tool,
+            ),
+        )
+        await self.context.cron_manager.add_basic_job(
+            name="contract-smoke-cron",
+            handler=self.handle_cron,
+            description="contract smoke cron",
+            cron_expression="*/5 * * * *",
+            payload={"source": "contract"},
+            enabled=True,
+        )
+        self.context.register_task("contract-smoke-task", "contract smoke task")
+
+    async def run_tool(self, value: str):
+        return {"echo": value, "length": len(value)}
+
+    async def handle_cron(self, source: str = "contract"):
+        return {"source": source}
+
+    async def handle_api(self, request=None):
+        body = request.get("bodyJson") if request else None
+        return {
+            "status": 202,
+            "body": {
+                "method": request.get("method") if request else None,
+                "path": request.get("path") if request else None,
+                "query": request.get("query") if request else None,
+                "header": request.get("headers", {}).get("X-Test") if request else None,
+                "bodyText": request.get("bodyText") if request else None,
+                "bodyBytesBase64": request.get("bodyBytesBase64") if request else None,
+                "peerIp": request.get("peerIp") if request else None,
+                "value": body.get("value") if body else None,
+            },
+        }
+"#,
+    )
+    .expect("python module should be written");
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{
+  "id": "python-contract-smoke",
+  "name": "Python Contract Smoke",
+  "type": "service",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "contract_smoke_plugin"
+  }
+}"#,
+    )
+    .expect("manifest should be written");
+
+    let _env_lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let _cron_state_guard = EnvVarGuard::set_path(
+        "LY_PLUGIN_CRON_STATE_PATH",
+        dir.path
+            .join("python-contract-smoke-cron-state.json")
+            .as_path(),
+    );
+    let context = plugin_context();
+    let discovered = manager
+        .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+        .expect("manifest discovery should succeed");
+    assert_eq!(discovered, vec!["python-contract-smoke".to_string()]);
+
+    manager
+        .load_plugins(discovered, context.clone())
+        .await
+        .expect("python contract smoke plugin should load");
+
+    let pre_start_snapshot = context
+        .sdk
+        .get_plugin_capabilities("python-contract-smoke")
+        .expect("pre-start capability snapshot query should succeed")
+        .expect("pre-start python contract smoke capability snapshot should exist");
+    assert!(pre_start_snapshot.tools.is_empty());
+    assert!(pre_start_snapshot.web_apis.is_empty());
+    assert!(pre_start_snapshot.cron_jobs.is_empty());
+    assert!(pre_start_snapshot.tasks.is_empty());
+
+    manager
+        .start_loaded_plugins(context.clone())
+        .await
+        .expect("python contract smoke plugin should start");
+
+    let snapshot = context
+        .sdk
+        .get_plugin_capabilities("python-contract-smoke")
+        .expect("capability snapshot query should succeed")
+        .expect("python contract smoke capability snapshot should exist");
+    assert_eq!(snapshot.plugin_id, "python-contract-smoke");
+    assert_eq!(snapshot.runtime_kind, PluginRuntimeKind::Python);
+    assert_eq!(snapshot.tools.len(), 1);
+    assert_eq!(snapshot.web_apis.len(), 1);
+    assert_eq!(snapshot.cron_jobs.len(), 1);
+    assert_eq!(snapshot.tasks.len(), 1);
+    assert_eq!(snapshot.tools[0].plugin_id, "python-contract-smoke");
+    assert_eq!(snapshot.tools[0].name, "contract_smoke_tool");
+    assert_eq!(snapshot.tools[0].description, "contract smoke tool");
+    assert_eq!(
+        snapshot.tools[0].parameters,
+        json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+    );
+    assert!(snapshot.tools[0].active);
+    assert_eq!(
+        snapshot.tools[0].source,
+        liteyukibot_core::PluginCapabilitySource::AstrbotContext
+    );
+    assert_eq!(
+        snapshot.tools[0].handler_module_path.as_deref(),
+        Some("contract_smoke_plugin")
+    );
+    assert_eq!(snapshot.web_apis[0].plugin_id, "python-contract-smoke");
+    assert_eq!(snapshot.web_apis[0].route, "/contract-smoke");
+    assert_eq!(snapshot.web_apis[0].methods, vec!["POST".to_string()]);
+    assert_eq!(snapshot.web_apis[0].description, "contract smoke api");
+    assert_eq!(
+        snapshot.web_apis[0].source,
+        liteyukibot_core::PluginCapabilitySource::AstrbotContext
+    );
+    assert_eq!(snapshot.web_apis[0].runtime_kind, PluginRuntimeKind::Python);
+    assert_eq!(
+        snapshot.web_apis[0].handler_module_path.as_deref(),
+        Some("contract_smoke_plugin")
+    );
+    assert_eq!(snapshot.cron_jobs[0].plugin_id, "python-contract-smoke");
+    assert_eq!(snapshot.cron_jobs[0].name, "contract-smoke-cron");
+    assert_eq!(snapshot.cron_jobs[0].job_type, "basic");
+    assert_eq!(snapshot.cron_jobs[0].description, "contract smoke cron");
+    assert_eq!(
+        snapshot.cron_jobs[0].cron_expression.as_deref(),
+        Some("*/5 * * * *")
+    );
+    assert_eq!(
+        snapshot.cron_jobs[0].payload,
+        json!({ "source": "contract" })
+    );
+    assert!(snapshot.cron_jobs[0].enabled);
+    assert_eq!(snapshot.tasks[0].plugin_id, "python-contract-smoke");
+    assert_eq!(snapshot.tasks[0].task_id, "contract-smoke-task");
+    assert_eq!(snapshot.tasks[0].description, "contract smoke task");
+    assert_eq!(snapshot.tasks[0].task_kind, "string");
+    assert_eq!(
+        snapshot.tasks[0].source,
+        liteyukibot_core::PluginCapabilitySource::AstrbotContext
+    );
+    assert!(
+        context
+            .sdk
+            .plugin_has_executable_cron_jobs("python-contract-smoke")
+            .expect("cron executable support query should succeed")
+    );
+
+    let tool_output = context
+        .sdk
+        .execute_plugin_tool(
+            "python-contract-smoke",
+            "contract_smoke_tool",
+            &json!({ "value": "hello" }),
+        )
+        .expect("python contract smoke tool execution should succeed")
+        .expect("python contract smoke tool should exist");
+    assert_eq!(
+        tool_output,
+        liteyukibot_core::PluginToolResult::Json(json!({
+            "echo": "hello",
+            "length": 5
+        }))
+    );
+
+    let web_api_response = context
+        .sdk
+        .execute_plugin_web_api(
+            "python-contract-smoke",
+            "/contract-smoke",
+            &liteyukibot_core::PluginWebApiRequest {
+                method: "POST".to_string(),
+                path: "/contract-smoke".to_string(),
+                query: HashMap::from([("mode".to_string(), "smoke".to_string())]),
+                headers: HashMap::from([("X-Test".to_string(), "contract".to_string())]),
+                body: serde_json::to_vec(&json!({ "value": "world" }))
+                    .expect("request body should encode"),
+                peer_ip: Some("127.0.0.1".to_string()),
+            },
+        )
+        .expect("python contract smoke web api execution should succeed")
+        .expect("python contract smoke web api should exist");
+    assert_eq!(web_api_response.status_code, 202);
+    assert_eq!(
+        web_api_response.content_type,
+        "application/json; charset=utf-8"
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(web_api_response.body.as_slice())
+            .expect("web api body should decode"),
+        json!({
+            "method": "POST",
+            "path": "/contract-smoke",
+            "query": { "mode": "smoke" },
+            "header": "contract",
+            "bodyText": "{\"value\":\"world\"}",
+            "bodyBytesBase64": "eyJ2YWx1ZSI6IndvcmxkIn0=",
+            "peerIp": "127.0.0.1",
+            "value": "world"
+        })
+    );
+
+    let tick_at = snapshot.cron_jobs[0]
+        .next_run_time
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .expect("cron job should expose a due nextRunTime after scheduler sync");
+    let executed = context
+        .sdk
+        .run_due_plugin_jobs(&[], Some(tick_at))
+        .expect("cron tick should succeed");
+    assert_eq!(executed, 1);
+
+    let diagnostics = context
+        .sdk
+        .get_plugin_runtime_diagnostics("python-contract-smoke")
+        .expect("runtime diagnostics query should succeed")
+        .expect("runtime diagnostics should exist after successful execution");
+    assert!(diagnostics.last_tool_execution.last_success_at.is_some());
+    assert!(diagnostics.last_web_api_dispatch.last_success_at.is_some());
+    assert!(diagnostics.last_cron_execution.last_success_at.is_some());
+    assert!(diagnostics.last_tool_execution.last_error.is_none());
+    assert!(diagnostics.last_web_api_dispatch.last_error.is_none());
+    assert!(diagnostics.last_cron_execution.last_error.is_none());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_manager_astrbot_message_event_result_replies_and_injects_command_args() {
     if !python_command_available() {

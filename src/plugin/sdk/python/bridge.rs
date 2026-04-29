@@ -1,18 +1,22 @@
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyDict, PyModule, PyTuple};
 use serde_json::Value;
 
 use crate::plugin::sdk::config::{delete_config_value, read_config_value, write_config_value};
 use crate::plugin::sdk::python::async_runtime::await_python_awaitable;
+use crate::plugin::sdk::python::bridge_contract::{
+    ASTRBOT_BIND_RUNTIME_FN, ASTRBOT_CLEANUP_RUNTIME_FN, ASTRBOT_REQUIRED_RUNTIME_ATTRS,
+    PYTHON_BRIDGE_SDK_GLOBAL, PYTHON_ROOT_MODULE, PYTHON_SDK_MODULE,
+};
 use crate::plugin::sdk::python::commands::{
     list_tui_commands, register_tui_command, remove_tui_command, set_tui_command_enabled,
 };
-use crate::plugin::sdk::python::lifecycle::PythonRuntimeState;
+use crate::plugin::sdk::python::json_codec::{json_to_pyobject, py_any_to_json};
+use crate::plugin::sdk::python::state::PythonRuntimeState;
 use crate::plugin::sdk::{PluginHostBridge, PluginPermissionSet, PluginSdkError};
 
 const PERMISSION_KV_READ: &str = "kv.read";
@@ -23,16 +27,16 @@ const PERMISSION_CONFIG_READ: &str = "config.read";
 const PERMISSION_CONFIG_WRITE: &str = "config.write";
 const PERMISSION_COMMAND_TUI_READ: &str = "command.tui.read";
 const PERMISSION_COMMAND_TUI_MANAGE: &str = "command.tui.manage";
-const PYTHON_COMPAT_RUNTIME: &str = concat!(
-    include_str!("compat_runtime.py"),
-    "\n",
-    include_str!("../liteyukibot/compat_runtime.py"),
-    "\n",
-    include_str!("../astrbot/compat_runtime.py"),
-    "\n",
-    include_str!("../neomofox/compat_runtime.py"),
-    "\n_install_python_compat_modules(globals().get(\"__bridge_sdk__\"))\n",
-);
+fn python_compat_runtime() -> String {
+    format!(
+        "{}\n{}\n{}\n{}\n_install_python_compat_modules(globals().get(\"{}\"))\n",
+        include_str!("compat_runtime.py"),
+        include_str!("../liteyukibot/compat_runtime.py"),
+        include_str!("../astrbot/compat_runtime.py"),
+        include_str!("../neomofox/compat_runtime.py"),
+        PYTHON_BRIDGE_SDK_GLOBAL,
+    )
+}
 
 #[pyclass]
 #[derive(Clone)]
@@ -272,29 +276,30 @@ pub(super) fn install_python_sdk_bridge(
 ) -> PyResult<()> {
     let sys = py.import("sys")?;
     let modules = sys.getattr("modules")?.downcast_into::<PyDict>()?;
-    let sdk_module = match modules.get_item("liteyuki_sdk")? {
+    let sdk_module = match modules.get_item(PYTHON_SDK_MODULE)? {
         Some(existing) => existing.downcast_into::<PyModule>()?,
         None => {
-            let module = PyModule::new(py, "liteyuki_sdk")?;
-            modules.set_item("liteyuki_sdk", &module)?;
+            let module = PyModule::new(py, PYTHON_SDK_MODULE)?;
+            modules.set_item(PYTHON_SDK_MODULE, &module)?;
             module
         }
     };
-    let root_module = match modules.get_item("liteyuki")? {
+    let root_module = match modules.get_item(PYTHON_ROOT_MODULE)? {
         Some(existing) => existing.downcast_into::<PyModule>()?,
         None => {
-            let module = PyModule::new(py, "liteyuki")?;
-            modules.set_item("liteyuki", &module)?;
+            let module = PyModule::new(py, PYTHON_ROOT_MODULE)?;
+            modules.set_item(PYTHON_ROOT_MODULE, &module)?;
             module
         }
     };
 
     let root_dict = root_module.dict();
     let builtins = py.import("builtins")?;
-    if root_module.getattr("_bind_astrbot_plugin_runtime").is_err() {
+    if !python_bridge_runtime_installed(&root_module) {
+        let compat_runtime = python_compat_runtime();
         builtins
             .getattr("exec")?
-            .call1((PYTHON_COMPAT_RUNTIME, &root_dict, &root_dict))?;
+            .call1((compat_runtime.as_str(), &root_dict, &root_dict))?;
     }
 
     let sdk_value: PyObject = match sdk {
@@ -303,8 +308,17 @@ pub(super) fn install_python_sdk_bridge(
     };
     sdk_module.setattr("sdk", sdk_value.clone_ref(py))?;
     root_module.setattr("sdk", sdk_value.clone_ref(py))?;
-    root_dict.set_item("__bridge_sdk__", sdk_value)?;
+    root_dict.set_item(PYTHON_BRIDGE_SDK_GLOBAL, sdk_value)?;
     Ok(())
+}
+
+fn python_bridge_runtime_installed(root_module: &pyo3::Bound<'_, PyModule>) -> bool {
+    ASTRBOT_REQUIRED_RUNTIME_ATTRS.iter().all(|attr| {
+        root_module
+            .getattr(attr)
+            .ok()
+            .is_some_and(|value| value.is_callable())
+    })
 }
 
 pub(super) fn bind_astrbot_plugin_runtime(
@@ -312,8 +326,8 @@ pub(super) fn bind_astrbot_plugin_runtime(
     module: &pyo3::Bound<'_, PyModule>,
     sdk: &Py<PyPluginSdk>,
 ) -> PyResult<bool> {
-    let liteyuki = PyModule::import(py, "liteyuki")?;
-    let binder = liteyuki.getattr("_bind_astrbot_plugin_runtime")?;
+    let liteyuki = PyModule::import(py, PYTHON_ROOT_MODULE)?;
+    let binder = liteyuki.getattr(ASTRBOT_BIND_RUNTIME_FN)?;
     let result = binder.call1((module, sdk.clone_ref(py)))?;
     let result = await_python_result(py, result.unbind())?;
     result.bind(py).extract::<bool>()
@@ -326,8 +340,8 @@ pub(super) fn cleanup_astrbot_plugin_runtime(
     if module_names.is_empty() {
         return Ok(());
     }
-    let liteyuki = PyModule::import(py, "liteyuki")?;
-    let cleaner = liteyuki.getattr("_cleanup_astrbot_plugin_runtime")?;
+    let liteyuki = PyModule::import(py, PYTHON_ROOT_MODULE)?;
+    let cleaner = liteyuki.getattr(ASTRBOT_CLEANUP_RUNTIME_FN)?;
     for module_name in module_names {
         cleaner.call1((module_name.as_str(),))?;
     }
@@ -387,248 +401,6 @@ pub(super) fn render_python_command_result(
     }
     let repr = value.repr()?.to_string();
     Ok(repr)
-}
-
-pub(super) fn capture_plugin_module_names(
-    py: Python<'_>,
-    entry_module: &str,
-    search_paths: &[PathBuf],
-) -> PyResult<Vec<String>> {
-    let sys = py.import("sys")?;
-    let modules = sys.getattr("modules")?.downcast_into::<PyDict>()?;
-    let builtins = py.import("builtins")?;
-    let items = builtins
-        .getattr("list")?
-        .call1((modules.items(),))?
-        .downcast_into::<PyList>()?;
-    let mut names = HashSet::new();
-    let entry_prefix = format!("{entry_module}.");
-
-    for entry in items.iter() {
-        let tuple = entry.downcast_into::<PyTuple>()?;
-        let Some(key) = tuple.get_item(0).ok() else {
-            continue;
-        };
-        let Some(value) = tuple.get_item(1).ok() else {
-            continue;
-        };
-        let Ok(name) = key.extract::<String>() else {
-            continue;
-        };
-        if name == entry_module || name.starts_with(entry_prefix.as_str()) {
-            names.insert(name);
-            continue;
-        }
-        if module_matches_search_paths(&value, search_paths)? {
-            names.insert(name);
-        }
-    }
-
-    let mut modules = names.into_iter().collect::<Vec<_>>();
-    modules.sort();
-    Ok(modules)
-}
-
-pub(super) fn remove_stale_entrypoint_modules(
-    py: Python<'_>,
-    entry_module: &str,
-    search_paths: &[PathBuf],
-) -> PyResult<()> {
-    let sys = py.import("sys")?;
-    let modules = sys.getattr("modules")?.downcast_into::<PyDict>()?;
-    let builtins = py.import("builtins")?;
-    let items = builtins
-        .getattr("list")?
-        .call1((modules.items(),))?
-        .downcast_into::<PyList>()?;
-    let entry_prefix = format!("{entry_module}.");
-    let mut stale_names = Vec::new();
-
-    for entry in items.iter() {
-        let tuple = entry.downcast_into::<PyTuple>()?;
-        let Some(key) = tuple.get_item(0).ok() else {
-            continue;
-        };
-        let Some(value) = tuple.get_item(1).ok() else {
-            continue;
-        };
-        let Ok(name) = key.extract::<String>() else {
-            continue;
-        };
-        if (name == entry_module || name.starts_with(entry_prefix.as_str()))
-            && !module_matches_search_paths(&value, search_paths)?
-        {
-            stale_names.push(name);
-        }
-    }
-
-    for name in stale_names {
-        let contains = modules
-            .call_method1("__contains__", (name.as_str(),))?
-            .is_truthy()?;
-        if contains {
-            modules.del_item(name.as_str())?;
-        }
-    }
-
-    Ok(())
-}
-
-pub(super) fn import_python_entrypoint_module<'py>(
-    py: Python<'py>,
-    entry_module: &str,
-    search_paths: &[PathBuf],
-) -> PyResult<pyo3::Bound<'py, PyModule>> {
-    let Some((entry_path, package_dir)) = resolve_entrypoint_path(entry_module, search_paths)
-    else {
-        return PyModule::import(py, entry_module);
-    };
-
-    let importlib_util = py.import("importlib.util")?;
-    let sys = py.import("sys")?;
-    let modules = sys.getattr("modules")?.downcast_into::<PyDict>()?;
-    let entry_path = entry_path.to_string_lossy().into_owned();
-    let spec = if let Some(package_dir) = package_dir {
-        let kwargs = PyDict::new(py);
-        let locations = PyList::new(py, [package_dir.to_string_lossy().into_owned()])?;
-        kwargs.set_item("submodule_search_locations", locations)?;
-        importlib_util.call_method(
-            "spec_from_file_location",
-            (entry_module, entry_path.as_str()),
-            Some(&kwargs),
-        )?
-    } else {
-        importlib_util.call_method1(
-            "spec_from_file_location",
-            (entry_module, entry_path.as_str()),
-        )?
-    };
-    if spec.is_none() {
-        return Err(PyRuntimeError::new_err(format!(
-            "python entrypoint module '{}' could not be loaded from {}",
-            entry_module, entry_path
-        )));
-    }
-
-    let module = importlib_util.call_method1("module_from_spec", (&spec,))?;
-    modules.set_item(entry_module, &module)?;
-    let loader = spec.getattr("loader")?;
-    if let Err(err) = loader.call_method1("exec_module", (&module,)) {
-        let _ = modules.del_item(entry_module);
-        return Err(err);
-    }
-    Ok(module.downcast_into::<PyModule>()?)
-}
-
-fn resolve_entrypoint_path(
-    entry_module: &str,
-    search_paths: &[PathBuf],
-) -> Option<(PathBuf, Option<PathBuf>)> {
-    let module_relative = entry_module.replace('.', std::path::MAIN_SEPARATOR_STR);
-    let file_candidate = format!("{module_relative}.py");
-    let package_candidate = PathBuf::from(&module_relative).join("__init__.py");
-
-    for base in search_paths {
-        let file_path = base.join(file_candidate.as_str());
-        if file_path.exists() {
-            return Some((file_path, None));
-        }
-        let package_path = base.join(&package_candidate);
-        if package_path.exists() {
-            let package_dir = package_path.parent().map(Path::to_path_buf);
-            return Some((package_path, package_dir));
-        }
-    }
-
-    None
-}
-
-fn module_matches_search_paths(
-    module: &pyo3::Bound<'_, PyAny>,
-    search_paths: &[PathBuf],
-) -> PyResult<bool> {
-    if let Ok(file_attr) = module.getattr("__file__")
-        && let Ok(file_path) = file_attr.extract::<String>()
-        && path_matches_search_paths(file_path.as_str(), search_paths)
-    {
-        return Ok(true);
-    }
-
-    if let Ok(path_attr) = module.getattr("__path__") {
-        for item in path_attr.try_iter()? {
-            let item = item?;
-            if let Ok(path) = item.extract::<String>()
-                && path_matches_search_paths(path.as_str(), search_paths)
-            {
-                return Ok(true);
-            }
-        }
-    }
-
-    Ok(false)
-}
-
-fn path_matches_search_paths(raw: &str, search_paths: &[PathBuf]) -> bool {
-    let path = Path::new(raw);
-    search_paths.iter().any(|base| path.starts_with(base))
-}
-
-pub(super) fn remove_python_modules(py: Python<'_>, module_names: &[String]) -> PyResult<()> {
-    let sys = py.import("sys")?;
-    let modules = sys.getattr("modules")?.downcast_into::<PyDict>()?;
-    for name in module_names {
-        let contains = modules
-            .call_method1("__contains__", (name.as_str(),))?
-            .is_truthy()?;
-        if contains {
-            modules.del_item(name.as_str())?;
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn remove_python_search_paths(py: Python<'_>, search_paths: &[PathBuf]) -> PyResult<()> {
-    if search_paths.is_empty() {
-        return Ok(());
-    }
-    let sys = py.import("sys")?;
-    let py_path = sys.getattr("path")?;
-    for path in search_paths {
-        let path_text = path.to_string_lossy().into_owned();
-        if path_text.trim().is_empty() {
-            continue;
-        }
-        loop {
-            let exists = py_path
-                .call_method1("__contains__", (path_text.as_str(),))?
-                .is_truthy()?;
-            if !exists {
-                break;
-            }
-            py_path.call_method1("remove", (path_text.as_str(),))?;
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn py_any_to_json(value: &pyo3::Bound<'_, PyAny>) -> PyResult<Value> {
-    if value.is_none() {
-        return Ok(Value::Null);
-    }
-    let py = value.py();
-    let json = py.import("json")?;
-    let dumped: String = json.call_method1("dumps", (value,))?.extract()?;
-    serde_json::from_str::<Value>(dumped.as_str()).map_err(|err| {
-        PyValueError::new_err(format!("python value is not json-serializable: {}", err))
-    })
-}
-
-pub(super) fn json_to_pyobject(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
-    let json = py.import("json")?;
-    let dumped = serde_json::to_string(value)
-        .map_err(|err| PyValueError::new_err(format!("json serialization failed: {}", err)))?;
-    let parsed = json.call_method1("loads", (dumped,))?;
-    Ok(parsed.unbind())
 }
 
 pub(super) fn plugin_runtime_error(plugin_id: &str, err: PyErr) -> PluginSdkError {

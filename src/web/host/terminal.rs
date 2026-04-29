@@ -1,5 +1,11 @@
 use super::*;
+use futures_util::{SinkExt, StreamExt};
 use std::collections::VecDeque;
+use tokio::net::TcpStream;
+use tokio::sync::broadcast;
+use tokio_tungstenite::accept_hdr_async;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
 #[derive(Default)]
 pub(super) struct WebTerminalState {
@@ -460,4 +466,153 @@ pub(super) fn handle_terminal_client_message(
 pub(super) fn terminal_ws_text(text: impl Into<String>) -> Message {
     let payload = serde_json::json!({ "data": text.into() }).to_string();
     Message::Text(payload)
+}
+
+pub(super) async fn handle_terminal_websocket(
+    service: &WebHostService,
+    socket: TcpStream,
+) -> io::Result<()> {
+    let request_path = Arc::new(Mutex::new(None::<String>));
+    let capture = Arc::clone(&request_path);
+    let ws_stream = accept_hdr_async(socket, move |request: &Request, response: Response| {
+        if let Ok(mut slot) = capture.lock() {
+            *slot = request
+                .uri()
+                .path_and_query()
+                .map(|value| value.as_str().to_string())
+                .or_else(|| Some(request.uri().path().to_string()));
+        }
+        Ok(response)
+    })
+    .await
+    .map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("websocket upgrade failed: {err}"),
+        )
+    })?;
+
+    let raw_path = request_path
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .unwrap_or_default();
+    let query = parse_query_string(raw_path.as_str());
+    let session_id = query.get("id").cloned().unwrap_or_default();
+    let token = query.get("token").cloned().unwrap_or_default();
+    let Some(session) = service.terminal_state.get_session(session_id.as_str()) else {
+        return serve_terminal_socket_with_error(ws_stream, "terminal session not found").await;
+    };
+    if !service.auth.is_session_token_valid(token.as_str()) {
+        return serve_terminal_socket_with_error(ws_stream, "terminal token is invalid").await;
+    }
+    if let Err(err) = session
+        .ensure_started(Arc::clone(&service.terminal_state))
+        .await
+    {
+        return serve_terminal_socket_with_error(ws_stream, err.as_str()).await;
+    }
+
+    let (mut ws_write, mut ws_read) = ws_stream.split();
+    if let Some(history) = session.recent_history_text() {
+        ws_write
+            .send(terminal_ws_text(format!("{history}\r\n")))
+            .await
+            .map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    format!("failed to replay terminal history: {err}"),
+                )
+            })?;
+    }
+    ws_write
+        .send(terminal_ws_text(format!(
+            "\u{1b}[90m[terminal:{}] attached to local {} shell\u{1b}[0m\r\n",
+            session.id, session.shell
+        )))
+        .await
+        .map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                format!("failed to write terminal banner: {err}"),
+            )
+        })?;
+
+    let mut output_rx = session.subscribe();
+    let writer = tokio::spawn(async move {
+        loop {
+            match output_rx.recv().await {
+                Ok(first_chunk) => {
+                    let mut chunk = first_chunk;
+                    loop {
+                        match tokio::time::timeout(TERMINAL_WS_BATCH_INTERVAL, output_rx.recv())
+                            .await
+                        {
+                            Ok(Ok(next_chunk)) => chunk.push_str(next_chunk.as_str()),
+                            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                            Ok(Err(broadcast::error::RecvError::Closed)) => break,
+                            Err(_) => break,
+                        }
+                    }
+                    if ws_write.send(terminal_ws_text(chunk)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let input_session = Arc::clone(&session);
+    let reader = tokio::spawn(async move {
+        while let Some(message) = ws_read.next().await {
+            match message {
+                Ok(Message::Text(payload)) => {
+                    if let Err(err) =
+                        handle_terminal_client_message(&input_session, payload.as_ref())
+                    {
+                        let _ = input_session.output_tx.send(format!(
+                            "\r\n\u{1b}[31m[terminal:{}] {}\u{1b}[0m\r\n",
+                            input_session.id, err
+                        ));
+                    }
+                }
+                Ok(Message::Binary(payload)) => {
+                    if let Ok(text) = String::from_utf8(payload.to_vec())
+                        && let Err(err) =
+                            handle_terminal_client_message(&input_session, text.as_str())
+                    {
+                        let _ = input_session.output_tx.send(format!(
+                            "\r\n\u{1b}[31m[terminal:{}] {}\u{1b}[0m\r\n",
+                            input_session.id, err
+                        ));
+                    }
+                }
+                Ok(Message::Close(_)) => break,
+                Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    let _ = tokio::join!(writer, reader);
+    Ok(())
+}
+
+async fn serve_terminal_socket_with_error<S>(
+    mut ws_stream: tokio_tungstenite::WebSocketStream<S>,
+    message: &str,
+) -> io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let _ = ws_stream
+        .send(terminal_ws_text(format!(
+            "\u{1b}[31m[terminal] {}\u{1b}[0m\r\n",
+            message
+        )))
+        .await;
+    let _ = ws_stream.close(None).await;
+    Ok(())
 }

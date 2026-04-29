@@ -2,7 +2,7 @@ use crate::app_host::EmbeddedAppHost;
 
 use super::{
     WebHostAsset, build_redirect_response, build_response, plugin_declared_page_paths,
-    read_asset_file, resolve_plugin_descriptor, sanitize_request_path,
+    resolve_plugin_descriptor,
 };
 
 pub(super) fn route_plugin_page(
@@ -78,7 +78,7 @@ pub(super) fn route_plugin_page(
         );
     }
 
-    let Some(request_path) = sanitize_request_path(normalized_request) else {
+    let Some(request_path) = super::assets::sanitize_request_path(normalized_request) else {
         return build_response(
             "400 Bad Request",
             "text/plain; charset=utf-8",
@@ -119,7 +119,7 @@ pub(super) fn route_plugin_page(
             is_head,
         );
     }
-    match read_asset_file(asset_path).map(maybe_inject_plugin_page_auth_bridge) {
+    match super::assets::read_asset_file(asset_path).map(maybe_inject_plugin_page_auth_bridge) {
         Some(asset) => build_response("200 OK", asset.content_type(), asset.body(), is_head),
         None => build_response(
             "404 Not Found",

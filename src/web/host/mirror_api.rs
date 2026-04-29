@@ -39,7 +39,7 @@ pub(super) fn route_mirror_api(
             .map(str::trim)
             .unwrap_or_default();
         let config = load_mirror_config();
-        let result = run_async_for_web_host(test_mirror_candidate(
+        let result = run_async_for_web_host(super::mirror_support::test_mirror_candidate(
             if mirror.is_empty() {
                 "自动选择"
             } else {
@@ -94,7 +94,7 @@ pub(super) fn route_mirror_api(
             })
             .to_string(),
         );
-        let original_result = run_async_for_web_host(test_mirror_candidate(
+        let original_result = run_async_for_web_host(super::mirror_support::test_mirror_candidate(
             original_label,
             None,
             test_type,
@@ -127,7 +127,7 @@ pub(super) fn route_mirror_api(
                 })
                 .to_string(),
             );
-            let result = run_async_for_web_host(test_mirror_candidate(
+            let result = run_async_for_web_host(super::mirror_support::test_mirror_candidate(
                 mirror,
                 Some(mirror.as_str()),
                 test_type,

@@ -5,29 +5,39 @@ pub mod app_host;
 pub mod bootstrap;
 pub mod comm;
 pub mod core;
+pub(crate) mod hardcode_data;
 pub mod llm;
 pub mod observability;
 pub mod plugin;
 pub(crate) mod runtime_support;
 pub mod session;
+#[doc(hidden)]
+pub mod test_support;
+pub(crate) mod utils;
 pub mod web;
 pub mod web_host;
 pub mod web_ui;
 
+// 外部调用
 #[allow(dead_code)]
 mod app_config;
+// 外部调用
 #[allow(dead_code)]
 mod command_registry;
+// 外部调用
 #[allow(dead_code)]
 mod config_edit;
-mod config_paths;
 mod external_commands;
+// 外部调用
 #[allow(dead_code)]
 mod i18n;
+// 外部调用
 #[allow(dead_code)]
 mod onebot_support;
+// 外部调用
 #[allow(dead_code)]
 mod superuser;
+// 外部调用
 #[allow(dead_code, unused_imports)]
 mod tui;
 

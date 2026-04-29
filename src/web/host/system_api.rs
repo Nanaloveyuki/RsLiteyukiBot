@@ -90,25 +90,26 @@ pub(super) fn route_system_api(
     }
 
     if api_path == "/base/GetHitokoto" {
-        let body =
-            match run_async_for_web_host(fetch_upstream_json("https://hitokoto.152710.xyz/", None))
-            {
-                Ok(payload) => napcat_ok(&payload),
-                Err(err) => napcat_err(-1, err.as_str()),
-            };
+        let body = match run_async_for_web_host(super::upstream::fetch_upstream_json(
+            "https://hitokoto.152710.xyz/",
+            None,
+        )) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
         return Some(napcat_response(body, is_head));
     }
 
     if api_path == "/base/GetGitHubRepoSnapshot" {
         let query = parse_query_string(raw_path);
-        let owner = match sanitize_repo_component(query.get("owner"), "owner") {
+        let owner = match super::upstream::sanitize_repo_component(query.get("owner"), "owner") {
             Ok(owner) => owner,
             Err(err) => {
                 let body = napcat_err(-1, err.as_str());
                 return Some(napcat_response(body, is_head));
             }
         };
-        let repo = match sanitize_repo_component(query.get("repo"), "repo") {
+        let repo = match super::upstream::sanitize_repo_component(query.get("repo"), "repo") {
             Ok(repo) => repo,
             Err(err) => {
                 let body = napcat_err(-1, err.as_str());
@@ -123,10 +124,10 @@ pub(super) fn route_system_api(
             let pulls_url = format!("{base}/pulls");
             let contributors_url = format!("{base}/contributors");
             let (repo, releases, pulls, contributors) = tokio::join!(
-                fetch_upstream_json(repo_url.as_str(), None),
-                fetch_upstream_json(releases_url.as_str(), None),
-                fetch_upstream_json(pulls_url.as_str(), None),
-                fetch_upstream_json(contributors_url.as_str(), None)
+                super::upstream::fetch_upstream_json(repo_url.as_str(), None),
+                super::upstream::fetch_upstream_json(releases_url.as_str(), None),
+                super::upstream::fetch_upstream_json(pulls_url.as_str(), None),
+                super::upstream::fetch_upstream_json(contributors_url.as_str(), None)
             );
             Ok::<Value, String>(serde_json::json!({
                 "repo": repo?,
@@ -143,14 +144,14 @@ pub(super) fn route_system_api(
 
     if api_path == "/base/GetGitHubReadme" {
         let query = parse_query_string(raw_path);
-        let owner = match sanitize_repo_component(query.get("owner"), "owner") {
+        let owner = match super::upstream::sanitize_repo_component(query.get("owner"), "owner") {
             Ok(owner) => owner,
             Err(err) => {
                 let body = napcat_err(-1, err.as_str());
                 return Some(napcat_response(body, is_head));
             }
         };
-        let repo = match sanitize_repo_component(query.get("repo"), "repo") {
+        let repo = match super::upstream::sanitize_repo_component(query.get("repo"), "repo") {
             Ok(repo) => repo,
             Err(err) => {
                 let body = napcat_err(-1, err.as_str());
@@ -158,7 +159,7 @@ pub(super) fn route_system_api(
             }
         };
         let url = format!("https://api.github.com/repos/{owner}/{repo}/readme");
-        let body = match run_async_for_web_host(fetch_upstream_text(
+        let body = match run_async_for_web_host(super::upstream::fetch_upstream_text(
             url.as_str(),
             Some("application/vnd.github.v3.raw"),
         )) {

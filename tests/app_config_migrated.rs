@@ -10,8 +10,8 @@ mod command_registry;
 #[path = "../src/config_edit.rs"]
 mod config_edit;
 #[allow(dead_code)]
-#[path = "../src/config_paths.rs"]
-mod config_paths;
+#[path = "../src/hardcode_data/mod.rs"]
+mod hardcode_data;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/i18n.rs"]
 mod i18n;
@@ -30,6 +30,9 @@ mod superuser;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/tui/mod.rs"]
 mod tui;
+#[allow(dead_code)]
+#[path = "../src/utils/mod.rs"]
+mod utils;
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -349,7 +352,7 @@ fn ensure_default_llm_config_file_replaces_default_user_llm_config_with_legacy_r
     let user_config = config_dir.join("llm-config.yaml");
     std::fs::write(
         &user_config,
-        "llm:\n  enabled: false\n  provider: openai\n  base_url: https://tokenflux.dev/v1\n  model: gpt-4.1-mini\n  timeout_seconds: 20\n  command_prefix: /ask\n  api_keys: []\n",
+        "llm:\n  enabled: false\n  provider: openai\n  base_url: https://api.openai.com\n  model: gpt-4.1-mini\n  timeout_seconds: 20\n  command_prefix: /ask\n  api_keys: []\n",
     )
     .expect("default user llm config should be written");
     let cwd = temp_path("replace-llm-cwd", "dir");

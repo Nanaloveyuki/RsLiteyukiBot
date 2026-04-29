@@ -4,8 +4,10 @@ use std::sync::{LazyLock, Mutex};
 
 use serde_json::{Map, Value};
 
-use crate::config_paths::{resolve_default_app_config_path, resolve_existing_app_config_path};
 use crate::plugin::{PluginDescriptor, PluginSdkError};
+use crate::utils::config_path::{
+    resolve_default_app_config_path, resolve_existing_app_config_path,
+};
 
 pub(super) static PLUGIN_CONFIG_RW_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 

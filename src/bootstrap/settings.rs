@@ -5,9 +5,14 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
-use crate::config_paths::resolve_existing_app_config_path;
 use crate::core::BotRuntimeConfig;
 use crate::observability::{LogLevel, LogMode, LoggerConfig, TimeZone, TimestampFormat};
+use crate::utils::config_path::resolve_existing_app_config_path;
+use crate::utils::runtime_settings::{
+    LOG_LEVEL_KEY, LOG_MODE_KEY, LOG_TIMESTAMP_FORMAT_KEY, LOG_TIMESTAMP_PATTERN_KEY,
+    LOG_TIMEZONE_KEY, RUNTIME_INGRESS_QUEUE_KEY, RUNTIME_WORKER_COUNT_KEY,
+    RUNTIME_WORKER_QUEUE_KEY, runtime_setting_value_pairs,
+};
 
 static GLOBAL_SETTINGS: OnceLock<RuntimeSettings> = OnceLock::new();
 
@@ -85,9 +90,9 @@ pub struct RuntimeSettingsSpec {
 impl Default for RuntimeSettingsSpec {
     fn default() -> Self {
         Self {
-            worker_count: ConfigSetting::new("LY_WORKERS", 4),
-            ingress_queue: ConfigSetting::new("LY_INGRESS_QUEUE", 1024),
-            worker_queue: ConfigSetting::new("LY_WORKER_QUEUE", 256),
+            worker_count: ConfigSetting::new(RUNTIME_WORKER_COUNT_KEY, 4),
+            ingress_queue: ConfigSetting::new(RUNTIME_INGRESS_QUEUE_KEY, 1024),
+            worker_queue: ConfigSetting::new(RUNTIME_WORKER_QUEUE_KEY, 256),
         }
     }
 }
@@ -213,38 +218,23 @@ impl ConfigManager {
             ),
             None => (raw.runtime, raw.log),
         };
+        self.apply_runtime_setting_pairs(runtime_setting_value_pairs(
+            runtime.as_ref().and_then(|section| section.worker_count),
+            runtime.as_ref().and_then(|section| section.ingress_queue),
+            runtime.as_ref().and_then(|section| section.worker_queue),
+            log.as_ref().and_then(|section| section.mode.as_deref()),
+            log.as_ref().and_then(|section| section.level.as_deref()),
+            log.as_ref().and_then(|section| section.timezone.as_deref()),
+            log.as_ref()
+                .and_then(|section| section.timestamp_format.as_deref()),
+            log.as_ref()
+                .and_then(|section| section.timestamp_pattern.as_deref()),
+        ));
+    }
 
-        if let Some(runtime) = runtime {
-            if let Some(worker_count) = runtime.worker_count {
-                self.insert("LY_WORKERS", worker_count.to_string());
-            }
-            if let Some(ingress_queue) = runtime.ingress_queue {
-                self.insert("LY_INGRESS_QUEUE", ingress_queue.to_string());
-            }
-            if let Some(worker_queue) = runtime.worker_queue {
-                self.insert("LY_WORKER_QUEUE", worker_queue.to_string());
-            }
-        }
-
-        if let Some(log) = log {
-            if let Some(mode) = log.mode {
-                self.insert("LY_LOG_MODE", mode);
-            }
-            if let Some(level) = log.level {
-                self.insert("LY_LOG_LEVEL", level);
-            }
-            if let Some(timezone) = log.timezone {
-                self.insert("LY_LOG_TZ", timezone);
-            }
-            if let Some(timestamp_format) = log.timestamp_format {
-                self.insert("LY_LOG_TS_FORMAT", timestamp_format);
-            }
-            if let Some(timestamp_pattern) = log.timestamp_pattern {
-                if self.get("LY_LOG_TS_FORMAT").is_none() {
-                    self.insert("LY_LOG_TS_FORMAT", "custom");
-                }
-                self.insert("LY_LOG_TS_PATTERN", timestamp_pattern);
-            }
+    fn apply_runtime_setting_pairs(&mut self, pairs: Vec<(&'static str, String)>) {
+        for (key, value) in pairs {
+            self.insert(key, value);
         }
     }
 }
@@ -324,17 +314,21 @@ impl RuntimeSettings {
         &Self::global_or_default().runtime_config
     }
 
-    pub fn describe(&self) -> String {
+    pub fn describe_runtime_config(runtime_config: &BotRuntimeConfig) -> String {
         format!(
             "workers={}, ingress_queue={}, worker_queue={}, log_mode={}, log_level={}, log_tz={}, log_ts={}",
-            self.runtime_config.worker_count,
-            self.runtime_config.ingress_queue,
-            self.runtime_config.worker_queue,
-            self.runtime_config.logger.mode,
-            self.runtime_config.logger.min_level,
-            self.runtime_config.logger.timezone,
-            self.runtime_config.logger.timestamp_format
+            runtime_config.worker_count,
+            runtime_config.ingress_queue,
+            runtime_config.worker_queue,
+            runtime_config.logger.mode,
+            runtime_config.logger.min_level,
+            runtime_config.logger.timezone,
+            runtime_config.logger.timestamp_format
         )
+    }
+
+    pub fn describe(&self) -> String {
+        Self::describe_runtime_config(&self.runtime_config)
     }
 }
 
@@ -347,35 +341,35 @@ fn resolve_non_zero_usize(manager: &ConfigManager, setting: &ConfigSetting<usize
 fn logger_config_from_manager(manager: &ConfigManager) -> LoggerConfig {
     let mut logger = LoggerConfig::default();
 
-    if let Some(raw) = manager.get("LY_LOG_MODE")
+    if let Some(raw) = manager.get(LOG_MODE_KEY)
         && let Some(mode) = LogMode::parse(raw)
     {
         logger.mode = mode;
     }
 
-    if let Some(raw) = manager.get("LY_LOG_LEVEL")
+    if let Some(raw) = manager.get(LOG_LEVEL_KEY)
         && let Some(level) = LogLevel::parse(raw)
     {
         logger.min_level = level;
     }
 
-    if let Some(raw) = manager.get("LY_LOG_TZ")
+    if let Some(raw) = manager.get(LOG_TIMEZONE_KEY)
         && let Some(tz) = TimeZone::parse(raw)
     {
         logger.timezone = tz;
     }
 
-    if let Some(raw) = manager.get("LY_LOG_TS_FORMAT") {
+    if let Some(raw) = manager.get(LOG_TIMESTAMP_FORMAT_KEY) {
         if raw.trim().eq_ignore_ascii_case("custom") {
             let pattern = manager
-                .get("LY_LOG_TS_PATTERN")
+                .get(LOG_TIMESTAMP_PATTERN_KEY)
                 .unwrap_or("%Y-%m-%d %H:%M:%S")
                 .to_string();
             logger.timestamp_format = TimestampFormat::Custom(pattern);
         } else {
             logger.timestamp_format = TimestampFormat::parse(raw);
         }
-    } else if let Some(pattern) = manager.get("LY_LOG_TS_PATTERN") {
+    } else if let Some(pattern) = manager.get(LOG_TIMESTAMP_PATTERN_KEY) {
         logger.timestamp_format = TimestampFormat::Custom(pattern.to_string());
     }
 
@@ -423,3 +417,7 @@ struct RawLogSection {
     #[serde(default)]
     timestamp_pattern: Option<String>,
 }
+
+#[cfg(test)]
+#[path = "settings/tests.rs"]
+mod tests;

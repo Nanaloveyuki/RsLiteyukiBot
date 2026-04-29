@@ -43,8 +43,8 @@ pub(super) struct MirrorConfigDoc {
 impl Default for MirrorConfigDoc {
     fn default() -> Self {
         Self {
-            file_mirrors: default_file_mirrors(),
-            raw_mirrors: default_raw_mirrors(),
+            file_mirrors: super::mirror_support::default_file_mirrors(),
+            raw_mirrors: super::mirror_support::default_raw_mirrors(),
             custom_mirror: None,
             timeout: 5_000,
         }
@@ -124,10 +124,10 @@ pub(super) fn save_webui_appearance_config(
 pub(super) fn load_mirror_config() -> MirrorConfigDoc {
     let mut config = read_json_file::<MirrorConfigDoc>(state_path(MIRROR_CONFIG_FILE).as_path());
     if config.file_mirrors.is_empty() {
-        config.file_mirrors = default_file_mirrors();
+        config.file_mirrors = super::mirror_support::default_file_mirrors();
     }
     if config.raw_mirrors.is_empty() {
-        config.raw_mirrors = default_raw_mirrors();
+        config.raw_mirrors = super::mirror_support::default_raw_mirrors();
     }
     if config.timeout == 0 {
         config.timeout = 5_000;
@@ -219,8 +219,8 @@ pub(super) fn render_theme_css(config: &ThemeConfigDoc) -> String {
 pub(super) fn built_in_public_font(path: &str) -> Option<WebHostAsset> {
     let font_name = path.strip_prefix("/webui/fonts/")?;
     if font_name.eq_ignore_ascii_case("CustomFont.woff") {
-        return read_asset_file(state_path(CUSTOM_FONT_FILE));
+        return super::assets::read_asset_file(state_path(CUSTOM_FONT_FILE));
     }
 
-    read_asset_file(state_path(PUBLIC_FONT_DIR).join(font_name))
+    super::assets::read_asset_file(state_path(PUBLIC_FONT_DIR).join(font_name))
 }

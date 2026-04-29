@@ -1346,7 +1346,6 @@ fn resume_size_limit_drops_frontmost_old_resume() {
     assert!(app.resume_store.persisted_size_bytes() > max_size_bytes);
 
     app.resume_max_size_bytes = max_size_bytes;
-    app.enforce_resume_limits();
     app.flush_resume_if_needed(true);
 
     let remaining_uids = app

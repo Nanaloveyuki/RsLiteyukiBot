@@ -3,12 +3,15 @@ import { Chip } from '@heroui/chip';
 import { Input, Textarea } from '@heroui/input';
 import { Switch } from '@heroui/switch';
 import { Tab, Tabs } from '@heroui/tabs';
-import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import { type ChangeEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import {
   LuBookOpen,
   LuBraces,
   LuChevronRight,
+  LuFileArchive,
+  LuFileText,
+  LuFolderOpen,
   LuPlus,
   LuRefreshCw,
   LuSave,
@@ -583,11 +586,14 @@ function SkillsPanel () {
   const [uploading, setUploading] = useState(false);
   const [skills, setSkills] = useState<SkillInventoryItem[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [managedRoot, setManagedRoot] = useState('');
   const [selected, setSelected] = useState<SkillReadResponse | null>(null);
   const [uploadName, setUploadName] = useState('');
   const [uploadContent, setUploadContent] = useState('');
   const [overwrite, setOverwrite] = useState(false);
   const [query, setQuery] = useState('');
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   const load = async () => {
     setLoading(true);
@@ -595,6 +601,7 @@ function SkillsPanel () {
       const data = await CapabilityManager.getSkills();
       setSkills(data.skills);
       setWarnings(data.warnings ?? []);
+      setManagedRoot(data.managedRoot ?? '');
     } catch (error) {
       toast.error(`加载 Skills 失败: ${(error as Error).message}`);
     } finally {
@@ -616,6 +623,34 @@ function SkillsPanel () {
     } finally {
       setReading(false);
     }
+  };
+
+  const importFiles = async (files: File[]) => {
+    if (!files.length) {
+      return;
+    }
+    setUploading(true);
+    const loadingToast = toast.loading('正在导入 Skill...');
+    try {
+      const data = await CapabilityManager.importSkills(files, overwrite);
+      setManagedRoot(data.managedRoot ?? managedRoot);
+      toast.success(`已导入 ${data.count} 个 Skill`, { id: loadingToast });
+      await load();
+      const firstSkill = data.skills[0]?.name;
+      if (firstSkill) {
+        await read(firstSkill);
+      }
+    } catch (error) {
+      toast.error(`导入 Skill 失败: ${(error as Error).message}`, { id: loadingToast });
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleImportChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = '';
+    await importFiles(files);
   };
 
   const upload = async () => {
@@ -724,27 +759,78 @@ function SkillsPanel () {
           />
         </div>
         <div className='rounded-xl border border-white/20 bg-white/45 p-3 dark:border-white/10 dark:bg-white/5'>
-          <SectionTitle icon={<LuUpload />} title='上传 Skill' />
+          <SectionTitle icon={<LuUpload />} title='导入 Skill' />
           <div className='grid gap-3'>
-            <Input
-              label='name'
-              variant='bordered'
-              value={uploadName}
-              onChange={(event) => setUploadName(event.target.value)}
+            {managedRoot && (
+              <div className='rounded-xl border border-white/15 bg-white/40 p-3 text-xs text-default-500 dark:border-white/10 dark:bg-black/10 dark:text-default-400'>
+                存储目录: {managedRoot}
+              </div>
+            )}
+            <div className='grid gap-2 sm:grid-cols-2'>
+              <Button
+                variant='flat'
+                startContent={<LuFileArchive />}
+                isLoading={uploading}
+                onPress={() => importInputRef.current?.click()}
+              >
+                文件/压缩包
+              </Button>
+              <Button
+                variant='flat'
+                startContent={<LuFolderOpen />}
+                isLoading={uploading}
+                onPress={() => folderInputRef.current?.click()}
+              >
+                文件夹
+              </Button>
+            </div>
+            <input
+              ref={importInputRef}
+              type='file'
+              multiple
+              accept='.md,.markdown,.zip,.rar,.7z'
+              className='hidden'
+              onChange={(event) => void handleImportChange(event)}
             />
-            <Textarea
-              label='content'
-              variant='bordered'
-              minRows={12}
-              value={uploadContent}
-              onChange={(event) => setUploadContent(event.target.value)}
+            <input
+              ref={folderInputRef}
+              type='file'
+              multiple
+              className='hidden'
+              {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+              onChange={(event) => void handleImportChange(event)}
             />
+            <div className='rounded-xl border border-dashed border-white/20 p-3 text-xs leading-5 text-default-500 dark:border-white/10'>
+              支持导入单个 `SKILL.md`、技能文件夹，以及 `.zip` / `.rar` / `.7z` 压缩包。
+              目录或压缩包内允许 1 到 3 层嵌套，系统会自动搜索并安装到用户 Skill 目录。
+            </div>
             <Switch size='sm' isSelected={overwrite} onValueChange={setOverwrite}>
               覆盖同名 Skill
             </Switch>
-            <Button color='primary' startContent={<LuUpload />} isLoading={uploading} onPress={() => void upload()}>
-              上传
-            </Button>
+            <div className='rounded-xl border border-white/15 bg-white/35 p-3 dark:border-white/10 dark:bg-black/10'>
+              <div className='mb-3 flex items-center gap-2 text-sm font-semibold text-default-700 dark:text-default-100'>
+                <LuFileText />
+                手动创建
+              </div>
+              <div className='grid gap-3'>
+                <Input
+                  label='name'
+                  variant='bordered'
+                  value={uploadName}
+                  onChange={(event) => setUploadName(event.target.value)}
+                />
+                <Textarea
+                  label='content'
+                  variant='bordered'
+                  minRows={10}
+                  value={uploadContent}
+                  onChange={(event) => setUploadContent(event.target.value)}
+                />
+                <Button color='primary' startContent={<LuUpload />} isLoading={uploading} onPress={() => void upload()}>
+                  上传
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
       </div>

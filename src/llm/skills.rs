@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-const DEFAULT_SKILLS_DIR_NAME: &str = "skills";
 const SKILL_ENTRY_FILE: &str = "SKILL.md";
+const LEGACY_SKILL_ENTRY_FILES: &[&str] = &["Skill.md", "skill.md"];
 const DEFAULT_SKILL_READ_MAX_CHARS: usize = 16_000;
 const SKILL_DIR_ENV: &str = "LY_SKILLS_DIR";
 
@@ -28,74 +28,99 @@ pub(crate) struct SkillCatalogEntry {
 #[derive(Debug, Clone)]
 pub(crate) struct SkillManager {
     workspace_root: PathBuf,
-    skills_root: PathBuf,
+    scan_roots: Vec<PathBuf>,
 }
 
 impl SkillManager {
     pub(crate) fn for_workspace(workspace_root: &Path) -> Self {
-        let skills_root = std::env::var_os(SKILL_DIR_ENV)
+        let managed_root = std::env::var_os(SKILL_DIR_ENV)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| workspace_root.join(DEFAULT_SKILLS_DIR_NAME));
+            .unwrap_or_else(crate::utils::config_path::resolve_user_skills_dir);
+        let legacy_root = workspace_root.join(crate::hardcode_data::config_path::SKILLS_DIR_NAME);
+        let scan_roots = if std::env::var_os(SKILL_DIR_ENV).is_some() {
+            vec![managed_root.clone()]
+        } else if managed_root == legacy_root {
+            vec![managed_root.clone()]
+        } else {
+            vec![managed_root.clone(), legacy_root]
+        };
+        Self::from_roots(workspace_root.to_path_buf(), managed_root, scan_roots)
+    }
+
+    fn from_roots(
+        workspace_root: PathBuf,
+        managed_root: PathBuf,
+        scan_roots: Vec<PathBuf>,
+    ) -> Self {
+        let _ = managed_root;
         Self {
-            workspace_root: workspace_root.to_path_buf(),
-            skills_root,
+            workspace_root,
+            scan_roots,
         }
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn managed_root(&self) -> &Path {
+        self.scan_roots
+            .first()
+            .map(PathBuf::as_path)
+            .unwrap_or(self.workspace_root.as_path())
+    }
+
     pub(crate) fn list_skills(&self) -> Result<Vec<SkillInfo>, String> {
-        if !self.skills_root.exists() {
-            return Ok(Vec::new());
-        }
-        if !self.skills_root.is_dir() {
-            return Err(format!(
-                "skills root {} is not a directory",
-                self.skills_root.display()
-            ));
-        }
-
         let mut skills = Vec::new();
-        for entry in fs::read_dir(&self.skills_root).map_err(|err| {
-            format!(
-                "failed to read skills directory {}: {err}",
-                self.skills_root.display()
-            )
-        })? {
-            let entry = entry.map_err(|err| {
-                format!(
-                    "failed to read skill directory entry under {}: {err}",
-                    self.skills_root.display()
-                )
-            })?;
-            let path = entry.path();
-            if !path.is_dir() {
+        let mut seen = std::collections::HashSet::new();
+        for root in &self.scan_roots {
+            if !root.exists() {
                 continue;
             }
-
-            let entry_path = path.join(SKILL_ENTRY_FILE);
-            if !entry_path.is_file() {
-                continue;
+            if !root.is_dir() {
+                return Err(format!("skills root {} is not a directory", root.display()));
             }
 
-            let content = fs::read_to_string(&entry_path).map_err(|err| {
-                format!("failed to read skill file {}: {err}", entry_path.display())
+            let entry_iter = fs::read_dir(root).map_err(|err| {
+                format!("failed to read skills directory {}: {err}", root.display())
             })?;
-            let Some(name) = path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string)
-            else {
-                continue;
-            };
+            for entry in entry_iter {
+                let entry = entry.map_err(|err| {
+                    format!(
+                        "failed to read skill directory entry under {}: {err}",
+                        root.display()
+                    )
+                })?;
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
 
-            skills.push(SkillInfo {
-                name,
-                description: extract_skill_description(content.as_str()),
-                root: path,
-                entry_path,
-            });
+                let Some(entry_path) = find_skill_entry_path(path.as_path()) else {
+                    continue;
+                };
+
+                let content = fs::read_to_string(&entry_path).map_err(|err| {
+                    format!("failed to read skill file {}: {err}", entry_path.display())
+                })?;
+                let Some(name) = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+                else {
+                    continue;
+                };
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
+
+                skills.push(SkillInfo {
+                    name,
+                    description: extract_skill_description(content.as_str()),
+                    root: path,
+                    entry_path,
+                });
+            }
         }
 
         skills.sort_by(|left, right| left.name.cmp(&right.name));
@@ -169,6 +194,10 @@ impl SkillManager {
 }
 
 fn extract_skill_description(content: &str) -> Option<String> {
+    extract_skill_frontmatter_value(content, "description")
+}
+
+pub(crate) fn extract_skill_frontmatter_value(content: &str, target_key: &str) -> Option<String> {
     let mut lines = content.lines();
     if lines.next().map(str::trim) != Some("---") {
         return None;
@@ -182,7 +211,7 @@ fn extract_skill_description(content: &str) -> Option<String> {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
-        if key.trim() != "description" {
+        if key.trim() != target_key {
             continue;
         }
         let value = value.trim().trim_matches('"').trim_matches('\'').trim();
@@ -193,12 +222,30 @@ fn extract_skill_description(content: &str) -> Option<String> {
     None
 }
 
+fn find_skill_entry_path(root: &Path) -> Option<PathBuf> {
+    let canonical = root.join(SKILL_ENTRY_FILE);
+    if canonical.is_file() {
+        return Some(canonical);
+    }
+    LEGACY_SKILL_ENTRY_FILES
+        .iter()
+        .map(|name| root.join(name))
+        .find(|path| path.is_file())
+}
+
 fn display_path(path: &Path, workspace_root: &Path) -> String {
-    path.strip_prefix(workspace_root)
-        .unwrap_or(path)
-        .display()
-        .to_string()
-        .replace('\\', "/")
+    if let Ok(relative) = path.strip_prefix(workspace_root) {
+        return relative.display().to_string().replace('\\', "/");
+    }
+    let liteyuki_root = crate::utils::config_path::resolve_liteyuki_root_dir();
+    if let Ok(relative) = path.strip_prefix(&liteyuki_root) {
+        return Path::new(".liteyuki")
+            .join(relative)
+            .display()
+            .to_string()
+            .replace('\\', "/");
+    }
+    path.display().to_string().replace('\\', "/")
 }
 
 fn truncate_string(value: &str, max_chars: usize) -> (&str, bool) {
@@ -220,54 +267,5 @@ fn truncate_string(value: &str, max_chars: usize) -> (&str, bool) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_path(label: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be valid")
-            .as_nanos();
-        std::env::temp_dir().join(format!("liteyuki-skill-test-{label}-{unique}"))
-    }
-
-    #[test]
-    fn extract_skill_description_reads_frontmatter() {
-        let content = "---\ndescription: Example skill\n---\n# Skill";
-        assert_eq!(
-            extract_skill_description(content).as_deref(),
-            Some("Example skill")
-        );
-    }
-
-    #[test]
-    fn extract_skill_description_handles_crlf_frontmatter() {
-        let content = "---\r\ndescription: Windows skill\r\n---\r\n# Skill";
-        assert_eq!(
-            extract_skill_description(content).as_deref(),
-            Some("Windows skill")
-        );
-    }
-
-    #[test]
-    fn list_skills_scans_repo_local_layout() {
-        let root = temp_path("scan");
-        let skill_root = root.join("skills").join("demo");
-        fs::create_dir_all(&skill_root).expect("skill dir should be created");
-        fs::write(
-            skill_root.join("SKILL.md"),
-            "---\ndescription: Demo skill\n---\n# Demo",
-        )
-        .expect("skill file should be written");
-
-        let manager = SkillManager::for_workspace(root.as_path());
-        let skills = manager.list_skills().expect("skills should scan");
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].name, "demo");
-        assert_eq!(skills[0].description.as_deref(), Some("Demo skill"));
-
-        let _ = fs::remove_file(skill_root.join("SKILL.md"));
-        let _ = fs::remove_dir_all(root);
-    }
-}
+#[path = "skills/tests.rs"]
+mod tests;

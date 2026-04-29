@@ -1,5 +1,20 @@
 pub(super) mod async_runtime;
 pub(super) mod bridge;
+pub(super) mod bridge_contract;
 pub(super) mod commands;
+pub(super) mod diagnostics;
+pub(super) mod event_dispatch;
+pub(super) mod execution;
+pub(super) mod execution_codec;
+pub(super) mod json_codec;
 pub(super) mod lifecycle;
+pub(super) mod lifecycle_hooks;
+pub(super) mod loader;
+pub(super) mod module_management;
 pub(super) mod probe;
+pub(super) mod runtime_introspection;
+pub(super) mod runtime_registry;
+pub(super) mod state;
+#[cfg(test)]
+pub(super) mod test_support;
+pub(super) mod tui_command_runtime;
