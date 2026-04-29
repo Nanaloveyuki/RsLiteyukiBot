@@ -1,0 +1,4 @@
+{
+  "plugin.hello_liteyuki.name": "Builtin Hello Liteyuki",
+  "plugin.hello_liteyuki.description": "Builtin Liteyuki legacy plugin that replies to \"你好轻雪\""
+}

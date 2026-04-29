@@ -1,13 +1,84 @@
+use std::collections::VecDeque;
 use std::env;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 
 use super::logging_format::{format_level_tag, format_log_line, format_timestamp};
 
 static CONSOLE_LOG_OUTPUT_ENABLED: AtomicBool = AtomicBool::new(true);
+const LOG_BUFFER_CAPACITY: usize = 400;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BufferedLogEntry {
+    pub timestamp: String,
+    pub level: String,
+    pub module: String,
+    pub message: String,
+    pub line: String,
+}
+
+#[derive(Debug)]
+struct LogBuffer {
+    entries: VecDeque<BufferedLogEntry>,
+}
+
+impl Default for LogBuffer {
+    fn default() -> Self {
+        Self {
+            entries: VecDeque::with_capacity(LOG_BUFFER_CAPACITY),
+        }
+    }
+}
+
+impl LogBuffer {
+    fn push(&mut self, entry: BufferedLogEntry) {
+        if self.entries.len() >= LOG_BUFFER_CAPACITY {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(entry);
+    }
+
+    fn recent(&self, limit: usize) -> Vec<BufferedLogEntry> {
+        let take = limit.max(1);
+        let skip = self.entries.len().saturating_sub(take);
+        self.entries.iter().skip(skip).cloned().collect()
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+fn global_log_buffer() -> &'static Mutex<LogBuffer> {
+    static LOG_BUFFER: OnceLock<Mutex<LogBuffer>> = OnceLock::new();
+    LOG_BUFFER.get_or_init(|| Mutex::new(LogBuffer::default()))
+}
+
+fn push_buffered_log_entry(entry: BufferedLogEntry) {
+    if let Ok(mut buffer) = global_log_buffer().lock() {
+        buffer.push(entry);
+    }
+}
+
+pub fn recent_buffered_logs(limit: usize) -> Vec<BufferedLogEntry> {
+    global_log_buffer()
+        .lock()
+        .map(|buffer| buffer.recent(limit))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn clear_buffered_logs() {
+    if let Ok(mut buffer) = global_log_buffer().lock() {
+        buffer.clear();
+    }
+}
 
 pub fn set_console_log_output_enabled(enabled: bool) -> bool {
     CONSOLE_LOG_OUTPUT_ENABLED.swap(enabled, Ordering::SeqCst)
@@ -195,6 +266,10 @@ impl LoggerConfig {
     }
 }
 
+pub fn emit_console_log(level: LogLevel, module: &str, message: impl AsRef<str>) {
+    Logger::with_config(LoggerConfig::from_env()).log_with_module(level, module, message);
+}
+
 #[derive(Debug, Clone)]
 pub struct Logger {
     config: LoggerConfig,
@@ -257,14 +332,24 @@ impl Logger {
         if level < self.config.min_level {
             return;
         }
-        if !is_console_log_output_enabled() {
-            return;
-        }
 
+        let message = message.as_ref();
         let timestamp = self.format_system_time(SystemTime::now());
-        let level_tag = format_level_tag(self.config.mode, level);
-        let line = format_log_line(&timestamp, &level_tag, module, message.as_ref());
-        println!("{line}");
+        let plain_level = level.as_str().to_string();
+        let plain_line = format_log_line(&timestamp, plain_level.as_str(), module, message);
+        push_buffered_log_entry(BufferedLogEntry {
+            timestamp: timestamp.clone(),
+            level: plain_level,
+            module: module.to_string(),
+            message: message.to_string(),
+            line: plain_line,
+        });
+
+        if is_console_log_output_enabled() {
+            let level_tag = format_level_tag(self.config.mode, level);
+            let line = format_log_line(&timestamp, &level_tag, module, message);
+            println!("{line}");
+        }
     }
 
     pub fn format_unix_seconds(&self, seconds: i64) -> String {
@@ -292,3 +377,7 @@ impl Logger {
         format_timestamp(dt_utc, self.config.timezone, &self.config.timestamp_format)
     }
 }
+
+#[cfg(test)]
+#[path = "logging/tests.rs"]
+mod tests;

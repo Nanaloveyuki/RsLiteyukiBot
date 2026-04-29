@@ -2,8 +2,11 @@
 name = "liteyukibot-core"
 version = "0.1.0"
 edition = "2024"
+default-run = "liteyukibot-core"
 
 [dependencies]
+argon2 = { version = "0.5.3", features = ["std"] }
+base64 = "0.22.1"
 chrono = { version = "0.4.42", default-features = true }
 crossterm = "0.28.1"
 futures-util = "0.3.31"
@@ -12,8 +15,13 @@ reqwest = { version = "0.12.8", default-features = false, features = ["json", "r
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_yaml = "0.9.34"
+sha2 = "0.11.0"
+sysinfo = "0.32.1"
+pyo3 = { version = "0.23.5", features = ["auto-initialize", "abi3-py39"] }
+portable-pty = "0.9.0"
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-tungstenite = { version = "0.24.0", features = ["rustls-tls-webpki-roots"] }
 toml = "0.9.7"
 unicode-width = "0.2.0"
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 

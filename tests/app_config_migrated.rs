@@ -1,18 +1,50 @@
+pub use liteyukibot_core::{BotEvent, PluginManifestLoader, PluginSdk, SessionEvent, SessionScope};
+
 #[allow(dead_code)]
 #[path = "../src/app_config.rs"]
 mod app_config;
 #[allow(dead_code, unused_imports)]
+#[path = "../src/command_registry.rs"]
+mod command_registry;
+#[allow(dead_code, unused_imports)]
+#[path = "../src/config_edit.rs"]
+mod config_edit;
+#[allow(dead_code)]
+#[path = "../src/hardcode_data/mod.rs"]
+mod hardcode_data;
+#[allow(dead_code, unused_imports)]
+#[path = "../src/i18n.rs"]
+mod i18n;
+#[allow(dead_code, unused_imports)]
 #[path = "../src/llm/mod.rs"]
 mod llm;
 #[allow(dead_code, unused_imports)]
+#[path = "../src/onebot_support.rs"]
+mod onebot_support;
+#[allow(dead_code, unused_imports)]
+#[path = "../src/runtime_support.rs"]
+mod runtime_support;
+#[allow(dead_code, unused_imports)]
+#[path = "../src/superuser.rs"]
+mod superuser;
+#[allow(dead_code, unused_imports)]
 #[path = "../src/tui/mod.rs"]
 mod tui;
+#[allow(dead_code)]
+#[path = "../src/utils/mod.rs"]
+mod utils;
 
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use app_config::*;
 use liteyukibot_core::AdapterConfig;
+
+fn env_lock() -> &'static Mutex<()> {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn temp_path(name: &str, ext: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -22,6 +54,56 @@ fn temp_path(name: &str, ext: &str) -> PathBuf {
         .unwrap_or(0);
     path.push(format!("rsliteyuki-{name}-{nanos}.{ext}"));
     path
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => unsafe { std::env::set_var(self.key, value) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
+
+struct CurrentDirGuard {
+    previous: PathBuf,
+}
+
+impl CurrentDirGuard {
+    fn set(path: &std::path::Path) -> Self {
+        let previous = std::env::current_dir().expect("current dir should exist");
+        std::env::set_current_dir(path).expect("current dir should be updated");
+        Self { previous }
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous);
+    }
 }
 
 #[test]
@@ -35,6 +117,272 @@ fn write_default_config_if_missing_creates_yaml_template() {
     assert!(content.contains("adapters: []"));
 
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn resolve_app_config_path_prefers_user_configs_directory() {
+    let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let base = temp_path("user-config-home", "dir");
+    let _ = std::fs::remove_dir_all(&base);
+    let config_dir = base.join(".liteyuki").join("configs");
+    std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config_path = config_dir.join("config.yaml");
+    std::fs::write(&config_path, "core:\n  adapters: []\n").expect("config should be written");
+    let cwd = temp_path("user-config-cwd", "dir");
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).expect("cwd should be created");
+
+    let _userprofile = EnvVarGuard::set("USERPROFILE", base.to_str().expect("utf8 path"));
+    let _home = EnvVarGuard::remove("HOME");
+    let _config = EnvVarGuard::remove("LY_CONFIG_PATH");
+    let _cwd = CurrentDirGuard::set(&cwd);
+
+    assert_eq!(resolve_app_config_path(), Some(config_path.clone()));
+
+    let _ = std::fs::remove_dir_all(base);
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[test]
+fn ensure_default_config_files_creates_user_configs_config() {
+    let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let base = temp_path("default-config-home", "dir");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("home dir should be created");
+    let expected = base.join(".liteyuki").join("configs").join("config.yaml");
+    let cwd = temp_path("default-config-cwd", "dir");
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).expect("cwd should be created");
+
+    let _userprofile = EnvVarGuard::set("USERPROFILE", base.to_str().expect("utf8 path"));
+    let _home = EnvVarGuard::remove("HOME");
+    let _config = EnvVarGuard::remove("LY_CONFIG_PATH");
+    let _cwd = CurrentDirGuard::set(&cwd);
+
+    ensure_default_config_files().expect("default config should be created");
+    assert!(
+        expected.exists(),
+        "expected config at {}",
+        expected.display()
+    );
+
+    let _ = std::fs::remove_dir_all(base);
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[test]
+fn ensure_default_config_files_migrates_legacy_root_config_to_user_configs() {
+    let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let base = temp_path("migrate-config-home", "dir");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("home dir should be created");
+    let expected = base.join(".liteyuki").join("configs").join("config.yaml");
+    let cwd = temp_path("migrate-config-cwd", "dir");
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).expect("cwd should be created");
+    let legacy = cwd.join("config.yaml");
+    std::fs::write(&legacy, "core:\n  adapters: []\n").expect("legacy config should be written");
+
+    let _userprofile = EnvVarGuard::set("USERPROFILE", base.to_str().expect("utf8 path"));
+    let _home = EnvVarGuard::remove("HOME");
+    let _config = EnvVarGuard::remove("LY_CONFIG_PATH");
+    let _cwd = CurrentDirGuard::set(&cwd);
+
+    ensure_default_config_files().expect("legacy config should be migrated");
+    assert!(
+        expected.exists(),
+        "expected migrated config at {}",
+        expected.display()
+    );
+    assert!(
+        !legacy.exists(),
+        "expected legacy config to be moved away from {}",
+        legacy.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&expected).expect("migrated config should be readable"),
+        "core:\n  adapters: []\n"
+    );
+
+    let _ = std::fs::remove_dir_all(base);
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[test]
+fn ensure_default_config_files_replaces_default_user_config_with_legacy_root_config() {
+    let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let base = temp_path("replace-config-home", "dir");
+    let _ = std::fs::remove_dir_all(&base);
+    let cwd = temp_path("replace-config-cwd", "dir");
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).expect("cwd should be created");
+
+    let _userprofile = EnvVarGuard::set("USERPROFILE", base.to_str().expect("utf8 path"));
+    let _home = EnvVarGuard::remove("HOME");
+    let _config = EnvVarGuard::remove("LY_CONFIG_PATH");
+    let _cwd = CurrentDirGuard::set(&cwd);
+
+    ensure_default_config_files().expect("default user config should be created");
+    let user_config = base.join(".liteyuki").join("configs").join("config.yaml");
+    let legacy = cwd.join("config.yaml");
+    std::fs::write(&legacy, "core:\n  log:\n    level: debug\n")
+        .expect("legacy config should be written");
+
+    ensure_default_config_files().expect("legacy config should replace default user config");
+    assert_eq!(
+        std::fs::read_to_string(&user_config).expect("user config should be readable"),
+        "core:\n  log:\n    level: debug\n"
+    );
+    assert!(
+        !legacy.exists(),
+        "legacy config should be removed after replacement"
+    );
+
+    let _ = std::fs::remove_dir_all(base);
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[test]
+fn resolve_password_config_path_defaults_to_user_configs_directory() {
+    let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let base = temp_path("password-config-home", "dir");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("home dir should be created");
+    let cwd = temp_path("password-config-cwd", "dir");
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).expect("cwd should be created");
+
+    let _userprofile = EnvVarGuard::set("USERPROFILE", base.to_str().expect("utf8 path"));
+    let _home = EnvVarGuard::remove("HOME");
+    let _password = EnvVarGuard::remove("LY_PASSWORD_PATH");
+    let _cwd = CurrentDirGuard::set(&cwd);
+
+    assert_eq!(
+        runtime_support::resolve_password_config_path(),
+        base.join(".liteyuki").join("configs").join("password.yaml")
+    );
+
+    let _ = std::fs::remove_dir_all(base);
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[test]
+fn ensure_default_llm_config_file_creates_user_configs_llm_config() {
+    let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let base = temp_path("llm-config-home", "dir");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("home dir should be created");
+    let expected = base
+        .join(".liteyuki")
+        .join("configs")
+        .join("llm-config.yaml");
+    let cwd = temp_path("llm-config-cwd", "dir");
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).expect("cwd should be created");
+
+    let _userprofile = EnvVarGuard::set("USERPROFILE", base.to_str().expect("utf8 path"));
+    let _home = EnvVarGuard::remove("HOME");
+    let _llm = EnvVarGuard::remove("LY_LLM_CONFIG_PATH");
+    let _cwd = CurrentDirGuard::set(&cwd);
+
+    runtime_support::ensure_default_llm_config_file().expect("llm config should be created");
+    assert!(
+        expected.exists(),
+        "expected llm config at {}",
+        expected.display()
+    );
+
+    let _ = std::fs::remove_dir_all(base);
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[test]
+fn ensure_default_llm_config_file_migrates_legacy_root_llm_config_to_user_configs() {
+    let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let base = temp_path("migrate-llm-home", "dir");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("home dir should be created");
+    let expected = base
+        .join(".liteyuki")
+        .join("configs")
+        .join("llm-config.yaml");
+    let cwd = temp_path("migrate-llm-cwd", "dir");
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).expect("cwd should be created");
+    let legacy = cwd.join("llm-config.yaml");
+    std::fs::write(
+        &legacy,
+        "llm:\n  enabled: true\n  provider: openai\n  model: gpt-5-mini\n  api_keys:\n    - sk-test\n",
+    )
+    .expect("legacy llm config should be written");
+
+    let _userprofile = EnvVarGuard::set("USERPROFILE", base.to_str().expect("utf8 path"));
+    let _home = EnvVarGuard::remove("HOME");
+    let _llm = EnvVarGuard::remove("LY_LLM_CONFIG_PATH");
+    let _cwd = CurrentDirGuard::set(&cwd);
+
+    runtime_support::ensure_default_llm_config_file()
+        .expect("legacy llm config should be migrated");
+    assert!(
+        expected.exists(),
+        "expected migrated llm config at {}",
+        expected.display()
+    );
+    assert!(
+        !legacy.exists(),
+        "expected legacy llm config to be moved away from {}",
+        legacy.display()
+    );
+    let migrated =
+        std::fs::read_to_string(&expected).expect("migrated llm config should be readable");
+    assert!(migrated.contains("enabled: true"));
+    assert!(migrated.contains("gpt-5-mini"));
+
+    let _ = std::fs::remove_dir_all(base);
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[test]
+fn ensure_default_llm_config_file_replaces_default_user_llm_config_with_legacy_root_config() {
+    let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let base = temp_path("replace-llm-home", "dir");
+    let _ = std::fs::remove_dir_all(&base);
+    let config_dir = base.join(".liteyuki").join("configs");
+    std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let user_config = config_dir.join("llm-config.yaml");
+    std::fs::write(
+        &user_config,
+        "llm:\n  enabled: false\n  provider: openai\n  base_url: https://api.openai.com\n  model: gpt-4.1-mini\n  timeout_seconds: 20\n  command_prefix: /ask\n  api_keys: []\n",
+    )
+    .expect("default user llm config should be written");
+    let cwd = temp_path("replace-llm-cwd", "dir");
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).expect("cwd should be created");
+    let legacy = cwd.join("llm-config.yaml");
+    std::fs::write(
+        &legacy,
+        "llm:\n  enabled: true\n  provider: openai\n  model: gpt-5.2\n  api_keys:\n    - sk-test\n",
+    )
+    .expect("legacy llm config should be written");
+
+    let _userprofile = EnvVarGuard::set("USERPROFILE", base.to_str().expect("utf8 path"));
+    let _home = EnvVarGuard::remove("HOME");
+    let _llm = EnvVarGuard::remove("LY_LLM_CONFIG_PATH");
+    let _cwd = CurrentDirGuard::set(&cwd);
+
+    runtime_support::ensure_default_llm_config_file()
+        .expect("legacy llm config should replace default user config");
+    let content =
+        std::fs::read_to_string(&user_config).expect("user llm config should be readable");
+    assert!(content.contains("enabled: true"));
+    assert!(content.contains("gpt-5.2"));
+    assert!(
+        !legacy.exists(),
+        "legacy llm config should be removed after replacement"
+    );
+
+    let _ = std::fs::remove_dir_all(base);
+    let _ = std::fs::remove_dir_all(cwd);
 }
 
 #[test]
@@ -58,13 +406,20 @@ fn validate_app_config_reports_invalid_values() {
                     max_size_mib: Some(0),
                 }),
             }),
+            i18n: None,
+            commands: None,
+            plugins: None,
         }),
         runtime: None,
         log: None,
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: None,
+        commands: None,
+        plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -88,13 +443,20 @@ fn runtime_reload_warnings_detect_low_level_runtime_fields() {
             log: None,
             adapters: None,
             tui: None,
+            i18n: None,
+            commands: None,
+            plugins: None,
         }),
         runtime: None,
         log: None,
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: None,
+        commands: None,
+        plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -125,13 +487,20 @@ fn runtime_reload_warnings_skip_when_sensitive_fields_unchanged() {
             }),
             adapters: None,
             tui: None,
+            i18n: None,
+            commands: None,
+            plugins: None,
         }),
         runtime: None,
         log: None,
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: None,
+        commands: None,
+        plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -171,7 +540,11 @@ fn connect_websocket_both_mode_generates_forward_and_reverse_adapters() {
             sse: None,
         }),
         tui: None,
+        i18n: None,
         llm: None,
+        commands: None,
+        plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -219,7 +592,11 @@ fn connect_websocket_port_without_mode_defaults_to_reverse() {
             sse: None,
         }),
         tui: None,
+        i18n: None,
         llm: None,
+        commands: None,
+        plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -264,7 +641,11 @@ fn connect_websocket_urls_expand_to_multiple_adapters() {
             sse: None,
         }),
         tui: None,
+        i18n: None,
         llm: None,
+        commands: None,
+        plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -307,7 +688,11 @@ fn connect_http_urls_expand_to_multiple_adapters() {
             sse: None,
         }),
         tui: None,
+        i18n: None,
         llm: None,
+        commands: None,
+        plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -345,7 +730,11 @@ fn resolve_help_whitelist_accepts_numeric_and_prefixed_entries() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: None,
+        commands: None,
+        plugins: None,
+        desktop: None,
         onebot_v11: Some(OnebotV11ConfigSection {
             whitelist: vec![
                 OnebotWhitelistEntry::UInt(3541766758),
@@ -370,7 +759,11 @@ fn validate_app_config_warns_empty_onebot_whitelist_entry() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: None,
+        commands: None,
+        plugins: None,
+        desktop: None,
         onebot_v11: Some(OnebotV11ConfigSection {
             whitelist: vec![OnebotWhitelistEntry::Text("  ".to_string())],
         }),
@@ -384,6 +777,133 @@ fn validate_app_config_warns_empty_onebot_whitelist_entry() {
 }
 
 #[test]
+fn resolve_disabled_scope_commands_normalizes_and_deduplicates_entries() {
+    let doc = AppConfigDoc {
+        rust: Some(AppRustSection {
+            runtime: None,
+            log: None,
+            adapters: None,
+            tui: None,
+            i18n: None,
+            commands: Some(CommandConfigSection {
+                disabled: vec![
+                    " onebot11 liteecho ".to_string(),
+                    "adapter:onebot_v11 /LiteEcho".to_string(),
+                    "tui help".to_string(),
+                    " ".to_string(),
+                ],
+            }),
+            plugins: None,
+        }),
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: None,
+        tui: None,
+        i18n: None,
+        llm: None,
+        commands: None,
+        plugins: None,
+        desktop: None,
+        onebot_v11: None,
+    };
+
+    let disabled = resolve_disabled_scope_commands(&doc);
+    assert_eq!(
+        disabled,
+        vec![
+            "adapter:onebot11 /liteecho".to_string(),
+            "tui /help".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn validate_app_config_warns_invalid_disabled_command_entry() {
+    let doc = AppConfigDoc {
+        rust: None,
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: None,
+        tui: None,
+        i18n: None,
+        llm: None,
+        commands: Some(CommandConfigSection {
+            disabled: vec!["adapter:discord ping".to_string()],
+        }),
+        plugins: None,
+        desktop: None,
+        onebot_v11: None,
+    };
+
+    let warnings = validate_app_config(&doc);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("commands.disabled entries should use"))
+    );
+}
+
+#[test]
+fn resolve_disabled_plugins_normalizes_and_deduplicates_entries() {
+    let doc = AppConfigDoc {
+        rust: None,
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: None,
+        tui: None,
+        i18n: None,
+        llm: None,
+        commands: None,
+        desktop: None,
+        plugins: Some(PluginConfigSection {
+            disabled: vec![
+                " builtin-liteecho ".to_string(),
+                "BUILTIN-LITEECHO".to_string(),
+                "demo-plugin".to_string(),
+                " ".to_string(),
+            ],
+        }),
+        onebot_v11: None,
+    };
+
+    let disabled = resolve_disabled_plugins(&doc);
+    assert_eq!(
+        disabled,
+        vec!["builtin-liteecho".to_string(), "demo-plugin".to_string(),]
+    );
+}
+
+#[test]
+fn validate_app_config_warns_invalid_disabled_plugin_entry() {
+    let doc = AppConfigDoc {
+        rust: None,
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: None,
+        tui: None,
+        i18n: None,
+        llm: None,
+        commands: None,
+        desktop: None,
+        plugins: Some(PluginConfigSection {
+            disabled: vec!["   ".to_string()],
+        }),
+        onebot_v11: None,
+    };
+
+    let warnings = validate_app_config(&doc);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("plugins.disabled entries should use"))
+    );
+}
+
+#[test]
 fn resolve_llm_config_reads_values_from_config() {
     let doc = AppConfigDoc {
         rust: None,
@@ -392,8 +912,10 @@ fn resolve_llm_config_reads_values_from_config() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: Some(LlmConfigSection {
             enabled: Some(true),
+            stream: Some(true),
             provider: Some("openai".to_string()),
             base_url: Some("https://api.openai.com/".to_string()),
             provider_urls: Some(vec![
@@ -404,19 +926,36 @@ fn resolve_llm_config_reads_values_from_config() {
             api_key: Some("sk-test".to_string()),
             model: Some("gpt-4.1-mini".to_string()),
             timeout_seconds: Some(12),
+            temperature: Some(0.7),
+            top_p: Some(0.95),
+            top_k: Some(32),
+            frequency_penalty: Some(0.4),
+            presence_penalty: Some(-0.3),
+            parallel_tool_calls: Some(false),
             system_prompt: Some("system".to_string()),
             command_prefix: Some("/ask".to_string()),
+            ..Default::default()
         }),
+        commands: None,
+        plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
     let config = resolve_llm_config(&doc);
     assert!(config.enabled);
+    assert!(config.stream);
     assert_eq!(config.provider, "openai");
     assert_eq!(config.base_url, "https://api.openai.com");
     assert_eq!(config.api_keys.len(), 2);
     assert_eq!(config.api_keys.first().map(|s| s.as_str()), Some("sk-test"));
     assert_eq!(config.timeout_ms, 12_000);
+    assert_eq!(config.temperature, Some(0.7));
+    assert_eq!(config.top_p, Some(0.95));
+    assert_eq!(config.top_k, Some(32));
+    assert_eq!(config.frequency_penalty, Some(0.4));
+    assert_eq!(config.presence_penalty, Some(-0.3));
+    assert!(!config.parallel_tool_calls);
 }
 
 #[test]
@@ -428,8 +967,10 @@ fn resolve_llm_config_falls_back_to_provider_urls_when_base_url_missing() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: Some(LlmConfigSection {
             enabled: Some(true),
+            stream: None,
             provider: Some("openai".to_string()),
             base_url: None,
             provider_urls: Some(vec![
@@ -440,9 +981,17 @@ fn resolve_llm_config_falls_back_to_provider_urls_when_base_url_missing() {
             api_key: None,
             model: Some("gpt-4.1-mini".to_string()),
             timeout_seconds: Some(20),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            parallel_tool_calls: None,
             system_prompt: None,
             command_prefix: Some("/ask".to_string()),
+            ..Default::default()
         }),
+        commands: None,
+        plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -459,8 +1008,10 @@ fn validate_app_config_warns_when_llm_is_enabled_without_api_key() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: Some(LlmConfigSection {
             enabled: Some(true),
+            stream: None,
             provider: Some("not-built-in".to_string()),
             base_url: None,
             provider_urls: None,
@@ -468,9 +1019,17 @@ fn validate_app_config_warns_when_llm_is_enabled_without_api_key() {
             api_key: None,
             model: Some("".to_string()),
             timeout_seconds: Some(0),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            parallel_tool_calls: None,
             system_prompt: None,
             command_prefix: Some(" ".to_string()),
+            ..Default::default()
         }),
+        commands: None,
+        plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -502,8 +1061,10 @@ fn validate_app_config_warns_llm_base_url_in_main_config() {
         adapters: None,
         connect: None,
         tui: None,
+        i18n: None,
         llm: Some(LlmConfigSection {
             enabled: Some(true),
+            stream: None,
             provider: Some("openai".to_string()),
             base_url: Some("https://tokenflux.dev/v1".to_string()),
             provider_urls: None,
@@ -511,9 +1072,17 @@ fn validate_app_config_warns_llm_base_url_in_main_config() {
             api_key: None,
             model: Some("gpt-4.1-mini".to_string()),
             timeout_seconds: Some(20),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            parallel_tool_calls: None,
             system_prompt: None,
             command_prefix: Some("/ask".to_string()),
+            ..Default::default()
         }),
+        commands: None,
+        plugins: None,
+        desktop: None,
         onebot_v11: None,
     };
 
@@ -523,4 +1092,50 @@ fn validate_app_config_warns_llm_base_url_in_main_config() {
             .iter()
             .any(|warning| warning.contains("move it to llm-config.yaml"))
     );
+}
+
+#[test]
+fn validate_app_config_warns_invalid_llm_sampling_ranges() {
+    let doc = AppConfigDoc {
+        rust: None,
+        runtime: None,
+        log: None,
+        adapters: None,
+        connect: None,
+        tui: None,
+        i18n: None,
+        llm: Some(LlmConfigSection {
+            enabled: Some(false),
+            stream: Some(true),
+            provider: Some("openai".to_string()),
+            base_url: None,
+            provider_urls: None,
+            api_keys: Some(vec!["sk-test".to_string()]),
+            api_key: None,
+            model: Some("gpt-4.1-mini".to_string()),
+            timeout_seconds: Some(20),
+            temperature: Some(2.5),
+            top_p: Some(1.2),
+            top_k: Some(0),
+            parallel_tool_calls: Some(true),
+            system_prompt: None,
+            command_prefix: Some("/ask".to_string()),
+            ..Default::default()
+        }),
+        commands: None,
+        plugins: None,
+        desktop: None,
+        onebot_v11: None,
+    };
+
+    let warnings = validate_app_config(&doc);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("llm.temperature"))
+    );
+    assert!(warnings.iter().any(|warning| warning.contains("0..=2")));
+    assert!(warnings.iter().any(|warning| warning.contains("llm.top_p")));
+    assert!(warnings.iter().any(|warning| warning.contains("0..=1")));
+    assert!(warnings.iter().any(|warning| warning.contains("llm.top_k")));
 }

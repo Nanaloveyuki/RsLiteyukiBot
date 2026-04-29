@@ -1,3 +1,13 @@
+pub use liteyukibot_core::{BotEvent, PluginManifestLoader, PluginSdk, SessionEvent, SessionScope};
+
+#[allow(dead_code)]
+#[path = "../src/i18n.rs"]
+mod i18n;
+
+#[allow(dead_code)]
+#[path = "../src/command_registry.rs"]
+mod command_registry;
+
 #[allow(dead_code)]
 #[path = "../src/onebot_support.rs"]
 mod onebot_support;
@@ -5,8 +15,6 @@ mod onebot_support;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use liteyukibot_core::core::BotEvent;
-use liteyukibot_core::session::SessionEvent;
 use serde_json::Value;
 
 use onebot_support::*;
@@ -44,8 +52,9 @@ fn build_help_reply_payload_for_group_message() {
         scope: liteyukibot_core::SessionScope::Group,
     };
 
-    let payload =
-        build_onebot_v11_help_reply_payload(&event, "test-echo").expect("should build payload");
+    let help_text = render_external_help_text("/qa");
+    let payload = build_onebot_v11_help_reply_payload(&event, "test-echo", &help_text)
+        .expect("should build payload");
     assert_eq!(
         payload.get("action").and_then(Value::as_str),
         Some("send_msg")
@@ -58,9 +67,38 @@ fn build_help_reply_payload_for_group_message() {
         payload
             .get("params")
             .and_then(Value::as_object)
+            .and_then(|params| params.get("message"))
+            .and_then(Value::as_str),
+        Some(help_text.as_str())
+    );
+    assert_eq!(
+        payload
+            .get("params")
+            .and_then(Value::as_object)
             .and_then(|params| params.get("group_id")),
         Some(&serde_json::json!(114514))
     );
+}
+
+#[test]
+fn external_help_text_is_scope_filtered_and_uses_dynamic_ask_prefix() {
+    let help_text = render_external_help_text("/qa");
+    assert!(help_text.contains("/help"));
+    assert!(help_text.contains("/qa <prompt>"));
+    assert!(help_text.contains("/su <password>"));
+    assert!(!help_text.contains("/reload -"));
+}
+
+#[test]
+fn external_help_text_hides_disabled_builtin_commands() {
+    let sdk = PluginSdk::default();
+    sdk.set_builtin_command_enabled("adapter:onebot11", "/su", false)
+        .expect("builtin disable should succeed");
+
+    let help_text = render_external_help_text_with_plugins("/qa", Some(&sdk));
+    assert!(help_text.contains("/help"));
+    assert!(help_text.contains("/qa <prompt>"));
+    assert!(!help_text.contains("/su <password>"));
 }
 
 #[test]

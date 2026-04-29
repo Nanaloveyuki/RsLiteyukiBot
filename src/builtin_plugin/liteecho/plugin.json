@@ -1,0 +1,37 @@
+{
+  "id": "builtin-liteecho",
+  "name": "plugin.liteecho.name",
+  "description": "plugin.liteecho.description",
+  "type": "service",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "liteecho",
+    "options": {
+      "event_handler": "liteyuki_handle_event",
+      "config_path": "config/plugins/builtin-liteecho.yaml"
+    }
+  },
+  "extra": {
+    "version": "0.1.0",
+    "repository": "https://github.com/Nanaloveyuki/RsLiteyukiBot",
+    "pages": [
+      {
+        "path": "settings",
+        "title": "LiteEcho Settings",
+        "icon": "echo",
+        "description": "Configure the builtin LiteEcho plugin"
+      }
+    ]
+  },
+  "commands": [
+    {
+      "name": "/liteecho",
+      "description": "plugin.liteecho.command.liteecho.description",
+      "scopes": ["adapter:onebot11"]
+    }
+  ],
+  "permissions": ["adapter.reply", "config.read", "config.write"],
+  "sdk": {
+    "api_version": "0.1"
+  }
+}

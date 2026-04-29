@@ -1,0 +1,5 @@
+{
+  "plugin.liteecho.name": "内置 LiteEcho",
+  "plugin.liteecho.description": "运行在 Python 兼容桥上的 legacy liteecho 插件",
+  "plugin.liteecho.command.liteecho.description": "通过 Python bridge 回显传入文本"
+}

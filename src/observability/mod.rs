@@ -2,6 +2,6 @@ pub mod logging;
 mod logging_format;
 
 pub use logging::{
-    LogLevel, LogMode, Logger, LoggerConfig, TimeZone, TimestampFormat,
-    set_console_log_output_enabled,
+    BufferedLogEntry, LogLevel, LogMode, Logger, LoggerConfig, TimeZone, TimestampFormat,
+    emit_console_log, recent_buffered_logs, set_console_log_output_enabled,
 };

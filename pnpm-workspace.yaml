@@ -1,0 +1,5 @@
+allowBuilds:
+  '@heroui/shared-utils': true
+  esbuild: true
+  sharp: true
+  ttf2woff2: true

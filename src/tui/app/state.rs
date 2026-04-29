@@ -1,4 +1,5 @@
 use super::*;
+use crate::i18n::{set_current_locale, tr, trf};
 
 impl AppState {
     pub(super) fn new(
@@ -39,6 +40,7 @@ impl AppState {
             history_draft: String::new(),
             log_scroll: 0,
             log_view_rows: DEFAULT_LOG_VIEW_ROWS,
+            log_text_width: 1,
             resume_store_path: tui_config.resume_store_path,
             resume_store,
             resume_max_sessions: tui_config.resume_max_sessions,
@@ -48,12 +50,33 @@ impl AppState {
             last_resume_flush: Instant::now(),
             last_resume_save_error: None,
             view_mode: UiViewMode::Dashboard,
+            dashboard_focus: DashboardFocus::Command,
+            dashboard_plugin_index: 0,
             completion_state: None,
             help_whitelist: None,
             llm_command_prefix: None,
+            plugin_sdk: None,
+            plugin_manager: None,
+            disabled_plugins: HashSet::new(),
         };
         state.enforce_resume_limits();
         state
+    }
+
+    pub(super) fn bind_plugin_sdk(&mut self, plugin_sdk: PluginSdk) {
+        self.plugin_sdk = Some(plugin_sdk);
+    }
+
+    pub(super) fn bind_plugin_manager(&mut self, plugin_manager: PluginManager) {
+        self.plugin_manager = Some(plugin_manager);
+    }
+
+    pub(super) fn sync_disabled_plugins(&mut self, entries: &[String]) {
+        self.disabled_plugins = entries
+            .iter()
+            .map(|entry| entry.trim().to_ascii_lowercase())
+            .filter(|entry| !entry.is_empty())
+            .collect();
     }
 
     pub(super) fn drop_oldest_non_active_resume(&mut self) -> bool {
@@ -82,7 +105,7 @@ impl AppState {
         }
 
         let max_size_bytes = self.resume_max_size_bytes.max(1);
-        while self.resume_store.estimated_size_bytes() > max_size_bytes {
+        while self.resume_store.persisted_size_bytes() > max_size_bytes {
             if !self.drop_oldest_non_active_resume() {
                 break;
             }
@@ -127,10 +150,7 @@ impl AppState {
             }
         }
         if whitelist_sync_failed {
-            self.push_log(
-                UiLevel::Error,
-                "failed to sync whitelist from reloaded config",
-            );
+            self.push_log(UiLevel::Error, tr("reload.sync.whitelist_failed"));
         }
 
         let mut llm_command_prefix_sync_failed = false;
@@ -145,31 +165,73 @@ impl AppState {
             }
         }
         if llm_command_prefix_sync_failed {
+            self.push_log(UiLevel::Error, tr("reload.sync.llm_prefix_failed"));
+        }
+
+        let mut disabled_commands_sync_failed = None;
+        if let Some(plugin_sdk) = self.plugin_sdk.clone()
+            && let Err(err) = plugin_sdk.sync_disabled_scope_commands(&result.disabled_commands)
+        {
+            disabled_commands_sync_failed = Some(err.to_string());
+        }
+        if let Some(err) = disabled_commands_sync_failed {
             self.push_log(
                 UiLevel::Error,
-                "failed to sync external llm command prefix from reloaded config",
+                trf(
+                    "reload.sync.command_policy_failed",
+                    &[("err", err.as_str())],
+                ),
             );
         }
+        set_current_locale(result.locale);
+        self.sync_disabled_plugins(&result.disabled_plugins);
 
         self.push_log(
             UiLevel::Info,
-            format!(
-                "reload applied: adapters={} autostart={} resume_max_sessions={} resume_max_size={} MiB",
-                self.adapters.len(),
-                result.adapter_autostart,
-                self.resume_max_sessions,
-                bytes_to_mib(self.resume_max_size_bytes),
+            trf(
+                "reload.applied.summary",
+                &[
+                    ("adapters", self.adapters.len().to_string().as_str()),
+                    ("autostart", result.adapter_autostart.to_string().as_str()),
+                    (
+                        "resume_max_sessions",
+                        self.resume_max_sessions.to_string().as_str(),
+                    ),
+                    (
+                        "resume_max_size_mib",
+                        bytes_to_mib(self.resume_max_size_bytes)
+                            .to_string()
+                            .as_str(),
+                    ),
+                ],
             ),
         );
         self.push_log(
             UiLevel::Info,
-            format!(
-                "reload applied external LLM command prefix: {}",
-                result.llm_command_prefix
+            trf(
+                "reload.applied.llm_prefix",
+                &[("prefix", result.llm_command_prefix.as_str())],
+            ),
+        );
+        self.push_log(
+            UiLevel::Info,
+            trf(
+                "reload.applied.disabled_commands",
+                &[("count", result.disabled_commands.len().to_string().as_str())],
+            ),
+        );
+        self.push_log(
+            UiLevel::Info,
+            trf(
+                "reload.applied.disabled_plugins",
+                &[("count", result.disabled_plugins.len().to_string().as_str())],
             ),
         );
         for warning in result.warnings {
-            self.push_log(UiLevel::Warn, format!("reload notice: {warning}"));
+            self.push_log(
+                UiLevel::Warn,
+                trf("reload.notice", &[("warning", warning.as_str())]),
+            );
         }
     }
 
@@ -179,12 +241,13 @@ impl AppState {
             timestamp: Local::now().format("%H:%M:%S").to_string(),
             message: message.into(),
         };
+        let added_lines = self.rendered_lines_for_log(&log);
         if self.logs.len() >= UI_LOG_CAPACITY {
             self.logs.pop_front();
         }
         self.logs.push_back(log);
         if self.log_scroll > 0 {
-            self.log_scroll = self.log_scroll.saturating_add(1);
+            self.log_scroll = self.log_scroll.saturating_add(added_lines);
         }
         self.clamp_log_scroll();
         self.resume_dirty = true;
@@ -242,14 +305,19 @@ impl AppState {
             if running {
                 self.push_log(
                     UiLevel::Info,
-                    format!(
-                        "adapter '{}' connected ({})",
-                        id,
-                        adapter_transport_label(transport)
+                    trf(
+                        "adapter.connected",
+                        &[
+                            ("adapter", id.as_str()),
+                            ("transport", adapter_transport_label(transport)),
+                        ],
                     ),
                 );
             } else {
-                self.push_log(UiLevel::Warn, format!("adapter '{}' disconnected", id));
+                self.push_log(
+                    UiLevel::Warn,
+                    trf("adapter.disconnected", &[("adapter", id.as_str())]),
+                );
             }
         }
         has_state_change
@@ -274,10 +342,13 @@ impl AppState {
 
         self.sync_active_resume_snapshot();
         if let Err(err) = self.resume_store.save(&self.resume_store_path) {
-            let message = format!(
-                "failed to persist resume store to {}: {err}",
-                self.resume_store_path.display()
-            );
+            let path_display = self.resume_store_path.display().to_string();
+            let err_text = err.to_string();
+            let message = trf(
+                "resume.persist.failed",
+                &[("path", path_display.as_str()), ("err", err_text.as_str())],
+            )
+            .to_string();
             if self.last_resume_save_error.as_deref() != Some(message.as_str()) {
                 self.push_log(UiLevel::Error, message.clone());
                 self.last_resume_save_error = Some(message);
@@ -367,8 +438,31 @@ impl AppState {
         self.clamp_log_scroll();
     }
 
+    pub(super) fn set_log_text_width(&mut self, width: usize) {
+        self.log_text_width = width.max(1);
+        self.clamp_log_scroll();
+    }
+
+    pub(super) fn total_rendered_log_lines(&self) -> usize {
+        self.logs
+            .iter()
+            .map(|log| self.rendered_lines_for_log(log))
+            .sum()
+    }
+
+    fn rendered_lines_for_log(&self, log: &UiLog) -> usize {
+        let tag = log_level_tag(log.level);
+        let prefix = format!("{} [{}] ", log.timestamp, tag);
+        let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+        let message_width = self.log_text_width.saturating_sub(prefix_width).max(1);
+        wrap_text_hard(log.message.as_str(), message_width)
+            .len()
+            .max(1)
+    }
+
     pub(super) fn max_log_scroll(&self) -> usize {
-        self.logs.len().saturating_sub(self.log_view_rows)
+        self.total_rendered_log_lines()
+            .saturating_sub(self.log_view_rows)
     }
 
     pub(super) fn clamp_log_scroll(&mut self) {
@@ -408,7 +502,43 @@ impl AppState {
         self.view_mode == UiViewMode::LogConsole
     }
 
+    pub(super) fn is_dashboard_view(&self) -> bool {
+        self.view_mode == UiViewMode::Dashboard
+    }
+
+    pub(super) fn is_dashboard_plugins_focus(&self) -> bool {
+        self.is_dashboard_view() && self.dashboard_focus == DashboardFocus::Plugins
+    }
+
+    pub(super) fn is_dashboard_plugin_panel_active(&self) -> bool {
+        self.is_dashboard_plugins_focus() && self.console_input.is_empty()
+    }
+
+    pub(super) fn cycle_dashboard_focus(&mut self) {
+        if !self.is_dashboard_view() || !self.console_input.is_empty() {
+            return;
+        }
+        self.clear_completion_state();
+        self.dashboard_focus = match self.dashboard_focus {
+            DashboardFocus::Command => DashboardFocus::Plugins,
+            DashboardFocus::Plugins => DashboardFocus::Command,
+        };
+    }
+
+    pub(super) fn focus_dashboard_command(&mut self) {
+        self.dashboard_focus = DashboardFocus::Command;
+    }
+
+    pub(super) fn normalized_dashboard_plugin_index(&self, catalog_len: usize) -> Option<usize> {
+        if catalog_len == 0 {
+            None
+        } else {
+            Some(self.dashboard_plugin_index.min(catalog_len - 1))
+        }
+    }
+
     pub(super) fn set_view_mode(&mut self, view_mode: UiViewMode) {
         self.view_mode = view_mode;
+        self.focus_dashboard_command();
     }
 }

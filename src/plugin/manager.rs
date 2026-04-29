@@ -10,8 +10,11 @@ use crate::core::{LifecycleContext, RuntimeTarget};
 use crate::observability::Logger;
 use crate::session::SessionRouter;
 
-use super::loader::{PluginManifestError, PluginManifestLoader};
-use super::sdk::{PluginHostBridge, PluginLoadPlan, PluginSdk};
+use super::loader::PluginManifestError;
+use super::sdk::{PluginHostBridge, PluginLoadPlan, PluginLoadState, PluginSdk};
+use super::source_adapter::{
+    descriptor_allows_metadata_only_health_check_skip, discover_plugin_manifests_in_dirs,
+};
 use super::{PluginDescriptor, PluginMetadata};
 
 const MODULE_PLUGIN: &str = "plugin.manager";
@@ -25,6 +28,18 @@ pub trait Plugin: Send + Sync {
         PluginDescriptor::from_metadata(self.metadata())
     }
     fn on_load(&self, context: PluginContext) -> PluginFuture;
+    fn on_start(&self, _context: PluginContext) -> PluginFuture {
+        Box::pin(async { Ok(()) })
+    }
+    fn on_health_check(&self, _context: PluginContext) -> PluginFuture {
+        Box::pin(async { Ok(()) })
+    }
+    fn on_shutdown(&self, _context: PluginContext) -> PluginFuture {
+        Box::pin(async { Ok(()) })
+    }
+    fn on_unload(&self, _context: PluginContext) -> PluginFuture {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 #[derive(Clone)]
@@ -47,13 +62,50 @@ pub struct LoadedPlugin {
 }
 
 #[derive(Debug, Clone)]
+pub struct PluginCatalogEntry {
+    pub descriptor: PluginDescriptor,
+    pub loaded: bool,
+    pub load_state: Option<PluginLoadState>,
+    pub load_reason: Option<String>,
+}
+
+impl LoadedPlugin {
+    fn has_deferred_manifest_runtime(&self) -> bool {
+        self.descriptor.manifest_path.is_some() && self.load_plan.state == PluginLoadState::Deferred
+    }
+
+    fn allows_deferred_manifest_health_check(&self) -> bool {
+        self.has_deferred_manifest_runtime()
+            && descriptor_allows_metadata_only_health_check_skip(&self.descriptor)
+    }
+
+    fn deferred_runtime_reason(&self) -> &str {
+        self.load_plan
+            .reason
+            .as_deref()
+            .unwrap_or("runtime bridge is deferred")
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum PluginLoadError {
     AlreadyRegistered(String),
     NotFound(String),
     AlreadyLoaded(String),
     Loading(String),
-    Hook { id: String, reason: String },
-    Sdk { id: String, reason: String },
+    Hook {
+        id: String,
+        reason: String,
+    },
+    Lifecycle {
+        id: String,
+        phase: &'static str,
+        reason: String,
+    },
+    Sdk {
+        id: String,
+        reason: String,
+    },
     Io(String),
     Parse(String),
 }
@@ -66,6 +118,9 @@ impl std::fmt::Display for PluginLoadError {
             Self::AlreadyLoaded(id) => write!(f, "plugin '{}' already loaded", id),
             Self::Loading(id) => write!(f, "plugin '{}' is currently loading", id),
             Self::Hook { id, reason } => write!(f, "plugin '{}' load hook failed: {}", id, reason),
+            Self::Lifecycle { id, phase, reason } => {
+                write!(f, "plugin '{}' {} hook failed: {}", id, phase, reason)
+            }
             Self::Sdk { id, reason } => {
                 write!(f, "plugin '{}' sdk planning failed: {}", id, reason)
             }
@@ -229,6 +284,209 @@ impl PluginManager {
             .collect()
     }
 
+    pub fn plugin_catalog(&self) -> Vec<PluginCatalogEntry> {
+        let loaded = self
+            .loaded
+            .read()
+            .expect("plugin loaded lock should not be poisoned")
+            .clone();
+        let mut catalog = self
+            .registry
+            .read()
+            .expect("plugin registry lock should not be poisoned")
+            .values()
+            .map(|plugin| {
+                let descriptor = plugin.descriptor();
+                let loaded_item = loaded.get(descriptor.metadata.id.as_str());
+                PluginCatalogEntry {
+                    descriptor,
+                    loaded: loaded_item.is_some(),
+                    load_state: loaded_item.map(|item| item.load_plan.state),
+                    load_reason: loaded_item.and_then(|item| item.load_plan.reason.clone()),
+                }
+            })
+            .collect::<Vec<_>>();
+        catalog.sort_by(|left, right| {
+            left.descriptor
+                .metadata
+                .id
+                .cmp(&right.descriptor.metadata.id)
+        });
+        catalog
+    }
+
+    pub async fn start_loaded_plugins(
+        &self,
+        context: PluginContext,
+    ) -> Result<(), PluginLoadError> {
+        let mut loaded = self.loaded_plugins();
+        loaded.sort_by_key(|plugin| plugin.loaded_at_ms);
+        for item in loaded {
+            let id = item.descriptor.metadata.id.clone();
+            if item.has_deferred_manifest_runtime() {
+                if let Some(logger) = &self.logger {
+                    logger.warn_in(
+                        MODULE_PLUGIN,
+                        format!(
+                            "plugin '{}' start skipped because manifest runtime is deferred: {}",
+                            id,
+                            item.deferred_runtime_reason()
+                        ),
+                    );
+                }
+                continue;
+            }
+            let plugin = self
+                .registry
+                .read()
+                .expect("plugin registry lock should not be poisoned")
+                .get(id.as_str())
+                .cloned()
+                .ok_or_else(|| PluginLoadError::NotFound(id.clone()))?;
+            plugin.on_start(context.clone()).await.map_err(|reason| {
+                PluginLoadError::Lifecycle {
+                    id: id.clone(),
+                    phase: "start",
+                    reason,
+                }
+            })?;
+            if let Some(logger) = &self.logger {
+                logger.info_in(MODULE_PLUGIN, format!("plugin '{}' started", id));
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn shutdown_loaded_plugins(
+        &self,
+        context: PluginContext,
+    ) -> Result<(), PluginLoadError> {
+        let mut loaded = self.loaded_plugins();
+        loaded.sort_by(|left, right| right.loaded_at_ms.cmp(&left.loaded_at_ms));
+
+        let mut first_error: Option<PluginLoadError> = None;
+        for item in loaded {
+            let id = item.descriptor.metadata.id.clone();
+            if item.has_deferred_manifest_runtime() {
+                self.loaded
+                    .write()
+                    .expect("plugin loaded lock should not be poisoned")
+                    .remove(id.as_str());
+
+                if let Some(logger) = &self.logger {
+                    logger.info_in(
+                        MODULE_PLUGIN,
+                        format!(
+                            "plugin '{}' unloaded without runtime hooks because manifest runtime is deferred",
+                            id
+                        ),
+                    );
+                }
+                continue;
+            }
+            let plugin = self
+                .registry
+                .read()
+                .expect("plugin registry lock should not be poisoned")
+                .get(id.as_str())
+                .cloned();
+            if let Some(plugin) = &plugin {
+                if let Err(reason) = plugin.on_shutdown(context.clone()).await
+                    && first_error.is_none()
+                {
+                    first_error = Some(PluginLoadError::Lifecycle {
+                        id: id.clone(),
+                        phase: "shutdown",
+                        reason,
+                    });
+                }
+            } else if first_error.is_none() {
+                first_error = Some(PluginLoadError::NotFound(id.clone()));
+            }
+
+            if let Some(plugin) = &plugin
+                && let Err(reason) = plugin.on_unload(context.clone()).await
+                && first_error.is_none()
+            {
+                first_error = Some(PluginLoadError::Lifecycle {
+                    id: id.clone(),
+                    phase: "unload",
+                    reason,
+                });
+            }
+
+            self.loaded
+                .write()
+                .expect("plugin loaded lock should not be poisoned")
+                .remove(id.as_str());
+
+            if let Some(logger) = &self.logger {
+                logger.info_in(MODULE_PLUGIN, format!("plugin '{}' shutdown complete", id));
+            }
+        }
+
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    pub async fn health_check_loaded_plugins(
+        &self,
+        context: PluginContext,
+    ) -> Result<(), PluginLoadError> {
+        let mut loaded = self.loaded_plugins();
+        loaded.sort_by_key(|plugin| plugin.loaded_at_ms);
+        for item in loaded {
+            let id = item.descriptor.metadata.id.clone();
+            if item.has_deferred_manifest_runtime() {
+                if item.allows_deferred_manifest_health_check() {
+                    if let Some(logger) = &self.logger {
+                        logger.info_in(
+                            MODULE_PLUGIN,
+                            format!(
+                                "plugin '{}' health check skipped because manifest runtime is deferred metadata-only: {}",
+                                id,
+                                item.deferred_runtime_reason()
+                            ),
+                        );
+                    }
+                    continue;
+                }
+                return Err(PluginLoadError::Lifecycle {
+                    id,
+                    phase: "health_check",
+                    reason: format!(
+                        "manifest runtime is deferred: {}",
+                        item.deferred_runtime_reason()
+                    ),
+                });
+            }
+            let plugin = self
+                .registry
+                .read()
+                .expect("plugin registry lock should not be poisoned")
+                .get(id.as_str())
+                .cloned()
+                .ok_or_else(|| PluginLoadError::NotFound(id.clone()))?;
+            plugin
+                .on_health_check(context.clone())
+                .await
+                .map_err(|reason| PluginLoadError::Lifecycle {
+                    id: id.clone(),
+                    phase: "health_check",
+                    reason,
+                })?;
+            if let Some(logger) = &self.logger {
+                logger.info_in(
+                    MODULE_PLUGIN,
+                    format!("plugin '{}' health check passed", id),
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn discover_manifest_plugins_in_dirs<I, P>(
         &self,
         dirs: I,
@@ -237,7 +495,7 @@ impl PluginManager {
         I: IntoIterator<Item = P>,
         P: AsRef<std::path::Path>,
     {
-        let manifests = PluginManifestLoader::discover_in_dirs(dirs)?;
+        let manifests = discover_plugin_manifests_in_dirs(dirs)?;
         let mut ids = Vec::new();
         for manifest in manifests {
             let id = manifest.descriptor.metadata.id.clone();
@@ -312,6 +570,7 @@ impl Plugin for ManifestPlugin {
         let plugin_id = self.descriptor.metadata.id.clone();
         let runtime = self.descriptor.runtime.kind;
         let path = self.manifest_path.display().to_string();
+        let descriptor = self.descriptor.clone();
         Box::pin(async move {
             context.logger.info_in(
                 MODULE_PLUGIN,
@@ -320,7 +579,82 @@ impl Plugin for ManifestPlugin {
                     plugin_id, path, runtime
                 ),
             );
+            match context.sdk.load_manifest_plugin(&descriptor, &context.host) {
+                Ok(true) => {
+                    context.logger.info_in(
+                        MODULE_PLUGIN,
+                        format!(
+                            "manifest plugin '{}' runtime bridge activated (runtime={:?})",
+                            plugin_id, runtime
+                        ),
+                    );
+                }
+                Ok(false) => {
+                    context.logger.warn_in(
+                        MODULE_PLUGIN,
+                        format!(
+                            "manifest plugin '{}' runtime bridge deferred (runtime={:?})",
+                            plugin_id, runtime
+                        ),
+                    );
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "manifest plugin '{}' runtime activation failed: {}",
+                        plugin_id, err
+                    ));
+                }
+            }
             Ok(())
+        })
+    }
+
+    fn on_start(&self, context: PluginContext) -> PluginFuture {
+        let plugin_id = self.descriptor.metadata.id.clone();
+        let descriptor = self.descriptor.clone();
+        Box::pin(async move {
+            context
+                .sdk
+                .start_manifest_plugin(&descriptor)
+                .map_err(|err| format!("manifest plugin '{}' start failed: {}", plugin_id, err))
+        })
+    }
+
+    fn on_health_check(&self, context: PluginContext) -> PluginFuture {
+        let plugin_id = self.descriptor.metadata.id.clone();
+        let descriptor = self.descriptor.clone();
+        Box::pin(async move {
+            context
+                .sdk
+                .health_check_manifest_plugin(&descriptor)
+                .map_err(|err| {
+                    format!(
+                        "manifest plugin '{}' health check failed: {}",
+                        plugin_id, err
+                    )
+                })
+        })
+    }
+
+    fn on_shutdown(&self, context: PluginContext) -> PluginFuture {
+        let plugin_id = self.descriptor.metadata.id.clone();
+        let descriptor = self.descriptor.clone();
+        Box::pin(async move {
+            context
+                .sdk
+                .shutdown_manifest_plugin(&descriptor)
+                .map_err(|err| format!("manifest plugin '{}' shutdown failed: {}", plugin_id, err))
+        })
+    }
+
+    fn on_unload(&self, context: PluginContext) -> PluginFuture {
+        let plugin_id = self.descriptor.metadata.id.clone();
+        let descriptor = self.descriptor.clone();
+        Box::pin(async move {
+            context
+                .sdk
+                .unload_manifest_plugin(&descriptor)
+                .map_err(|err| format!("manifest plugin '{}' unload failed: {}", plugin_id, err))
         })
     }
 }

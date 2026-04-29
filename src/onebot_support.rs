@@ -1,11 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
-use liteyukibot_core::core::BotEvent;
-use liteyukibot_core::session::SessionEvent;
+use crate::command_registry::{
+    AdapterProtocol, BuiltinCommandId, CommandNameOverrides, CommandScope, builtin_command_names,
+    command_argument_for_message, matches_builtin_command_message,
+    parse_command_argument as parse_registered_command_argument,
+    render_builtin_help_lines_filtered,
+};
+use crate::i18n::{tr, trf};
+use crate::{BotEvent, PluginSdk, SessionEvent, SessionScope};
 use serde_json::Value;
 
-const EXTERNAL_HELP_TEXT: &str = "Liteyuki 外部命令:\n/help - 显示当前帮助\n\n说明:\n/log 与 /reload 属于控制台管理命令，推荐在 TUI（或未来 Tauri/Web 终端）执行。";
 static OB11_LOG_IMAGE_SUMMARY: LazyLock<bool> =
     LazyLock::new(|| parse_env_bool("LY_OB11_LOG_IMAGE_SUMMARY", false));
 static HELP_WHITELIST_DEBUG: LazyLock<bool> =
@@ -16,27 +21,26 @@ pub(crate) fn whitelist_debug_enabled() -> bool {
 }
 
 pub(crate) fn is_help_command(message: &str) -> bool {
-    matches!(message.trim(), "/help" | "help")
+    matches_builtin_command_message(
+        BuiltinCommandId::Help,
+        message,
+        CommandScope::Adapter(AdapterProtocol::OneBot11),
+        CommandNameOverrides::default(),
+    )
 }
 
+#[allow(dead_code)]
 pub(crate) fn parse_command_argument(message: &str, command_prefix: &str) -> Option<String> {
-    let command_prefix = command_prefix.trim();
-    if command_prefix.is_empty() {
-        return None;
-    }
+    parse_registered_command_argument(message, command_prefix)
+}
 
-    let message = message.trim();
-    if message == command_prefix {
-        return Some(String::new());
-    }
-
-    let remainder = message.strip_prefix(command_prefix)?;
-    let mut chars = remainder.chars();
-    if !chars.next().is_some_and(char::is_whitespace) {
-        return None;
-    }
-
-    Some(remainder.trim().to_string())
+pub(crate) fn parse_su_password_argument(message: &str) -> Option<String> {
+    command_argument_for_message(
+        BuiltinCommandId::Su,
+        message,
+        CommandScope::Adapter(AdapterProtocol::OneBot11),
+        CommandNameOverrides::default(),
+    )
 }
 
 pub(crate) fn is_help_session_allowed(event: &SessionEvent, whitelist: &HashSet<String>) -> bool {
@@ -95,7 +99,7 @@ fn event_group_id(event: &SessionEvent) -> Option<String> {
 }
 
 fn is_group_semantic(event: &SessionEvent) -> bool {
-    matches!(event.scope, liteyukibot_core::SessionScope::Group)
+    matches!(event.scope, SessionScope::Group)
         || payload_message_type(event).is_some_and(|ty| ty.eq_ignore_ascii_case("group"))
         || event_group_id(event).is_some()
 }
@@ -104,9 +108,13 @@ fn is_private_semantic(event: &SessionEvent) -> bool {
     if is_group_semantic(event) {
         return false;
     }
-    matches!(event.scope, liteyukibot_core::SessionScope::Private)
+    matches!(event.scope, SessionScope::Private)
         || payload_message_type(event).is_some_and(|ty| ty.eq_ignore_ascii_case("private"))
         || event.session_id == event.user_id
+}
+
+pub(crate) fn is_onebot_private_message(event: &SessionEvent) -> bool {
+    is_onebot_v11_payload(&event.payload) && is_private_semantic(event)
 }
 
 pub(crate) fn is_onebot_v11_payload(payload: &Value) -> bool {
@@ -123,11 +131,67 @@ pub(crate) fn is_onebot_v11_payload(payload: &Value) -> bool {
     object.contains_key("post_type") || object.contains_key("meta_event_type")
 }
 
+#[allow(dead_code)]
+pub(crate) fn render_external_help_text(llm_command_prefix: &str) -> String {
+    render_external_help_text_with_plugins(llm_command_prefix, None)
+}
+
+pub(crate) fn render_external_help_text_with_plugins(
+    llm_command_prefix: &str,
+    plugin_sdk: Option<&PluginSdk>,
+) -> String {
+    let scope = CommandScope::Adapter(AdapterProtocol::OneBot11);
+    let overrides = CommandNameOverrides {
+        onebot_ask_prefix: Some(llm_command_prefix),
+    };
+    let mut lines = render_builtin_help_lines_filtered(scope, overrides, |_, name| {
+        !plugin_sdk.is_some_and(|sdk| sdk.is_builtin_command_disabled("adapter:onebot11", name))
+    });
+    if let Some(plugin_sdk) = plugin_sdk {
+        let builtin_names = builtin_command_names(scope, overrides)
+            .into_iter()
+            .filter(|name| {
+                !plugin_sdk.is_builtin_command_disabled("adapter:onebot11", name.as_str())
+            })
+            .collect::<Vec<_>>();
+        let plugin_commands = plugin_sdk
+            .list_scope_commands("adapter:onebot11")
+            .into_iter()
+            .filter(|entry| entry.enabled)
+            .filter(|entry| {
+                builtin_names
+                    .iter()
+                    .all(|builtin_name| builtin_name != &entry.name)
+            })
+            .collect::<Vec<_>>();
+        if !plugin_commands.is_empty() {
+            lines.push(trf(
+                "help.plugin_commands.title",
+                &[("count", plugin_commands.len().to_string().as_str())],
+            ));
+            for command in plugin_commands {
+                let description = tr(command.description.as_str());
+                lines.push(trf(
+                    "help.plugin_commands.entry",
+                    &[
+                        ("name", command.name.as_str()),
+                        ("description", description.as_str()),
+                        ("plugin", command.plugin_id.as_str()),
+                    ],
+                ));
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+#[allow(dead_code)]
 pub(crate) fn build_onebot_v11_help_reply_payload(
     event: &SessionEvent,
     echo: &str,
+    text: &str,
 ) -> Option<Value> {
-    build_onebot_v11_text_reply_payload(event, echo, EXTERNAL_HELP_TEXT)
+    build_onebot_v11_text_reply_payload(event, echo, text)
 }
 
 pub(crate) fn build_onebot_v11_text_reply_payload(
@@ -381,3 +445,7 @@ pub(crate) fn truncate_preview(raw: &str, max_chars: usize) -> String {
         preview
     }
 }
+
+#[cfg(test)]
+#[path = "onebot_support/tests.rs"]
+mod tests;

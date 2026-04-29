@@ -1,4 +1,5 @@
 use super::*;
+use crate::i18n::{tr, trf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn temp_resume_path(name: &str) -> PathBuf {
@@ -21,6 +22,91 @@ fn test_tui_config(path: PathBuf) -> TuiConfig {
         resume_max_sessions: 64,
         resume_max_size_mib: 16,
     }
+}
+
+fn resume_session_with_log(uid: &str, message: String) -> ResumeSession {
+    ResumeSession {
+        uid: uid.to_string(),
+        created_at: "2026-04-21T00:00:00+08:00".to_string(),
+        updated_at: "2026-04-21T00:00:00+08:00".to_string(),
+        logs: vec![UiLog {
+            level: UiLevel::Info,
+            timestamp: "00:00:00".to_string(),
+            message,
+        }],
+        command_history: vec![],
+    }
+}
+
+fn temp_plugin_dir(name: &str) -> PathBuf {
+    let mut path = std::env::temp_dir();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    path.push(format!("rsliteyuki-plugin-{name}-{nanos}"));
+    path
+}
+
+fn register_test_manifest_plugin(
+    id: &str,
+    name: &str,
+    runtime_kind: &str,
+) -> (PluginManager, PathBuf) {
+    let manager = PluginManager::new();
+    let plugin_dir = temp_plugin_dir(id);
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        format!(
+            r#"{{
+  "id": "{id}",
+  "name": "{name}",
+  "type": "service",
+  "runtime": {{
+    "kind": "{runtime_kind}",
+    "entrypoint": "demo:bootstrap"
+  }}
+}}"#
+        ),
+    )
+    .expect("plugin manifest should be written");
+
+    manager
+        .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+        .expect("manifest discovery should succeed");
+
+    (manager, plugin_dir)
+}
+
+fn register_test_manifest_plugins(specs: &[(&str, &str, &str)]) -> (PluginManager, Vec<PathBuf>) {
+    let manager = PluginManager::new();
+    let mut plugin_dirs = Vec::new();
+    for (id, name, runtime_kind) in specs {
+        let plugin_dir = temp_plugin_dir(id);
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir should be created");
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            format!(
+                r#"{{
+  "id": "{id}",
+  "name": "{name}",
+  "type": "service",
+  "runtime": {{
+    "kind": "{runtime_kind}",
+    "entrypoint": "demo:bootstrap"
+  }}
+}}"#
+            ),
+        )
+        .expect("plugin manifest should be written");
+        manager
+            .discover_manifest_plugins_in_dirs([plugin_dir.as_path()])
+            .expect("manifest discovery should succeed");
+        plugin_dirs.push(plugin_dir);
+    }
+
+    (manager, plugin_dirs)
 }
 
 #[test]
@@ -209,6 +295,50 @@ fn autocomplete_log_subcommands() {
 }
 
 #[test]
+fn autocomplete_commands_scope_hints() {
+    let path = temp_resume_path("autocomplete-commands");
+    remove_file_if_exists(&path);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+
+    app.console_input = "/commands ".to_string();
+    app.autocomplete_console_input();
+    assert_eq!(app.console_input, "/commands tui");
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn autocomplete_commands_management_hints() {
+    let path = temp_resume_path("autocomplete-commands-manage");
+    remove_file_if_exists(&path);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.plugin_sdk = Some(PluginSdk::default());
+
+    app.console_input = "/commands d".to_string();
+    app.autocomplete_console_input();
+    assert_eq!(app.console_input, "/commands disable ");
+
+    app.console_input = "/commands disable ".to_string();
+    app.clear_completion_state();
+    app.autocomplete_console_input();
+    assert_eq!(app.console_input, "/commands disable tui ");
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
 fn command_cursor_position_tracks_input_width() {
     let area = Rect::new(0, 0, 20, 3);
     let (x, y) = command_cursor_position(area, "/help");
@@ -360,6 +490,29 @@ fn log_window_keeps_chronological_order_with_scroll() {
 }
 
 #[test]
+fn max_log_scroll_accounts_for_wrapped_visual_lines() {
+    let path = temp_resume_path("log-visual-scroll");
+    remove_file_if_exists(&path);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.set_log_text_width(24);
+    app.set_log_view_rows(2);
+    app.push_log(UiLevel::Info, "0123456789 abcdefghij klmnopqrst uvwxyz");
+
+    assert!(
+        app.max_log_scroll() > 0,
+        "wrapped log should produce scrollable visual lines"
+    );
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
 fn log_command_switches_view_mode() {
     let path = temp_resume_path("log-view-mode");
     remove_file_if_exists(&path);
@@ -399,10 +552,11 @@ fn reload_command_is_recognized() {
 
     let outcome = app.handle_console_command("/reload now");
     assert!(matches!(outcome, CommandOutcome::None));
+    let usage = tr("tui.command.reload_usage");
     assert!(
         app.logs
             .iter()
-            .any(|log| log.message.contains("usage: /reload"))
+            .any(|log| log.message.contains(usage.as_str()))
     );
 
     remove_file_if_exists(&path);
@@ -426,8 +580,11 @@ fn apply_reload_result_updates_shared_llm_command_prefix() {
         adapters: Vec::new(),
         adapter_autostart: false,
         tui_config: test_tui_config(path.clone()),
+        locale: crate::i18n::AppLocale::ZhCn,
         help_whitelist: Vec::new(),
         llm_command_prefix: "/qa".to_string(),
+        disabled_commands: Vec::new(),
+        disabled_plugins: vec!["builtin-liteecho".to_string()],
         warnings: Vec::new(),
     });
 
@@ -436,6 +593,7 @@ fn apply_reload_result_updates_shared_llm_command_prefix() {
         .expect("llm command prefix lock should be readable in test")
         .clone();
     assert_eq!(prefix, "/qa");
+    assert!(app.disabled_plugins.contains("builtin-liteecho"));
     assert!(
         app.logs
             .iter()
@@ -481,10 +639,11 @@ fn whitelist_command_can_add_remove_and_list_entries() {
     assert!(lock.contains("private:3541766758"));
     drop(lock);
 
+    let entries_title = trf("tui.whitelist.entries", &[("count", "2")]);
     assert!(
         app.logs
             .iter()
-            .any(|log| log.message.contains("whitelist entries"))
+            .any(|log| log.message.contains(entries_title.as_str()))
     );
 
     remove_file_if_exists(&path);
@@ -594,10 +753,11 @@ fn ask_command_parses_prompt() {
 
     let outcome = app.handle_console_command("/ask");
     assert!(matches!(outcome, CommandOutcome::None));
+    let usage = tr("tui.command.ask_usage");
     assert!(
         app.logs
             .iter()
-            .any(|log| log.message.contains("usage: /ask"))
+            .any(|log| log.message.contains(usage.as_str()))
     );
 
     remove_file_if_exists(&path);
@@ -623,6 +783,384 @@ fn autocomplete_includes_ask_command() {
 }
 
 #[test]
+fn tui_builtin_completion_excludes_adapter_only_commands() {
+    let path = temp_resume_path("autocomplete-scope-filter");
+    remove_file_if_exists(&path);
+
+    let app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+
+    let candidates = app.command_completion_candidates("/");
+    assert!(candidates.iter().any(|candidate| candidate == "/help"));
+    assert!(!candidates.iter().any(|candidate| candidate == "/su"));
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn commands_command_lists_scope_filtered_catalog() {
+    let path = temp_resume_path("command-catalog");
+    remove_file_if_exists(&path);
+
+    let mut adapter_scope_app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    adapter_scope_app.handle_console_command("/commands adapter:onebot11");
+    let adapter_title = trf(
+        "tui.command.catalog.title",
+        &[("scope", "adapter:onebot11")],
+    );
+    assert!(
+        adapter_scope_app
+            .logs
+            .iter()
+            .any(|log| log.message.contains(adapter_title.as_str()))
+    );
+    assert!(
+        adapter_scope_app
+            .logs
+            .iter()
+            .any(|log| log.message.contains("/su <password>"))
+    );
+    assert!(
+        adapter_scope_app
+            .logs
+            .iter()
+            .all(|log| !log.message.contains("/reload"))
+    );
+
+    let mut tui_scope_app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    tui_scope_app.handle_console_command("/commands tui");
+    let tui_title = trf("tui.command.catalog.title", &[("scope", "tui")]);
+    assert!(
+        tui_scope_app
+            .logs
+            .iter()
+            .any(|log| log.message.contains(tui_title.as_str()))
+    );
+    assert!(
+        tui_scope_app
+            .logs
+            .iter()
+            .any(|log| log.message.contains("/reload"))
+    );
+    assert!(
+        tui_scope_app
+            .logs
+            .iter()
+            .all(|log| !log.message.contains("/su <password>"))
+    );
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn commands_command_can_disable_and_enable_builtin_scope_command() {
+    let path = temp_resume_path("command-manage-builtin");
+    remove_file_if_exists(&path);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.plugin_sdk = Some(PluginSdk::default());
+
+    app.handle_console_command("/commands disable tui /help");
+    let disabled_message = trf(
+        "tui.command.changed",
+        &[
+            ("command", "/help"),
+            ("state", tr("tui.command.state.disabled").as_str()),
+            ("scope", "tui"),
+            ("targets", tr("tui.command.target.builtin").as_str()),
+        ],
+    );
+    assert!(
+        app.logs
+            .iter()
+            .any(|log| { log.message.contains(disabled_message.as_str()) })
+    );
+    assert!(
+        !app.command_completion_candidates("/")
+            .contains(&"/help".to_string())
+    );
+    assert_eq!(
+        app.command_help_for_line("/help").as_deref(),
+        Some("命令说明: /help 当前已禁用")
+    );
+
+    app.handle_console_command("/help");
+    let policy_message = trf("tui.command.disabled_by_policy", &[("command", "/help")]);
+    assert!(
+        app.logs
+            .iter()
+            .any(|log| { log.message.contains(policy_message.as_str()) })
+    );
+
+    app.handle_console_command("/commands enable tui /help");
+    let enabled_message = trf(
+        "tui.command.changed",
+        &[
+            ("command", "/help"),
+            ("state", tr("tui.command.state.enabled").as_str()),
+            ("scope", "tui"),
+            ("targets", tr("tui.command.target.builtin").as_str()),
+        ],
+    );
+    assert!(
+        app.logs
+            .iter()
+            .any(|log| log.message.contains(enabled_message.as_str()))
+    );
+    assert!(
+        app.command_completion_candidates("/")
+            .contains(&"/help".to_string())
+    );
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn plugins_command_lists_catalog_with_runtime_type() {
+    let path = temp_resume_path("plugin-catalog");
+    remove_file_if_exists(&path);
+    let (manager, plugin_dir) =
+        register_test_manifest_plugin("builtin-liteecho", "Builtin LiteEcho", "python");
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.bind_plugin_manager(manager);
+
+    app.handle_console_command("/plugins");
+    let catalog_title = trf("plugin.catalog.title", &[("count", "1")]);
+    let service_tag = tr("plugin.type.service");
+    let enabled_tag = tr("plugin.catalog.tag.enabled");
+    assert!(
+        app.logs
+            .iter()
+            .any(|log| log.message.contains(catalog_title.as_str()))
+    );
+    assert!(app.logs.iter().any(|log| {
+        log.message.contains("builtin-liteecho (python)")
+            && log.message.contains(service_tag.as_str())
+            && log.message.contains(enabled_tag.as_str())
+    }));
+
+    let _ = std::fs::remove_dir_all(plugin_dir);
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn plugins_command_can_disable_and_enable_plugin() {
+    let path = temp_resume_path("plugin-manage");
+    remove_file_if_exists(&path);
+    let (manager, plugin_dir) =
+        register_test_manifest_plugin("builtin-liteecho", "Builtin LiteEcho", "python");
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.bind_plugin_manager(manager);
+
+    let disable = app.handle_console_command("/plugins disable builtin-liteecho");
+    assert!(matches!(
+        disable,
+        CommandOutcome::PersistDisabledPlugins { .. }
+    ));
+    assert!(app.disabled_plugins.contains("builtin-liteecho"));
+    let disabled_message = trf(
+        "plugin.command.changed",
+        &[
+            ("plugin", "builtin-liteecho"),
+            ("state", tr("plugin.catalog.tag.disabled").as_str()),
+            ("runtime", "python"),
+        ],
+    );
+    assert!(
+        app.logs
+            .iter()
+            .any(|log| { log.message.contains(disabled_message.as_str()) })
+    );
+
+    let enable = app.handle_console_command("/plugins enable builtin-liteecho");
+    assert!(matches!(
+        enable,
+        CommandOutcome::PersistDisabledPlugins { .. }
+    ));
+    assert!(!app.disabled_plugins.contains("builtin-liteecho"));
+    let enabled_message = trf(
+        "plugin.command.changed",
+        &[
+            ("plugin", "builtin-liteecho"),
+            ("state", tr("plugin.catalog.tag.enabled").as_str()),
+            ("runtime", "python"),
+        ],
+    );
+    assert!(
+        app.logs
+            .iter()
+            .any(|log| { log.message.contains(enabled_message.as_str()) })
+    );
+
+    let _ = std::fs::remove_dir_all(plugin_dir);
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn dashboard_plugin_selection_moves_and_wraps() {
+    let path = temp_resume_path("dashboard-plugin-selection");
+    remove_file_if_exists(&path);
+    let (manager, plugin_dirs) = register_test_manifest_plugins(&[
+        ("zeta-plugin", "Zeta Plugin", "python"),
+        ("alpha-plugin", "Alpha Plugin", "python"),
+        ("beta-plugin", "Beta Plugin", "python"),
+    ]);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.bind_plugin_manager(manager);
+
+    assert!(app.is_dashboard_view());
+    assert_eq!(app.normalized_dashboard_plugin_index(3), Some(0));
+
+    assert!(app.move_dashboard_plugin_selection(1));
+    assert!(app.is_dashboard_plugins_focus());
+    assert_eq!(app.normalized_dashboard_plugin_index(3), Some(1));
+
+    assert!(app.move_dashboard_plugin_selection(1));
+    assert_eq!(app.normalized_dashboard_plugin_index(3), Some(2));
+
+    assert!(app.move_dashboard_plugin_selection(1));
+    assert_eq!(app.normalized_dashboard_plugin_index(3), Some(0));
+
+    assert!(app.move_dashboard_plugin_selection(-1));
+    assert_eq!(app.normalized_dashboard_plugin_index(3), Some(2));
+
+    for plugin_dir in plugin_dirs {
+        let _ = std::fs::remove_dir_all(plugin_dir);
+    }
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn dashboard_plugin_toggle_matches_plugins_command_semantics() {
+    let path = temp_resume_path("dashboard-plugin-toggle");
+    remove_file_if_exists(&path);
+    let (manager, plugin_dirs) =
+        register_test_manifest_plugins(&[("alpha-plugin", "Alpha Plugin", "python")]);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.bind_plugin_manager(manager);
+
+    app.move_dashboard_plugin_selection(1);
+    assert_eq!(
+        app.command_help_text(),
+        "插件面板: 当前 alpha-plugin；Up/Down 选择；Enter 禁用；Tab 回到命令"
+    );
+    let disable_command = app
+        .dashboard_toggle_selected_plugin_command()
+        .expect("dashboard toggle should produce a disable command");
+    assert_eq!(disable_command, "/plugins disable alpha-plugin");
+
+    let disable = app.handle_console_command(disable_command.as_str());
+    assert!(matches!(
+        disable,
+        CommandOutcome::PersistDisabledPlugins {
+            ref entries,
+            ref rollback_entries,
+        } if entries == &vec!["alpha-plugin".to_string()] && rollback_entries.is_empty()
+    ));
+    assert!(app.disabled_plugins.contains("alpha-plugin"));
+    assert_eq!(
+        app.command_help_text(),
+        "插件面板: 当前 alpha-plugin；Up/Down 选择；Enter 启用；Tab 回到命令"
+    );
+
+    let enable_command = app
+        .dashboard_toggle_selected_plugin_command()
+        .expect("dashboard toggle should produce an enable command");
+    assert_eq!(enable_command, "/plugins enable alpha-plugin");
+
+    let enable = app.handle_console_command(enable_command.as_str());
+    assert!(matches!(
+        enable,
+        CommandOutcome::PersistDisabledPlugins {
+            ref entries,
+            ref rollback_entries,
+        } if entries.is_empty() && rollback_entries == &vec!["alpha-plugin".to_string()]
+    ));
+    assert!(!app.disabled_plugins.contains("alpha-plugin"));
+
+    for plugin_dir in plugin_dirs {
+        let _ = std::fs::remove_dir_all(plugin_dir);
+    }
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn empty_input_help_text_switches_to_dashboard_plugin_panel_hint() {
+    let path = temp_resume_path("dashboard-plugin-help-hint");
+    remove_file_if_exists(&path);
+    let (manager, plugin_dirs) =
+        register_test_manifest_plugins(&[("alpha-plugin", "Alpha Plugin", "python")]);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    app.bind_plugin_manager(manager);
+
+    assert_eq!(
+        app.command_help_text(),
+        "命令面板: 输入 /help 查看命令；Tab 切到插件；Enter 执行；PgUp/PgDn/Home/End 滚动日志"
+    );
+
+    app.cycle_dashboard_focus();
+    assert!(app.is_dashboard_plugin_panel_active());
+    assert_eq!(
+        app.command_help_text(),
+        "插件面板: 当前 alpha-plugin；Up/Down 选择；Enter 禁用；Tab 回到命令"
+    );
+
+    for plugin_dir in plugin_dirs {
+        let _ = std::fs::remove_dir_all(plugin_dir);
+    }
+    remove_file_if_exists(&path);
+}
+
+#[test]
 fn llm_apikey_command_is_redacted_for_display() {
     let path = temp_resume_path("redact-apikey");
     remove_file_if_exists(&path);
@@ -635,7 +1173,7 @@ fn llm_apikey_command_is_redacted_for_display() {
     );
 
     let redacted = app.redact_console_command_for_display("/llm apikey sk-1 sk-2");
-    assert_eq!(redacted, "/llm apikey <redacted:2>");
+    assert_eq!(redacted, "/llm apikey <已隐藏:2>");
 
     remove_file_if_exists(&path);
 }
@@ -756,38 +1294,75 @@ fn resume_size_limit_keeps_active_session() {
     let active_uid = app.active_resume_uid().to_string();
 
     let large = "x".repeat(600 * 1024);
-    app.resume_store.sessions.push(ResumeSession {
-        uid: "old-large-a".to_string(),
-        created_at: Local::now().to_rfc3339(),
-        updated_at: Local::now().to_rfc3339(),
-        logs: vec![UiLog {
-            level: UiLevel::Info,
-            timestamp: "00:00:00".to_string(),
-            message: large.clone(),
-        }],
-        command_history: vec![],
-    });
-    app.resume_store.sessions.push(ResumeSession {
-        uid: "old-large-b".to_string(),
-        created_at: Local::now().to_rfc3339(),
-        updated_at: Local::now().to_rfc3339(),
-        logs: vec![UiLog {
-            level: UiLevel::Info,
-            timestamp: "00:00:00".to_string(),
-            message: large,
-        }],
-        command_history: vec![],
-    });
+    app.resume_store
+        .sessions
+        .push(resume_session_with_log("old-large-a", large.clone()));
+    app.resume_store
+        .sessions
+        .push(resume_session_with_log("old-large-b", large));
 
     app.enforce_resume_limits();
+    app.flush_resume_if_needed(true);
 
-    assert!(app.resume_store.estimated_size_bytes() <= app.resume_max_size_bytes);
+    let written_size = std::fs::metadata(&path)
+        .expect("resume store should be written")
+        .len() as usize;
+    assert!(app.resume_store.persisted_size_bytes() <= app.resume_max_size_bytes);
+    assert!(written_size <= app.resume_max_size_bytes);
     assert!(
         app.resume_store
             .sessions
             .iter()
             .any(|session| session.uid == active_uid)
     );
+
+    remove_file_if_exists(&path);
+}
+
+#[test]
+fn resume_size_limit_drops_frontmost_old_resume() {
+    let path = temp_resume_path("resume-size-order");
+    remove_file_if_exists(&path);
+
+    let mut app = AppState::new(
+        RuntimeTarget::Cli,
+        "test".to_string(),
+        Vec::new(),
+        test_tui_config(path.clone()),
+    );
+    let active_uid = app.active_resume_uid().to_string();
+
+    app.resume_store
+        .sessions
+        .push(resume_session_with_log("old-1", "a".repeat(512)));
+    app.resume_store
+        .sessions
+        .push(resume_session_with_log("old-2", "b".repeat(512)));
+
+    let mut store_after_one_trim = app.resume_store.clone();
+    store_after_one_trim.sessions.remove(1);
+    store_after_one_trim.update_session(&active_uid, &app.logs, &app.command_history);
+    let max_size_bytes = store_after_one_trim.persisted_size_bytes();
+    assert!(app.resume_store.persisted_size_bytes() > max_size_bytes);
+
+    app.resume_max_size_bytes = max_size_bytes;
+    app.flush_resume_if_needed(true);
+
+    let remaining_uids = app
+        .resume_store
+        .sessions
+        .iter()
+        .map(|session| session.uid.as_str())
+        .collect::<Vec<_>>();
+    let written_size = std::fs::metadata(&path)
+        .expect("resume store should be written")
+        .len() as usize;
+
+    assert!(remaining_uids.contains(&active_uid.as_str()));
+    assert!(!remaining_uids.contains(&"old-1"));
+    assert!(remaining_uids.contains(&"old-2"));
+    assert!(app.resume_store.persisted_size_bytes() <= app.resume_max_size_bytes);
+    assert!(written_size <= app.resume_max_size_bytes);
 
     remove_file_if_exists(&path);
 }

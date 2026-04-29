@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::i18n::AppLocale;
 use chrono::Local;
 use crossterm::event::{self, Event as CEvent, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -13,7 +14,9 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use liteyukibot_core::observability::set_console_log_output_enabled;
-use liteyukibot_core::{AdapterConfig, AdapterTransport, LiteyukiBot, RuntimeTarget};
+use liteyukibot_core::{
+    AdapterConfig, AdapterTransport, LiteyukiBot, PluginManager, PluginSdk, RuntimeTarget,
+};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -45,22 +48,10 @@ const ASYNC_COMMAND_CONCURRENCY_LIMIT: usize = 4;
 const DEFAULT_LOG_VIEW_ROWS: usize = 12;
 const DEFAULT_RESUME_MAX_SESSIONS: usize = 64;
 const DEFAULT_RESUME_MAX_SIZE_MIB: u64 = 16;
-const TUI_COMMANDS: [&str; 13] = [
-    "/help",
-    "/reload",
-    "/log",
-    "/clear",
-    "/adapters",
-    "/ask",
-    "/resumes",
-    "/history",
-    "/resume",
-    "/llm",
-    "/whitelist",
-    "/quit",
-    "/exit",
-];
 const LOG_SUBCOMMANDS: [&str; 2] = ["on", "off"];
+const COMMAND_SCOPE_HINTS: [&str; 4] = ["tui", "adapter:onebot11", "onebot11", "all"];
+const COMMAND_MANAGEMENT_VERBS: [&str; 2] = ["disable", "enable"];
+const PLUGIN_MANAGEMENT_VERBS: [&str; 3] = ["list", "disable", "enable"];
 const WHITELIST_SUBCOMMANDS: [&str; 3] = ["add", "remove", "list"];
 const WHITELIST_SCOPE_HINTS: [&str; 4] = ["private", "group", "session", "user"];
 const LLM_SUBCOMMANDS: [&str; 8] = [
@@ -111,18 +102,37 @@ enum UiViewMode {
     LogConsole,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashboardFocus {
+    Command,
+    Plugins,
+}
+
 enum CommandOutcome {
     None,
     Quit,
     Reload,
     PersistWhitelist(Vec<String>),
+    PersistDisabledCommands {
+        entries: Vec<String>,
+        rollback_entries: Vec<String>,
+    },
+    PersistDisabledPlugins {
+        entries: Vec<String>,
+        rollback_entries: Vec<String>,
+    },
     Llm(LlmCommandRequest),
     Ask(String),
+    PluginCommand {
+        command: String,
+        args: Vec<String>,
+    },
 }
 
 enum AsyncCommandResult {
     Llm(Result<String, String>),
     Ask(Result<String, String>),
+    PluginCommand(Result<String, String>),
 }
 
 struct PollKeyEventsOutput {
@@ -182,14 +192,21 @@ pub struct ReloadResult {
     pub adapters: Vec<AdapterConfig>,
     pub adapter_autostart: bool,
     pub tui_config: TuiConfig,
+    pub locale: AppLocale,
     pub help_whitelist: Vec<String>,
     pub llm_command_prefix: String,
+    pub disabled_commands: Vec<String>,
+    pub disabled_plugins: Vec<String>,
     pub warnings: Vec<String>,
 }
 
 pub type ReloadFuture<'a> = Pin<Box<dyn Future<Output = Result<ReloadResult, String>> + 'a>>;
 pub type ReloadHandler = for<'a> fn(&'a LiteyukiBot) -> ReloadFuture<'a>;
+pub type PluginPolicyFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + 'a>>;
+pub type PluginPolicyHandler = for<'a> fn(&'a LiteyukiBot, Vec<String>) -> PluginPolicyFuture<'a>;
 pub type PersistWhitelistHandler = fn(Vec<String>) -> Result<String, String>;
+pub type PersistDisabledCommandsHandler = fn(Vec<String>) -> Result<String, String>;
+pub type PersistDisabledPluginsHandler = fn(Vec<String>) -> Result<String, String>;
 pub type LlmCommandFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
 pub type LlmCommandHandler = fn(LlmCommandRequest) -> LlmCommandFuture<'static>;
 pub type AskFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
@@ -202,11 +219,17 @@ pub struct RunOptions {
     pub adapter_autostart: bool,
     pub tui_config: TuiConfig,
     pub reload_handler: ReloadHandler,
+    pub plugin_policy_handler: PluginPolicyHandler,
     pub whitelist_persist_handler: PersistWhitelistHandler,
+    pub disabled_commands_persist_handler: PersistDisabledCommandsHandler,
+    pub disabled_plugins_persist_handler: PersistDisabledPluginsHandler,
     pub llm_command_handler: LlmCommandHandler,
     pub ask_handler: AskHandler,
     pub help_whitelist: Arc<RwLock<HashSet<String>>>,
     pub llm_command_prefix: Arc<RwLock<String>>,
+    pub plugin_sdk: PluginSdk,
+    pub plugin_manager: PluginManager,
+    pub disabled_plugins: Vec<String>,
 }
 
 impl Default for TuiConfig {
@@ -238,7 +261,7 @@ struct ResumeSession {
     command_history: Vec<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ResumeStore {
     sessions: Vec<ResumeSession>,
 }
@@ -257,9 +280,13 @@ impl ResumeStore {
         {
             std::fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string_pretty(self)?;
+        let content = self.serialized_pretty()?;
         std::fs::write(path, content)?;
         Ok(())
+    }
+
+    fn serialized_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
     }
 
     fn create_session(&mut self, uid: String) {
@@ -299,9 +326,9 @@ impl ResumeStore {
         self.sessions.iter().find(|session| session.uid == uid)
     }
 
-    fn estimated_size_bytes(&self) -> usize {
-        serde_json::to_vec(self)
-            .map(|bytes| bytes.len())
+    fn persisted_size_bytes(&self) -> usize {
+        self.serialized_pretty()
+            .map(|content| content.len())
             .unwrap_or(usize::MAX)
     }
 }
@@ -328,6 +355,7 @@ struct AppState {
     history_draft: String,
     log_scroll: usize,
     log_view_rows: usize,
+    log_text_width: usize,
     resume_store_path: PathBuf,
     resume_store: ResumeStore,
     resume_max_sessions: usize,
@@ -337,9 +365,14 @@ struct AppState {
     last_resume_flush: Instant,
     last_resume_save_error: Option<String>,
     view_mode: UiViewMode,
+    dashboard_focus: DashboardFocus,
+    dashboard_plugin_index: usize,
     completion_state: Option<CompletionState>,
     help_whitelist: Option<Arc<RwLock<HashSet<String>>>>,
     llm_command_prefix: Option<Arc<RwLock<String>>>,
+    plugin_sdk: Option<PluginSdk>,
+    plugin_manager: Option<PluginManager>,
+    disabled_plugins: HashSet<String>,
 }
 
 fn adapter_transport_label(transport: AdapterTransport) -> &'static str {
@@ -348,6 +381,16 @@ fn adapter_transport_label(transport: AdapterTransport) -> &'static str {
         AdapterTransport::WebSocketReverse => "ws-reverse",
         AdapterTransport::Sse => "sse",
         AdapterTransport::Http => "http",
+    }
+}
+
+fn log_level_tag(level: UiLevel) -> &'static str {
+    match level {
+        UiLevel::Info => "INFO",
+        UiLevel::Warn => "WARN",
+        UiLevel::Error => "ERR ",
+        UiLevel::Event => "EVT ",
+        UiLevel::Llm => "LLM ",
     }
 }
 

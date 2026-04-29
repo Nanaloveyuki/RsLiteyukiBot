@@ -1,0 +1,542 @@
+use crate::i18n::tr;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum AdapterProtocol {
+    OneBot11,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CommandScope {
+    All,
+    Tui,
+    Adapter(AdapterProtocol),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum BuiltinCommandId {
+    Help,
+    Reload,
+    Log,
+    Clear,
+    Adapters,
+    Commands,
+    Plugins,
+    Ask,
+    Resumes,
+    History,
+    Resume,
+    Llm,
+    Whitelist,
+    Quit,
+    Exit,
+    Su,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CommandNameOverrides<'a> {
+    pub onebot_ask_prefix: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BuiltinCommandSpec {
+    pub id: BuiltinCommandId,
+    pub summary: &'static str,
+    pub detail: &'static str,
+    pub usage_hint: Option<&'static str>,
+    pub accepts_arguments: bool,
+    pub completion_trailing_space: bool,
+    pub scopes: &'static [CommandScope],
+    pub tui_name: Option<&'static str>,
+    pub onebot_name: Option<&'static str>,
+    pub onebot_aliases: &'static [&'static str],
+}
+
+const NO_ALIASES: [&str; 0] = [];
+const HELP_ALIASES: [&str; 1] = ["help"];
+const SU_ALIASES: [&str; 1] = ["su"];
+const SCOPE_TUI: [CommandScope; 1] = [CommandScope::Tui];
+const SCOPE_ONEBOT: [CommandScope; 1] = [CommandScope::Adapter(AdapterProtocol::OneBot11)];
+const SCOPE_TUI_ONEBOT: [CommandScope; 2] = [
+    CommandScope::Tui,
+    CommandScope::Adapter(AdapterProtocol::OneBot11),
+];
+
+const BUILTIN_COMMANDS: [BuiltinCommandSpec; 16] = [
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Help,
+        summary: "command.spec.help.summary",
+        detail: "command.spec.help.detail",
+        usage_hint: None,
+        accepts_arguments: false,
+        completion_trailing_space: false,
+        scopes: &SCOPE_TUI_ONEBOT,
+        tui_name: Some("/help"),
+        onebot_name: Some("/help"),
+        onebot_aliases: &HELP_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Reload,
+        summary: "command.spec.reload.summary",
+        detail: "command.spec.reload.detail",
+        usage_hint: None,
+        accepts_arguments: false,
+        completion_trailing_space: false,
+        scopes: &SCOPE_TUI,
+        tui_name: Some("/reload"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Log,
+        summary: "command.spec.log.summary",
+        detail: "command.spec.log.detail",
+        usage_hint: Some("[on|off]"),
+        accepts_arguments: false,
+        completion_trailing_space: false,
+        scopes: &SCOPE_TUI,
+        tui_name: Some("/log"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Clear,
+        summary: "command.spec.clear.summary",
+        detail: "command.spec.clear.detail",
+        usage_hint: None,
+        accepts_arguments: false,
+        completion_trailing_space: false,
+        scopes: &SCOPE_TUI,
+        tui_name: Some("/clear"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Adapters,
+        summary: "command.spec.adapters.summary",
+        detail: "command.spec.adapters.detail",
+        usage_hint: None,
+        accepts_arguments: false,
+        completion_trailing_space: false,
+        scopes: &SCOPE_TUI,
+        tui_name: Some("/adapters"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Commands,
+        summary: "command.spec.commands.summary",
+        detail: "command.spec.commands.detail",
+        usage_hint: Some("[scope] | enable <scope> <name> | disable <scope> <name>"),
+        accepts_arguments: false,
+        completion_trailing_space: true,
+        scopes: &SCOPE_TUI,
+        tui_name: Some("/commands"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Plugins,
+        summary: "command.spec.plugins.summary",
+        detail: "command.spec.plugins.detail",
+        usage_hint: Some("[list] | enable <plugin-id> | disable <plugin-id>"),
+        accepts_arguments: false,
+        completion_trailing_space: true,
+        scopes: &SCOPE_TUI,
+        tui_name: Some("/plugins"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Ask,
+        summary: "command.spec.ask.summary",
+        detail: "command.spec.ask.detail",
+        usage_hint: Some("<prompt>"),
+        accepts_arguments: true,
+        completion_trailing_space: true,
+        scopes: &SCOPE_TUI_ONEBOT,
+        tui_name: Some("/ask"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Resumes,
+        summary: "command.spec.resumes.summary",
+        detail: "command.spec.resumes.detail",
+        usage_hint: None,
+        accepts_arguments: false,
+        completion_trailing_space: false,
+        scopes: &SCOPE_TUI,
+        tui_name: Some("/resumes"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::History,
+        summary: "command.spec.history.summary",
+        detail: "command.spec.history.detail",
+        usage_hint: None,
+        accepts_arguments: false,
+        completion_trailing_space: false,
+        scopes: &SCOPE_TUI,
+        tui_name: Some("/history"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Resume,
+        summary: "command.spec.resume.summary",
+        detail: "command.spec.resume.detail",
+        usage_hint: Some("<uid>"),
+        accepts_arguments: true,
+        completion_trailing_space: true,
+        scopes: &SCOPE_TUI,
+        tui_name: Some("/resume"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Llm,
+        summary: "command.spec.llm.summary",
+        detail: "command.spec.llm.detail",
+        usage_hint: Some("..."),
+        accepts_arguments: false,
+        completion_trailing_space: true,
+        scopes: &SCOPE_TUI,
+        tui_name: Some("/llm"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Whitelist,
+        summary: "command.spec.whitelist.summary",
+        detail: "command.spec.whitelist.detail",
+        usage_hint: Some("..."),
+        accepts_arguments: false,
+        completion_trailing_space: true,
+        scopes: &SCOPE_TUI,
+        tui_name: Some("/whitelist"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Quit,
+        summary: "command.spec.quit.summary",
+        detail: "command.spec.quit.detail",
+        usage_hint: None,
+        accepts_arguments: false,
+        completion_trailing_space: false,
+        scopes: &SCOPE_TUI,
+        tui_name: Some("/quit"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Exit,
+        summary: "command.spec.exit.summary",
+        detail: "command.spec.exit.detail",
+        usage_hint: None,
+        accepts_arguments: false,
+        completion_trailing_space: false,
+        scopes: &SCOPE_TUI,
+        tui_name: Some("/exit"),
+        onebot_name: None,
+        onebot_aliases: &NO_ALIASES,
+    },
+    BuiltinCommandSpec {
+        id: BuiltinCommandId::Su,
+        summary: "command.spec.su.summary",
+        detail: "command.spec.su.detail",
+        usage_hint: Some("<password>"),
+        accepts_arguments: true,
+        completion_trailing_space: false,
+        scopes: &SCOPE_ONEBOT,
+        tui_name: None,
+        onebot_name: Some("/su"),
+        onebot_aliases: &SU_ALIASES,
+    },
+];
+
+impl BuiltinCommandSpec {
+    pub(crate) fn supports_scope(&self, scope: CommandScope) -> bool {
+        self.scopes
+            .iter()
+            .any(|entry| *entry == CommandScope::All || *entry == scope)
+    }
+}
+
+pub(crate) fn parse_command_argument(message: &str, command_prefix: &str) -> Option<String> {
+    let command_prefix = command_prefix.trim();
+    if command_prefix.is_empty() {
+        return None;
+    }
+
+    let message = message.trim();
+    if message == command_prefix {
+        return Some(String::new());
+    }
+
+    let remainder = message.strip_prefix(command_prefix)?;
+    let mut chars = remainder.chars();
+    if !chars.next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+
+    Some(remainder.trim().to_string())
+}
+
+pub(crate) fn builtin_commands_for_scope(
+    scope: CommandScope,
+) -> impl Iterator<Item = &'static BuiltinCommandSpec> {
+    BUILTIN_COMMANDS
+        .iter()
+        .filter(move |command| command.supports_scope(scope))
+}
+
+pub(crate) fn command_primary_name(
+    command: &BuiltinCommandSpec,
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+) -> Option<String> {
+    match scope {
+        CommandScope::Tui => command.tui_name.map(ToString::to_string),
+        CommandScope::Adapter(AdapterProtocol::OneBot11) => {
+            if command.id == BuiltinCommandId::Ask {
+                return Some(normalize_onebot_ask_prefix(overrides.onebot_ask_prefix));
+            }
+            command.onebot_name.map(ToString::to_string)
+        }
+        CommandScope::All => None,
+    }
+}
+
+pub(crate) fn command_usage_label(
+    command: &BuiltinCommandSpec,
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+) -> Option<String> {
+    let mut label = command_primary_name(command, scope, overrides)?;
+    if let Some(hint) = command.usage_hint {
+        label.push(' ');
+        label.push_str(hint);
+    }
+    Some(label)
+}
+
+pub(crate) fn parse_command_scope_token(raw: &str) -> Option<CommandScope> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let compact = trimmed.to_ascii_lowercase().replace([' ', '_', '-'], "");
+    match compact.as_str() {
+        "all" => Some(CommandScope::All),
+        "tui" => Some(CommandScope::Tui),
+        "adapter:onebot11" | "adapter:onebotv11" | "adapteronebot11" | "onebot11" | "onebotv11" => {
+            Some(CommandScope::Adapter(AdapterProtocol::OneBot11))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn builtin_command_names(
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+) -> Vec<String> {
+    builtin_commands_for_scope(scope)
+        .filter_map(|command| command_primary_name(command, scope, overrides))
+        .collect()
+}
+
+pub(crate) fn is_builtin_command_name(
+    name: &str,
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+) -> bool {
+    find_builtin_command_by_name(name, scope, overrides).is_some()
+}
+
+pub(crate) fn command_completion_trailing_space(
+    name: &str,
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+) -> bool {
+    find_builtin_command_by_name(name, scope, overrides)
+        .map(|command| command.completion_trailing_space)
+        .unwrap_or(false)
+}
+
+pub(crate) fn command_help_text_for_name(
+    name: &str,
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+) -> Option<String> {
+    let command = find_builtin_command_by_name(name, scope, overrides)?;
+    let label = command_usage_label(command, scope, overrides)?;
+    Some(format!(
+        "{} {label} {}",
+        tr("command.help.prefix"),
+        tr(command.detail)
+    ))
+}
+
+pub(crate) fn normalize_builtin_command_name_for_scope(
+    name: &str,
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+) -> Option<String> {
+    let command = find_builtin_command_by_name(name, scope, overrides)?;
+    command_primary_name(command, scope, overrides)
+}
+
+pub(crate) fn render_builtin_help_lines_filtered<F>(
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+    mut include_command: F,
+) -> Vec<String>
+where
+    F: FnMut(&BuiltinCommandSpec, &str) -> bool,
+{
+    let scope_label = scope_label(scope);
+    let mut lines = vec![tr("help.available_commands").replace("{scope}", scope_label.as_str())];
+    for command in builtin_commands_for_scope(scope) {
+        let Some(label) = command_usage_label(command, scope, overrides) else {
+            continue;
+        };
+        let Some(name) = command_primary_name(command, scope, overrides) else {
+            continue;
+        };
+        if !include_command(command, name.as_str()) {
+            continue;
+        }
+        lines.push(format!("{label} - {}", tr(command.summary)));
+    }
+
+    match scope {
+        CommandScope::Tui => {
+            lines.push(tr("help.tui.shortcuts").to_string());
+            lines.push(tr("help.tui.log_view").to_string());
+            lines.push(tr("help.tui.scope_note").to_string());
+        }
+        CommandScope::Adapter(AdapterProtocol::OneBot11) => {
+            lines.push(tr("help.onebot.tui_only").to_string());
+            lines.push(tr("help.onebot.auth_required").to_string());
+            lines.push(tr("help.onebot.su_private_only").to_string());
+        }
+        CommandScope::All => {}
+    }
+
+    lines
+}
+
+pub(crate) fn render_builtin_help_lines(
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+) -> Vec<String> {
+    render_builtin_help_lines_filtered(scope, overrides, |_, _| true)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn render_builtin_help_text(
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+) -> String {
+    render_builtin_help_lines(scope, overrides).join("\n")
+}
+
+pub(crate) fn matches_builtin_command_message(
+    command_id: BuiltinCommandId,
+    message: &str,
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+) -> bool {
+    command_argument_for_message(command_id, message, scope, overrides).is_some()
+}
+
+pub(crate) fn command_argument_for_message(
+    command_id: BuiltinCommandId,
+    message: &str,
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+) -> Option<String> {
+    let command = BUILTIN_COMMANDS
+        .iter()
+        .find(|entry| entry.id == command_id && entry.supports_scope(scope))?;
+    let message = message.trim();
+
+    if command.accepts_arguments {
+        for name in command_names_for_matching(command, scope, overrides) {
+            if let Some(argument) = parse_command_argument(message, name.as_str()) {
+                return Some(argument);
+            }
+        }
+        return None;
+    }
+
+    command_names_for_matching(command, scope, overrides)
+        .into_iter()
+        .find(|name| name == message)
+        .map(|_| String::new())
+}
+
+fn find_builtin_command_by_name(
+    name: &str,
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+) -> Option<&'static BuiltinCommandSpec> {
+    let name = name.trim();
+    BUILTIN_COMMANDS.iter().find(|command| {
+        command.supports_scope(scope)
+            && command_names_for_matching(command, scope, overrides)
+                .into_iter()
+                .any(|candidate| candidate == name)
+    })
+}
+
+fn command_names_for_matching(
+    command: &BuiltinCommandSpec,
+    scope: CommandScope,
+    overrides: CommandNameOverrides<'_>,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(primary) = command_primary_name(command, scope, overrides) {
+        names.push(primary);
+    }
+    if matches!(scope, CommandScope::Adapter(AdapterProtocol::OneBot11)) {
+        names.extend(
+            command
+                .onebot_aliases
+                .iter()
+                .map(|alias| (*alias).to_string()),
+        );
+    }
+    names
+}
+
+fn normalize_onebot_ask_prefix(prefix: Option<&str>) -> String {
+    let normalized = prefix.unwrap_or("/ask").trim();
+    if normalized.is_empty() {
+        "/ask".to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
+pub(crate) fn command_scope_label(scope: CommandScope) -> &'static str {
+    match scope {
+        CommandScope::All => "all",
+        CommandScope::Tui => "tui",
+        CommandScope::Adapter(AdapterProtocol::OneBot11) => "adapter:onebot11",
+    }
+}
+
+fn scope_label(scope: CommandScope) -> String {
+    match scope {
+        CommandScope::All => tr("help.scope.all"),
+        CommandScope::Tui => tr("help.scope.tui"),
+        CommandScope::Adapter(AdapterProtocol::OneBot11) => tr("help.scope.adapter.onebot11"),
+    }
+}
+
+#[cfg(test)]
+#[path = "command_registry/tests.rs"]
+mod tests;

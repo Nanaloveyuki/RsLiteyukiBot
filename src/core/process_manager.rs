@@ -362,7 +362,11 @@ async fn supervise_process(
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let runner = Arc::clone(&registration.runner);
         let mut worker = tokio::spawn((runner)(shutdown_rx));
-        let _ = restart_generation_tx.send(*restart_generation_tx.borrow() + 1);
+        let next_generation = {
+            let current_generation = *restart_generation_tx.borrow();
+            current_generation + 1
+        };
+        let _ = restart_generation_tx.send(next_generation);
 
         if let Some(logger) = &logger {
             logger.info_in(
