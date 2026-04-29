@@ -140,4 +140,3 @@ jobs:
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseId: ${{ needs.prepare-release.outputs.release_id }}
-          uploadUpdaterJson: false
