@@ -48,6 +48,37 @@ fn resolve_frontend_dist_dir_returns_none_without_index_html() {
 
 #[test]
 // 必要测试
+fn packaged_frontend_dist_candidates_cover_bundle_resource_layouts() {
+    let exe_dir = PathBuf::from("/app/bin");
+    let candidates = packaged_frontend_dist_dir_candidates(exe_dir.as_path());
+
+    assert!(candidates.contains(&exe_dir.join("resources").join(FRONTEND_DIST_DIR)));
+    assert!(candidates.contains(&exe_dir.join("..").join("Resources").join(FRONTEND_DIST_DIR)));
+}
+
+#[test]
+// 必要测试
+fn resolve_frontend_dist_dir_finds_packaged_resource_layout() {
+    let exe_dir = temp_dir_path("packaged-exe");
+    let packaged_dist = exe_dir.join("resources").join(FRONTEND_DIST_DIR);
+    fs::create_dir_all(&packaged_dist).expect("packaged dist dir should exist");
+    fs::write(packaged_dist.join("index.html"), "<!doctype html>")
+        .expect("index.html should be written");
+
+    let resolved = resolve_frontend_dist_dir_from_candidates(
+        packaged_frontend_dist_dir_candidates(exe_dir.as_path())
+            .into_iter()
+            .map(Some),
+    );
+
+    assert_eq!(resolved, Some(normalize_path(packaged_dist.clone())));
+
+    let _ = fs::remove_file(packaged_dist.join("index.html"));
+    let _ = fs::remove_dir_all(&exe_dir);
+}
+
+#[test]
+// 必要测试
 fn resolve_dev_frontend_reads_probe_addr_from_env() {
     let _lock = process_state_lock();
     let _env_guard = EnvVarGuard::set(WEB_DEV_SERVER_ENV, "127.0.0.1:1420");

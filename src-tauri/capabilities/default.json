@@ -1,7 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default desktop capability for the placeholder Tauri shell.",
+  "description": "Default desktop capability for the Liteyuki Tauri shell.",
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:14500/*",
+      "http://localhost:14500/*"
+    ]
+  },
   "windows": ["main"],
   "permissions": ["core:default"]
 }

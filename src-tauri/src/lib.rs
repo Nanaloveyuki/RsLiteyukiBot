@@ -10,7 +10,7 @@ use liteyukibot_core::{
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{App, AppHandle, Manager, Runtime, State, WindowEvent};
+use tauri::{App, AppHandle, Manager, Runtime, State, Url, WindowEvent};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ICON_ID: &str = "main-tray";
@@ -74,6 +74,7 @@ pub fn run() {
     let close_state_for_tray = close_state.clone();
     let close_state_for_window = close_state.clone();
     let runtime_api_base_script = build_runtime_api_base_init_script(server.desktop_url().as_str());
+    let desktop_webui_url = server.desktop_webui_url();
     let local_token = server.local_token();
     let local_token_script = build_local_token_init_script(local_token.as_str());
     let desktop_close_script = build_desktop_close_init_script();
@@ -90,7 +91,11 @@ pub fn run() {
         .manage(app_host.clone())
         .manage(server)
         .manage(close_state)
-        .setup(move |app| setup_system_tray(app, close_state_for_tray.clone()))
+        .setup(move |app| {
+            setup_system_tray(app, close_state_for_tray.clone())?;
+            navigate_main_window_to_webui(app.handle(), desktop_webui_url.as_str())?;
+            Ok(())
+        })
         .on_window_event(move |window, event| {
             handle_main_window_event(window, event, close_state_for_window.as_ref());
         })
@@ -163,6 +168,26 @@ fn setup_system_tray<R: Runtime>(
 
     tray_builder.build(app)?;
     Ok(())
+}
+
+fn navigate_main_window_to_webui<R: Runtime>(
+    app: &AppHandle<R>,
+    desktop_webui_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let target_url = Url::parse(desktop_webui_url)
+        .map_err(|err| format!("failed to parse desktop webui url '{desktop_webui_url}': {err}"))?;
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        return Err(format!("window '{MAIN_WINDOW_LABEL}' not found during setup").into());
+    };
+
+    if window.url().ok().as_ref() == Some(&target_url) {
+        return Ok(());
+    }
+
+    window.navigate(target_url).map_err(|err| {
+        format!("failed to navigate main window to desktop webui '{desktop_webui_url}': {err}")
+            .into()
+    })
 }
 
 fn handle_main_window_event<R: Runtime>(
@@ -378,6 +403,13 @@ mod tests {
     }
 
     #[derive(Debug, Deserialize)]
+    struct TauriCapabilityConfig {
+        remote: Option<TauriCapabilityRemoteConfig>,
+        permissions: Vec<String>,
+        windows: Vec<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
     struct TauriBuildConfig {
         #[serde(rename = "beforeDevCommand")]
         before_dev_command: String,
@@ -392,6 +424,19 @@ mod tests {
     #[derive(Debug, Deserialize)]
     struct TauriBundleConfig {
         icon: Vec<String>,
+        resources: Option<TauriBundleResourcesConfig>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(untagged)]
+    enum TauriBundleResourcesConfig {
+        List(Vec<String>),
+        Map(HashMap<String, String>),
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TauriCapabilityRemoteConfig {
+        urls: Vec<String>,
     }
 
     fn repo_root() -> PathBuf {
@@ -423,6 +468,21 @@ mod tests {
             panic!(
                 "failed to parse {} as tauri config: {err}",
                 tauri_config_path.display()
+            )
+        })
+    }
+
+    fn load_default_capability() -> TauriCapabilityConfig {
+        let capability_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("capabilities")
+            .join("default.json");
+        let capability = fs::read_to_string(&capability_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", capability_path.display()));
+
+        serde_json::from_str(&capability).unwrap_or_else(|err| {
+            panic!(
+                "failed to parse {} as tauri capability: {err}",
+                capability_path.display()
             )
         })
     }
@@ -488,6 +548,59 @@ mod tests {
                 resolved.display()
             );
         }
+    }
+
+    #[test]
+    fn tauri_bundle_resources_include_frontend_dist() {
+        let tauri_config = load_tauri_config();
+
+        let resources = tauri_config
+            .bundle
+            .resources
+            .expect("tauri bundle resources should be configured");
+
+        match resources {
+            TauriBundleResourcesConfig::Map(entries) => {
+                assert_eq!(
+                    entries.get("../frontend/dist").map(String::as_str),
+                    Some("frontend/dist")
+                );
+            }
+            TauriBundleResourcesConfig::List(entries) => {
+                panic!(
+                    "expected tauri bundle resources to use a source->target map, got list: {entries:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tauri_default_capability_allows_local_desktop_webui_origin() {
+        let capability = load_default_capability();
+
+        assert!(capability.windows.iter().any(|window| window == "main"));
+        assert!(
+            capability
+                .permissions
+                .iter()
+                .any(|permission| permission == "core:default")
+        );
+
+        let remote = capability
+            .remote
+            .expect("desktop capability should allow the local webui remote origin");
+        assert!(
+            remote
+                .urls
+                .iter()
+                .any(|url| url == "http://127.0.0.1:14500/*")
+        );
+        assert!(
+            remote
+                .urls
+                .iter()
+                .any(|url| url == "http://localhost:14500/*")
+        );
     }
 
     #[test]

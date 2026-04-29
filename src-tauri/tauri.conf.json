@@ -24,6 +24,9 @@
   },
   "bundle": {
     "active": true,
+    "resources": {
+      "../frontend/dist": "frontend/dist"
+    },
     "icon": [
       "../assets/app-shell/bot.png",
       "../assets/app-shell/bot.ico"

@@ -17,17 +17,39 @@ export default function DesktopClosePrompt () {
   const [submitting, setSubmitting] = useState<'background' | 'exit' | null>(null);
 
   useEffect(() => {
-    const bridge = window.__LITEYUKI_DESKTOP__;
-    if (!bridge) {
-      return;
+    let unsubscribe: (() => void) | null = null;
+
+    const attachBridge = () => {
+      const bridge = window.__LITEYUKI_DESKTOP__;
+      if (!bridge || unsubscribe) {
+        return false;
+      }
+
+      unsubscribe = bridge.onCloseRequested((payload) => {
+        setCloseToTrayDefault(payload.closeToTrayDefault);
+        setRemember(false);
+        setSubmitting(null);
+        setIsOpen(true);
+      });
+      return true;
+    };
+
+    if (attachBridge()) {
+      return () => {
+        unsubscribe?.();
+      };
     }
 
-    return bridge.onCloseRequested((payload) => {
-      setCloseToTrayDefault(payload.closeToTrayDefault);
-      setRemember(false);
-      setSubmitting(null);
-      setIsOpen(true);
-    });
+    const timer = window.setInterval(() => {
+      if (attachBridge()) {
+        window.clearInterval(timer);
+      }
+    }, 250);
+
+    return () => {
+      window.clearInterval(timer);
+      unsubscribe?.();
+    };
   }, []);
 
   const closePrompt = async () => {

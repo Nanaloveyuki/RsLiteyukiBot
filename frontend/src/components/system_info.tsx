@@ -194,7 +194,7 @@ const NewVersionTip = (props: NewVersionTipProps) => {
   });
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>('idle');
 
-  // 使用 SemVer 规范比较版本号
+  // 使用项目版本规则比较版本号: A.B.C-cNNNN[-nickname]
   if (error || !latestVersion || !currentVersion || !hasNewVersion(currentVersion, latestVersion)) {
     return null;
   }
@@ -373,7 +373,7 @@ const VersionSelectDialogContent: React.FC<VersionSelectDialogProps> = ({
   // 版本列表已在后端过滤，直接使用
   const filteredVersions = (releasesData?.versions || []) as VersionInfo[];
 
-  // 检查是否是降级（使用语义化版本比较）
+  // 检查是否是降级（使用项目版本规则比较）
   const isDowngrade = useCallback((targetTag: string): boolean => {
     if (!currentVersion || !targetTag) return false;
     // Action 版本不算降级
