@@ -27,7 +27,7 @@ import QQManager from '@/controllers/qq_manager';
 import WebUIManager from '@/controllers/webui_manager';
 
 function VersionInfo () {
-  const { data, loading, error } = useRequest(WebUIManager.GetNapCatVersion);
+  const { data, loading, error } = useRequest(WebUIManager.getAppVersion);
 
   return (
     <div className='flex items-center gap-2'>
@@ -49,8 +49,8 @@ function VersionInfo () {
   );
 }
 
-function NapCatFileHash () {
-  const { data: hashData, loading: hashLoading, error: hashError } = useRequest(WebUIManager.GetNapCatFileHash);
+function AppFileHash () {
+  const { data: hashData, loading: hashLoading, error: hashError } = useRequest(WebUIManager.getAppFileHash);
   const { data: loginList, loading: listLoading, error: listError } = useRequest(QQManager.getQQQuickLoginListNew);
   const { data: loginData, loading: loginLoading, error: loginError } = useRequest(QQManager.getQQLoginInfo);
 
@@ -262,7 +262,7 @@ export default function AboutPage () {
             </CardHeader>
             <CardBody className='py-4 space-y-4'>
               {/* 预留：后续如果还需要展示入群密码，可直接恢复此模块 */}
-              {/* <NapCatFileHash /> */}
+              {/* <AppFileHash /> */}
               <div className='flex flex-col gap-2'>
                 {links.map((link, idx) => (
                   <Link

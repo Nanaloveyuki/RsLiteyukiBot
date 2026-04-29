@@ -114,7 +114,7 @@ export const siteConfig = {
     },
   ] as MenuItem[],
   links: {
-    github: 'https://github.com/LiteyukiStudio/RsLiteyukiBot',
+    github: 'https://github.com/Nanaloveyuki/RsLiteyukiBot',
     docs: 'https://bot.liteyuki.icu/',
   },
 };

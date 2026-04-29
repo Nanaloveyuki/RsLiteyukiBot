@@ -190,8 +190,8 @@ export default class QQManager {
     await serverRequest.post<ServerResponse<null>>('/QQLogin/ResetDeviceID');
   }
 
-  public static async restartNapCat () {
-    await serverRequest.post<ServerResponse<null>>('/QQLogin/RestartNapCat');
+  public static async restartAppRuntime () {
+    await serverRequest.post<ServerResponse<null>>('/AppRuntime/Restart');
   }
 
   public static async getDeviceGUID () {
@@ -264,35 +264,35 @@ export default class QQManager {
   }
 
   // ============================================================
-  // NapCat 配置管理
+  // 运行时配置管理
   // ============================================================
 
-  public static async getNapCatConfig () {
+  public static async getRuntimeConfig () {
     const { data } = await serverRequest.get<ServerResponse<NapCatConfig>>(
-      '/NapCatConfig/GetConfig'
+      '/RuntimeConfig/GetConfig'
     );
     return data.data;
   }
 
-  public static async setNapCatConfig (config: Partial<NapCatConfig>) {
+  public static async setRuntimeConfig (config: Partial<NapCatConfig>) {
     await serverRequest.post<ServerResponse<null>>(
-      '/NapCatConfig/SetConfig',
+      '/RuntimeConfig/SetConfig',
       config
     );
   }
 
-  // per-uin 配置（napcat_{uin}.json）
+  // 分账号运行时配置（napcat_{uin}.json）
 
-  public static async getNapCatUinConfig () {
+  public static async getAccountRuntimeConfig () {
     const { data } = await serverRequest.get<ServerResponse<NapCatConfig>>(
-      '/NapCatConfig/GetUinConfig'
+      '/RuntimeConfig/GetAccountConfig'
     );
     return data.data;
   }
 
-  public static async setNapCatUinConfig (config: Partial<NapCatConfig>) {
+  public static async setAccountRuntimeConfig (config: Partial<NapCatConfig>) {
     await serverRequest.post<ServerResponse<null>>(
-      '/NapCatConfig/SetUinConfig',
+      '/RuntimeConfig/SetAccountConfig',
       config
     );
   }

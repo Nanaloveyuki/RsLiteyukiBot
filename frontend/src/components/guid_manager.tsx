@@ -319,7 +319,7 @@ const GUIDManager: React.FC<GUIDManagerProps> = ({ showRestart = true, compact =
       onConfirm: async () => {
         setRestarting(true);
         try {
-          await QQManager.restartNapCat();
+          await QQManager.restartAppRuntime();
           toast.success('重启指令已发送');
         } catch (error) {
           const msg = (error as Error).message;

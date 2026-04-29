@@ -30,7 +30,7 @@ pub(super) struct MirrorTestResult {
     pub(super) error: Option<String>,
 }
 
-fn mirrored_url(original_url: &str, mirror: &str) -> String {
+pub(super) fn resolve_mirrored_url(original_url: &str, mirror: &str) -> String {
     let mirror = mirror.trim().trim_end_matches('/');
     if mirror.is_empty() {
         return original_url.to_string();
@@ -66,14 +66,14 @@ pub(super) async fn test_mirror_candidate(
 ) -> MirrorTestResult {
     let (original_url, accept) = if test_type.eq_ignore_ascii_case("raw") {
         (
-            "https://raw.githubusercontent.com/LiteyukiStudio/RsLiteyukiBot/main/README.md",
+            "https://raw.githubusercontent.com/Nanaloveyuki/RsLiteyukiBot/main/README.md",
             Some("text/plain"),
         )
     } else {
-        ("https://github.com/LiteyukiStudio/RsLiteyukiBot", None)
+        ("https://github.com/Nanaloveyuki/RsLiteyukiBot", None)
     };
     let request_url = mirror_url
-        .map(|mirror| mirrored_url(original_url, mirror))
+        .map(|mirror| resolve_mirrored_url(original_url, mirror))
         .unwrap_or_else(|| original_url.to_string());
     let started_at = std::time::Instant::now();
 

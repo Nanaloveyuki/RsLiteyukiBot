@@ -30,7 +30,7 @@ const BypassConfigCard = () => {
   const loadConfig = async (showTip = false) => {
     try {
       setLoading(true);
-      const config = await QQManager.getNapCatConfig();
+      const config = await QQManager.getRuntimeConfig();
       const bypass = config.bypass ?? {} as Partial<BypassOptions>;
       setValue('hook', bypass.hook ?? false);
       setValue('window', bypass.window ?? false);
@@ -51,7 +51,7 @@ const BypassConfigCard = () => {
   const onSubmit = handleSubmit(async (data) => {
     try {
       const { o3HookMode, ...bypass } = data;
-      await QQManager.setNapCatConfig({ bypass, o3HookMode: o3HookMode ? 1 : 0 });
+      await QQManager.setRuntimeConfig({ bypass, o3HookMode: o3HookMode ? 1 : 0 });
       toast.success('保存成功，重启后生效');
     } catch (error) {
       const msg = (error as Error).message;

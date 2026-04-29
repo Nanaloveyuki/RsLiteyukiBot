@@ -40,7 +40,7 @@ function displayData (data: number, loading: boolean, error?: Error) {
 
 export default function LiteyukiBotRepoInfo () {
   const repoParams = {
-    owner: 'LiteyukiStudio',
+    owner: 'Nanaloveyuki',
     repo: 'RsLiteyukiBot',
   };
 
@@ -78,34 +78,34 @@ export default function LiteyukiBotRepoInfo () {
       onAction={(key: React.Key) => {
         switch (key) {
           case 'releases':
-            openUrl('https://github.com/LiteyukiStudio/RsLiteyukiBot/releases', true);
+            openUrl('https://github.com/Nanaloveyuki/RsLiteyukiBot/releases', true);
             break;
           case 'contributors':
             openUrl(
-              'https://github.com/LiteyukiStudio/RsLiteyukiBot/graphs/contributors',
+              'https://github.com/Nanaloveyuki/RsLiteyukiBot/graphs/contributors',
               true
             );
             break;
           case 'license':
             openUrl(
-              'https://github.com/LiteyukiStudio/RsLiteyukiBot/blob/main/LICENSE',
+              'https://github.com/Nanaloveyuki/RsLiteyukiBot/blob/main/LICENSE',
               true
             );
             break;
           case 'watchers':
-            openUrl('https://github.com/LiteyukiStudio/RsLiteyukiBot/watchers', true);
+            openUrl('https://github.com/Nanaloveyuki/RsLiteyukiBot/watchers', true);
             break;
           case 'star':
-            openUrl('https://github.com/LiteyukiStudio/RsLiteyukiBot/stargazers', true);
+            openUrl('https://github.com/Nanaloveyuki/RsLiteyukiBot/stargazers', true);
             break;
           case 'issues':
-            openUrl('https://github.com/LiteyukiStudio/RsLiteyukiBot/issues', true);
+            openUrl('https://github.com/Nanaloveyuki/RsLiteyukiBot/issues', true);
             break;
           case 'pull_requests':
-            openUrl('https://github.com/LiteyukiStudio/RsLiteyukiBot/pulls', true);
+            openUrl('https://github.com/Nanaloveyuki/RsLiteyukiBot/pulls', true);
             break;
           default:
-            openUrl('https://github.com/LiteyukiStudio/RsLiteyukiBot', true);
+            openUrl('https://github.com/Nanaloveyuki/RsLiteyukiBot', true);
         }
       }}
     >
