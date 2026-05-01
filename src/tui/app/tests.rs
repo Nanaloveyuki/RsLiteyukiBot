@@ -1339,9 +1339,10 @@ fn resume_size_limit_drops_frontmost_old_resume() {
         .sessions
         .push(resume_session_with_log("old-2", "b".repeat(512)));
 
+    app.sync_active_resume_snapshot();
+
     let mut store_after_one_trim = app.resume_store.clone();
-    store_after_one_trim.sessions.remove(1);
-    store_after_one_trim.update_session(&active_uid, &app.logs, &app.command_history);
+    store_after_one_trim.sessions.remove(0);
     let max_size_bytes = store_after_one_trim.persisted_size_bytes();
     assert!(app.resume_store.persisted_size_bytes() > max_size_bytes);
 

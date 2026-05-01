@@ -42,6 +42,7 @@ pub(super) fn route_webui_config_api(
             .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
             .or_else(|| body.get("config").cloned())
             .unwrap_or(Value::Null);
+        let config_value = normalize_onebot_config_payload(config_value);
         let config = match serde_json::from_value::<OneBotConfig>(config_value) {
             Ok(config) => config,
             Err(err) => {
@@ -461,6 +462,104 @@ fn merge_json_objects(base: Value, patch: Value) -> Value {
             Value::Object(base_map)
         }
         (_, patch_value) => patch_value,
+    }
+}
+
+fn normalize_onebot_config_payload(value: Value) -> Value {
+    match value {
+        Value::Object(mut map) => {
+            if let Some(network) = map.remove("network") {
+                map.insert(
+                    "network".to_string(),
+                    normalize_onebot_network_payload(network),
+                );
+            }
+            if let Some(timeout) = map.remove("timeout") {
+                map.insert(
+                    "timeout".to_string(),
+                    normalize_onebot_timeout_payload(timeout),
+                );
+            }
+            Value::Object(map)
+        }
+        other => other,
+    }
+}
+
+fn normalize_onebot_network_payload(value: Value) -> Value {
+    match value {
+        Value::Object(mut map) => {
+            normalize_object_array_integer_fields(&mut map, "httpServers", &["port"]);
+            normalize_object_array_integer_fields(
+                &mut map,
+                "websocketServers",
+                &["port", "heartInterval"],
+            );
+            normalize_object_array_integer_fields(
+                &mut map,
+                "websocketClients",
+                &["reconnectInterval", "heartInterval"],
+            );
+            Value::Object(map)
+        }
+        other => other,
+    }
+}
+
+fn normalize_onebot_timeout_payload(value: Value) -> Value {
+    match value {
+        Value::Object(mut map) => {
+            normalize_integer_fields(
+                &mut map,
+                &[
+                    "baseTimeout",
+                    "uploadSpeedKBps",
+                    "downloadSpeedKBps",
+                    "maxTimeout",
+                ],
+            );
+            Value::Object(map)
+        }
+        other => other,
+    }
+}
+
+fn normalize_object_array_integer_fields(
+    map: &mut serde_json::Map<String, Value>,
+    key: &str,
+    fields: &[&str],
+) {
+    let Some(Value::Array(items)) = map.get_mut(key) else {
+        return;
+    };
+
+    for item in items {
+        let Value::Object(item_map) = item else {
+            continue;
+        };
+        normalize_integer_fields(item_map, fields);
+    }
+}
+
+fn normalize_integer_fields(map: &mut serde_json::Map<String, Value>, fields: &[&str]) {
+    for field in fields {
+        let Some(value) = map.get_mut(*field) else {
+            continue;
+        };
+        normalize_integer_value(value);
+    }
+}
+
+fn normalize_integer_value(value: &mut Value) {
+    let Some(raw) = value.as_str() else {
+        return;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if let Ok(parsed) = trimmed.parse::<u64>() {
+        *value = Value::Number(parsed.into());
     }
 }
 

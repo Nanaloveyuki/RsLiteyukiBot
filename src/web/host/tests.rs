@@ -2341,6 +2341,77 @@ fn ob11_config_route_returns_napcat_compatible_shape() {
 }
 
 #[test]
+fn ob11_config_route_accepts_numeric_strings_in_set_config_payload() {
+    let _lock = env_lock_guard();
+    let root = std::env::temp_dir().join(format!(
+        "rsliteyuki-ob11-set-config-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ));
+    fs::create_dir_all(root.join("config").join("webui"))
+        .expect("webui config dir should be created");
+    let _cwd = EnvVarGuard::set("LY_CONFIG_PATH", root.join("config.yaml").as_path());
+    let previous_dir = std::env::current_dir().expect("current dir should exist");
+    std::env::set_current_dir(&root).expect("current dir should switch to temp root");
+
+    let server = test_server();
+    let payload = serde_json::json!({
+        "config": {
+            "network": {
+                "websocketServers": [
+                    {
+                        "name": "liteyuki-agent",
+                        "enable": true,
+                        "debug": false,
+                        "host": "127.0.0.1",
+                        "port": "3001",
+                        "messagePostFormat": "Array",
+                        "reportSelfMessage": true,
+                        "enableForcePushEvent": true,
+                        "heartInterval": "15000",
+                        "token": "yuki"
+                    }
+                ]
+            },
+            "timeout": {
+                "baseTimeout": "10000",
+                "uploadSpeedKBps": "1024",
+                "downloadSpeedKBps": "1024",
+                "maxTimeout": "60000"
+            }
+        }
+    });
+    let request = format!(
+        "POST /api/OB11Config/SetConfig HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}\r\n\r\n{}",
+        payload.to_string().len(),
+        local_auth_header(&server),
+        payload
+    );
+
+    let response = server.route_http_request(request.as_bytes(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let (headers, body) = split_response(response);
+    let body: serde_json::Value =
+        serde_json::from_slice(&body).expect("ob11 set config body should be valid json");
+
+    assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert_eq!(body["code"], 0);
+
+    let persisted = load_onebot_config();
+    assert_eq!(persisted.network.websocket_servers.len(), 1);
+    assert_eq!(persisted.network.websocket_servers[0].port, 3001);
+    assert_eq!(
+        persisted.network.websocket_servers[0].heart_interval,
+        15_000
+    );
+    assert_eq!(persisted.timeout.base_timeout, 10_000);
+
+    std::env::set_current_dir(previous_dir).expect("current dir should restore");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn i18n_route_returns_current_catalog_snapshot() {
     let server = test_server();
     let response = server.route_http_request(
