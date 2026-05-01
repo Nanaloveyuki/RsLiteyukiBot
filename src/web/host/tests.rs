@@ -1105,6 +1105,8 @@ fn flow_local_agent_routes_load_save_and_report_status() {
     let initial_response = route_json_api(&server, "GET", "/api/FlowLocalAgent/GetConfig", None);
     assert_eq!(initial_response["code"], 0);
     assert_eq!(initial_response["data"]["enabled"], false);
+    assert_eq!(initial_response["data"]["hasToken"], false);
+    assert_eq!(initial_response["data"]["tokenPreview"], "");
     assert_eq!(initial_response["data"]["approvalPolicy"], "prompt");
     assert_eq!(initial_response["data"]["autoConnect"], true);
     assert!(initial_response["data"]["effectiveDeviceId"]
@@ -1122,7 +1124,6 @@ fn flow_local_agent_routes_load_save_and_report_status() {
         Some(&serde_json::json!({
             "enabled": true,
             "baseUrl": "https://flow.liteyuki.org/",
-            "token": "lys_test",
             "deviceId": "configured-device",
             "deviceName": "Yuki Box",
             "autoConnect": false,
@@ -1135,7 +1136,8 @@ fn flow_local_agent_routes_load_save_and_report_status() {
     assert_eq!(save_response["code"], 0);
     assert_eq!(save_response["data"]["enabled"], true);
     assert_eq!(save_response["data"]["baseUrl"], "https://flow.liteyuki.org");
-    assert_eq!(save_response["data"]["token"], "lys_test");
+    assert_eq!(save_response["data"]["hasToken"], false);
+    assert_eq!(save_response["data"]["tokenPreview"], "");
     assert_eq!(save_response["data"]["deviceId"], "configured-device");
     assert_eq!(save_response["data"]["effectiveDeviceId"], "configured-device");
     assert_eq!(save_response["data"]["deviceName"], "Yuki Box");
@@ -1154,6 +1156,40 @@ fn flow_local_agent_routes_load_save_and_report_status() {
     assert_eq!(status_response["data"]["reconnectAllowed"], true);
     assert_eq!(status_response["data"]["lastError"], "connect failed");
 
+    let token_response = route_json_api(
+        &server,
+        "POST",
+        "/api/FlowLocalAgent/SetToken",
+        Some(&serde_json::json!({
+            "token": "lys_test"
+        })),
+    );
+    assert_eq!(token_response["code"], 0);
+    assert_eq!(token_response["data"]["hasToken"], true);
+    assert_eq!(token_response["data"]["tokenPreview"], "lys_...");
+
+    let connect_now_response = route_json_api(
+        &server,
+        "POST",
+        "/api/FlowLocalAgent/ConnectNow",
+        Some(&serde_json::json!({})),
+    );
+    assert_eq!(connect_now_response["code"], -1);
+    assert!(connect_now_response["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("runtime host is unavailable")));
+
+    let disconnect_now_response = route_json_api(
+        &server,
+        "POST",
+        "/api/FlowLocalAgent/DisconnectNow",
+        Some(&serde_json::json!({})),
+    );
+    assert_eq!(disconnect_now_response["code"], -1);
+    assert!(disconnect_now_response["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("runtime host is unavailable")));
+
     let persisted = fs::read_to_string(env.config_path()).expect("flow local agent config should persist");
     assert!(persisted.contains("flow_local_agent:"));
     assert!(persisted.contains("enabled: true"));
@@ -1165,6 +1201,42 @@ fn flow_local_agent_routes_load_save_and_report_status() {
     assert!(persisted.contains("workspace_root: './workspace'"));
     assert!(persisted.contains("command_timeout_seconds: 45"));
     assert!(persisted.contains("approval_policy: 'prompt'"));
+}
+
+#[test]
+fn flow_local_agent_logs_route_returns_filtered_buffered_entries() {
+    let server = test_server();
+    let unique = format!(
+        "flow-local-agent-log-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    );
+    crate::emit_console_log(
+        crate::LogLevel::Warn,
+        "flow.local_agent",
+        unique.as_str(),
+    );
+    crate::emit_console_log(
+        crate::LogLevel::Info,
+        "flow.other",
+        "should-not-appear",
+    );
+
+    let response = route_json_api(&server, "GET", "/api/FlowLocalAgent/GetLogs", None);
+
+    assert_eq!(response["code"], 0);
+    assert!(response["data"]["entries"]
+        .as_array()
+        .is_some_and(|entries| entries.iter().all(|entry| {
+            entry["module"]
+                .as_str()
+                .is_some_and(|module| module == "flow.local_agent" || module.starts_with("flow.local_agent."))
+        })));
+    assert!(response["data"]["entries"]
+        .as_array()
+        .is_some_and(|entries| entries.iter().any(|entry| entry["message"] == unique)));
 }
 
 #[test]
