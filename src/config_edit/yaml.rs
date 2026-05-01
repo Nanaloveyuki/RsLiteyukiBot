@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::app_config::{LlmManagedModelConfig, LlmManagedProviderConfig};
 
+use super::flow_local_agent::FlowLocalAgentConfigPatch;
 use super::llm::LlmConfigPatch;
 use super::shared::{
     append_blank_line_if_needed, detect_newline, escape_yaml_single_quoted, join_lines,
@@ -144,6 +145,114 @@ pub(crate) fn update_llm_document(content: &str, patch: &LlmConfigPatch) -> Stri
             section_indent,
             "providers",
             render_yaml_managed_providers(section_indent + 2, "providers", providers),
+        );
+    }
+
+    document.finish()
+}
+
+#[allow(dead_code)]
+pub(crate) fn update_flow_local_agent_document(
+    content: &str,
+    patch: &FlowLocalAgentConfigPatch,
+) -> String {
+    let mut document = YamlDocument::new(content);
+    let (section_start, section_indent) = document.ensure_section("flow_local_agent");
+
+    if let Some(enabled) = patch.enabled {
+        upsert_yaml_scalar(
+            &mut document.lines,
+            section_start,
+            section_indent,
+            "enabled",
+            &enabled.to_string(),
+        );
+    }
+    if let Some(base_url) = patch.base_url.as_deref() {
+        let escaped = escape_yaml_single_quoted(base_url);
+        upsert_yaml_scalar(
+            &mut document.lines,
+            section_start,
+            section_indent,
+            "base_url",
+            &format!("'{escaped}'"),
+        );
+    }
+    if let Some(token) = patch.token.as_deref() {
+        let escaped = escape_yaml_single_quoted(token);
+        upsert_yaml_scalar(
+            &mut document.lines,
+            section_start,
+            section_indent,
+            "token",
+            &format!("'{escaped}'"),
+        );
+    }
+    if let Some(device_id) = patch.device_id.as_deref() {
+        let escaped = escape_yaml_single_quoted(device_id);
+        upsert_yaml_scalar(
+            &mut document.lines,
+            section_start,
+            section_indent,
+            "device_id",
+            &format!("'{escaped}'"),
+        );
+    }
+    if let Some(device_name) = patch.device_name.as_deref() {
+        let escaped = escape_yaml_single_quoted(device_name);
+        upsert_yaml_scalar(
+            &mut document.lines,
+            section_start,
+            section_indent,
+            "device_name",
+            &format!("'{escaped}'"),
+        );
+    }
+    if let Some(auto_connect) = patch.auto_connect {
+        upsert_yaml_scalar(
+            &mut document.lines,
+            section_start,
+            section_indent,
+            "auto_connect",
+            &auto_connect.to_string(),
+        );
+    }
+    if let Some(allowed_tools) = patch.allowed_tools.as_ref() {
+        upsert_yaml_list(
+            &mut document.lines,
+            section_start,
+            section_indent,
+            "allowed_tools",
+            allowed_tools,
+        );
+    }
+    if let Some(workspace_root) = patch.workspace_root.as_deref() {
+        let escaped = escape_yaml_single_quoted(workspace_root);
+        upsert_yaml_scalar(
+            &mut document.lines,
+            section_start,
+            section_indent,
+            "workspace_root",
+            &format!("'{escaped}'"),
+        );
+    }
+    if let Some(command_timeout_seconds) = patch.command_timeout_seconds {
+        upsert_yaml_scalar(
+            &mut document.lines,
+            section_start,
+            section_indent,
+            "command_timeout_seconds",
+            &command_timeout_seconds.to_string(),
+        );
+    }
+    if let Some(approval_policy) = patch.approval_policy.as_deref() {
+        let escaped = escape_yaml_single_quoted(approval_policy);
+        upsert_yaml_scalar(
+            &mut document.lines,
+            section_start,
+            section_indent,
+            "approval_policy",
+            &format!("'{escaped}'"),
         );
     }
 

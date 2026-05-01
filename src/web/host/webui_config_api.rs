@@ -1,4 +1,30 @@
 use super::*;
+use crate::config_edit::FlowLocalAgentConfigPatch;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowLocalAgentWebConfigPayload {
+    enabled: bool,
+    base_url: String,
+    token: String,
+    device_id: String,
+    device_name: String,
+    auto_connect: bool,
+    allowed_tools: Vec<String>,
+    workspace_root: String,
+    command_timeout_seconds: u64,
+    approval_policy: String,
+    effective_device_id: String,
+    config_path: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowLocalAgentStatusPayload {
+    connected: bool,
+    reconnect_allowed: bool,
+    last_error: Option<String>,
+}
 
 pub(super) fn route_webui_config_api(
     service: &WebHostService,
@@ -126,6 +152,31 @@ pub(super) fn route_webui_config_api(
     if api_path == "/WebUIConfig/GetConfig" {
         let config = load_webui_server_config(service.bind_addr.port());
         let body = napcat_ok(&config);
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/FlowLocalAgent/GetConfig" {
+        let body = match load_flow_local_agent_web_config_payload() {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/FlowLocalAgent/SetConfig" {
+        if let Some(response) = reject_non_post_method(method, "FlowLocalAgent/SetConfig", is_head)
+        {
+            return Some(response);
+        }
+        let body = match save_flow_local_agent_web_config(request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/FlowLocalAgent/GetStatus" {
+        let body = napcat_ok(&flow_local_agent_status_payload(service));
         return Some(napcat_response(body, is_head));
     }
 
@@ -355,6 +406,104 @@ fn parse_json_object_body(
         .ok_or_else(|| format!("{route_name} payload must be a JSON object"))
 }
 
+fn load_flow_local_agent_web_config_payload() -> Result<FlowLocalAgentWebConfigPayload, String> {
+    crate::app_config::ensure_default_config_files().map_err(|err| err.to_string())?;
+    let (doc, _) = crate::app_config::load_app_config_with_warnings(false);
+    let runtime = crate::app_config::resolve_flow_local_agent_config(&doc);
+    let effective_device_id = crate::flow_local_agent::device::normalize_runtime_config(runtime.clone())
+        .0
+        .device_id
+        .unwrap_or_default();
+    let path = crate::app_config::resolve_app_config_path()
+        .unwrap_or_else(crate::utils::config_path::resolve_default_app_config_path);
+
+    Ok(FlowLocalAgentWebConfigPayload {
+        enabled: runtime.enabled,
+        base_url: runtime.base_url.unwrap_or_default(),
+        token: runtime.token.unwrap_or_default(),
+        device_id: doc
+            .flow_local_agent
+            .as_ref()
+            .and_then(|section| section.device_id.clone())
+            .unwrap_or_default(),
+        device_name: runtime.device_name.unwrap_or_default(),
+        auto_connect: runtime.auto_connect,
+        allowed_tools: runtime.allowed_tools,
+        workspace_root: runtime
+            .workspace_root
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        command_timeout_seconds: runtime.command_timeout_ms.saturating_div(1000).max(1),
+        approval_policy: runtime.approval_policy,
+        effective_device_id,
+        config_path: path.display().to_string(),
+    })
+}
+
+fn save_flow_local_agent_web_config(request: &[u8]) -> Result<Value, String> {
+    let body = parse_json_object_body(request, "FlowLocalAgent/SetConfig")?;
+    let patch = FlowLocalAgentConfigPatch {
+        enabled: body.get("enabled").and_then(Value::as_bool),
+        base_url: body
+            .get("baseUrl")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        token: body
+            .get("token")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        device_id: body
+            .get("deviceId")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        device_name: body
+            .get("deviceName")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        auto_connect: body.get("autoConnect").and_then(Value::as_bool),
+        allowed_tools: body.get("allowedTools").and_then(|value| {
+            value.as_array().map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+        }),
+        workspace_root: body
+            .get("workspaceRoot")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        command_timeout_seconds: body
+            .get("commandTimeoutSeconds")
+            .and_then(value_as_u64_or_numeric_string),
+        approval_policy: body
+            .get("approvalPolicy")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    };
+    let path = active_app_config_path()?;
+    crate::config_edit::persist_flow_local_agent_config(path.as_path(), &patch)?;
+    let payload = load_flow_local_agent_web_config_payload()?;
+    serde_json::to_value(payload).map_err(|err| format!("failed to serialize flow local agent config: {err}"))
+}
+
+fn flow_local_agent_status_payload(service: &WebHostService) -> FlowLocalAgentStatusPayload {
+    let snapshot = service
+        .flow_local_agent_state
+        .as_ref()
+        .map(crate::flow_local_agent::FlowLocalAgentRuntimeState::snapshot);
+
+    FlowLocalAgentStatusPayload {
+        connected: snapshot.as_ref().map(|value| value.connected).unwrap_or(false),
+        reconnect_allowed: snapshot
+            .as_ref()
+            .map(|value| value.reconnect_allowed)
+            .unwrap_or(false),
+        last_error: snapshot.and_then(|value| value.last_error),
+    }
+}
+
 fn normalize_webui_data_url(raw: &str) -> Option<String> {
     let value = raw.trim();
     if value.is_empty() {
@@ -420,6 +569,7 @@ fn has_known_app_config_sections(doc: &crate::app_config::AppConfigDoc) -> bool 
         || doc.tui.is_some()
         || doc.i18n.is_some()
         || doc.llm.is_some()
+        || doc.flow_local_agent.is_some()
         || doc.commands.is_some()
         || doc.plugins.is_some()
         || doc.desktop.is_some()
@@ -561,6 +711,14 @@ fn normalize_integer_value(value: &mut Value) {
     if let Ok(parsed) = trimmed.parse::<u64>() {
         *value = Value::Number(parsed.into());
     }
+}
+
+fn value_as_u64_or_numeric_string(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_str()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+    })
 }
 
 #[cfg(test)]

@@ -209,3 +209,24 @@ interface ActiveAppConfigState {
   configPath: string;
   content: string;
 }
+
+interface FlowLocalAgentConfig {
+  enabled: boolean;
+  baseUrl: string;
+  token: string;
+  deviceId: string;
+  deviceName: string;
+  autoConnect: boolean;
+  allowedTools: string[];
+  workspaceRoot: string;
+  commandTimeoutSeconds: number;
+  approvalPolicy: string;
+  effectiveDeviceId: string;
+  configPath: string;
+}
+
+interface FlowLocalAgentStatus {
+  connected: boolean;
+  reconnectAllowed: boolean;
+  lastError: string | null;
+}
