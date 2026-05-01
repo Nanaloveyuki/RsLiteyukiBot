@@ -301,7 +301,7 @@ impl FlowLocalAgentClient {
                 request.id, request.tool
             ),
         );
-        let response = match self.execute_request(request) {
+        let response = match self.execute_request(request).await {
             Ok(result) => FlowLocalAgentToolResponse {
                 id: request_id.clone(),
                 result: Some(result),
@@ -322,12 +322,12 @@ impl FlowLocalAgentClient {
         Ok(())
     }
 
-    fn execute_request(&self, request: FlowLocalAgentRequest) -> Result<String, String> {
+    async fn execute_request(&self, request: FlowLocalAgentRequest) -> Result<String, String> {
         let executor = self
             .tool_executor
             .as_ref()
             .ok_or_else(|| "flow local agent tool executor is not available".to_string())?;
-        executor.execute(&request)
+        executor.execute(&request).await
     }
 }
 

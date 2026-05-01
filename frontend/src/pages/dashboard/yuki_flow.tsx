@@ -10,7 +10,6 @@ import toast from 'react-hot-toast';
 import {
   LuActivity,
   LuBot,
-  LuBug,
   LuCopy,
   LuFileText,
   LuInfo,
@@ -384,7 +383,7 @@ export default function YukiFlowPage () {
             <div>
               <h1 className='text-2xl font-bold'>Yuki Flow</h1>
               <p className='text-sm text-default-500'>
-                管理 flow_local_agent 的连接参数、登录凭据、只读工具范围与运行状态。
+                管理 Yuki Flow 的连接参数、登录方式、可用工具与运行状态。
               </p>
             </div>
           </div>
@@ -516,7 +515,7 @@ export default function YukiFlowPage () {
                           const value = Array.from(keys)[0]?.toString() || 'prompt';
                           field.onChange(value);
                         }}
-                        description='当前阶段主要用于显式表达策略，后续沙盒模式会复用。'
+                        description='执行需要确认的操作时，当前会使用提示确认。'
                         classNames={{
                           trigger:
                             'bg-default-100/50 dark:bg-white/5 backdrop-blur-md border border-transparent hover:bg-default-200/50 dark:hover:bg-white/10 transition-all shadow-sm data-[hover=true]:border-default-300',
@@ -552,9 +551,7 @@ export default function YukiFlowPage () {
                   <div className='flex items-center justify-between gap-3'>
                     <div>
                       <div className='text-sm font-semibold text-default-700 dark:text-default-100'>当前 Token 状态</div>
-                      <div className='text-xs text-default-500'>
-                        前端不再读取明文 Token，只显示后端保存状态。
-                      </div>
+                      <div className='text-xs text-default-500'>用于连接 Flow 服务的登录状态。</div>
                     </div>
                     <Chip color={configData?.hasToken ? 'success' : 'default'} variant='flat'>
                       {configData?.hasToken ? '已保存' : '未配置'}
@@ -569,7 +566,7 @@ export default function YukiFlowPage () {
                   <div className='mb-3'>
                     <div className='text-sm font-semibold text-default-700 dark:text-default-100'>设备码登录</div>
                     <div className='text-xs text-default-500'>
-                      推荐方式。使用 Flow 的设备码授权获取 local-agent 专用 Token，并由后端直接保存到配置。
+                      推荐方式。生成验证码后，在 Flow 页面完成授权即可。
                     </div>
                   </div>
                   <div className='flex flex-wrap gap-2'>
@@ -644,7 +641,7 @@ export default function YukiFlowPage () {
                   <div className='mb-3'>
                     <div className='text-sm font-semibold text-default-700 dark:text-default-100'>手工写入 Token</div>
                     <div className='text-xs text-default-500'>
-                      仅作为高级 fallback。建议优先使用设备码登录，而不是手工管理普通 API Token。
+                      适用于已经有可用 Token 的情况。建议优先使用设备码登录。
                     </div>
                   </div>
                   <div className='grid gap-3'>
@@ -751,9 +748,9 @@ export default function YukiFlowPage () {
                     <span className='text-sm font-semibold'>连接机制说明</span>
                   </div>
                   <div className='space-y-2 text-sm text-default-600 dark:text-default-300'>
-                    <div>启动后会按当前配置主动向 `baseUrl/ws/local-agent` 发起出站 WebSocket 连接。</div>
-                    <div>连接失败会按 3 秒间隔重试；心跳只在连接建立后生效，不负责断线重拨。</div>
-                    <div>保存配置、更新 Token、设备码授权成功、点击“立即连接”都会按最新配置重启连接；点击“断开连接”会停止当前后台任务，直到下次手动重连。</div>
+                    <div>保存配置后会立即应用，并尝试按最新设置建立连接。</div>
+                    <div>连接失败时会自动重试，你也可以随时手动发起连接。</div>
+                    <div>点击“断开连接”会停止当前连接，直到你再次手动连接或重新保存配置。</div>
                   </div>
                 </div>
               </div>
@@ -762,10 +759,7 @@ export default function YukiFlowPage () {
             <div className='rounded-2xl border border-white/20 bg-white/55 p-4 backdrop-blur-xl dark:border-white/10 dark:bg-black/35'>
               <div className='mb-3 flex items-center gap-2 text-default-700 dark:text-default-100'>
                 <LuWrench />
-                <span className='text-sm font-semibold'>工具范围</span>
-              </div>
-              <div className='mb-3 text-sm text-default-500'>
-                当前共享层优先保障 workspace 内的只读能力；本地 agent 主链路暂不直接接入，后续会在沙盒模式下复用同一边界。
+                <span className='text-sm font-semibold'>可用工具</span>
               </div>
               <div className='mb-3 flex items-center justify-between rounded-xl border border-white/20 bg-white/40 p-3 dark:border-white/10 dark:bg-white/5'>
                 <div>
@@ -805,7 +799,7 @@ export default function YukiFlowPage () {
 
               <div className='mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between'>
                 <div className='text-sm text-default-500'>
-                  仅显示 `flow.local_agent` 模块的缓冲日志。若要看到 `debug`，需要把后端全局日志级别调到 `debug`。
+                  显示当前连接与工具执行相关的最近日志。需要更详细日志时，请将后端日志级别调整为 debug。
                 </div>
                 <div className='flex flex-wrap items-center gap-2'>
                   <div className='min-w-[14rem]'>
@@ -830,15 +824,15 @@ export default function YukiFlowPage () {
                   </div>
                 </div>
                 <div className='rounded-xl border border-white/20 bg-white/40 p-3 dark:border-white/10 dark:bg-white/5'>
-                  <div className='text-xs text-default-400'>日志来源</div>
-                  <div className='mt-1 text-sm font-semibold text-default-700 dark:text-default-100'>
-                    flow.local_agent
-                  </div>
-                </div>
-                <div className='rounded-xl border border-white/20 bg-white/40 p-3 dark:border-white/10 dark:bg-white/5'>
                   <div className='text-xs text-default-400'>刷新方式</div>
                   <div className='mt-1 text-sm font-semibold text-default-700 dark:text-default-100'>
                     每 3 秒轮询
+                  </div>
+                </div>
+                <div className='rounded-xl border border-white/20 bg-white/40 p-3 dark:border-white/10 dark:bg-white/5'>
+                  <div className='text-xs text-default-400'>日志范围</div>
+                  <div className='mt-1 text-sm font-semibold text-default-700 dark:text-default-100'>
+                    当前连接会话
                   </div>
                 </div>
               </div>
@@ -860,9 +854,6 @@ export default function YukiFlowPage () {
                       <Chip size='sm' variant='flat' color={logLevelChipColor(entry.normalizedLevel)}>
                         {entry.normalizedLevel.toUpperCase()}
                       </Chip>
-                      <Chip size='sm' variant='flat'>
-                        {entry.module}
-                      </Chip>
                       <span className='text-xs text-default-400'>{entry.timestamp}</span>
                     </div>
                     <div className='break-words text-sm text-default-700 dark:text-default-200'>
@@ -870,11 +861,6 @@ export default function YukiFlowPage () {
                     </div>
                   </div>
                 ))}
-              </div>
-
-              <div className='mt-3 flex items-start gap-2 rounded-xl border border-warning-200/50 bg-warning-50/60 p-3 text-sm text-warning-800 dark:border-warning-500/20 dark:bg-warning-500/10 dark:text-warning-200'>
-                <LuBug className='mt-0.5 shrink-0' />
-                <span>当前日志读取的是后端缓冲区最近条目，不是独立落盘文件；如果系统整体日志很多，较早的 Flow 调试信息会被新日志顶掉。</span>
               </div>
             </div>
           </div>

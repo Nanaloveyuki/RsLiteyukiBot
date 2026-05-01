@@ -809,7 +809,10 @@ fn flow_local_agent_logs_payload() -> FlowLocalAgentLogsPayload {
 }
 
 fn is_flow_local_agent_log_module(module: &str) -> bool {
-    module == "flow.local_agent" || module.starts_with("flow.local_agent.")
+    module == "flow.local_agent"
+        || module.starts_with("flow.local_agent.")
+        || module == "flow.local_agent.tool"
+        || module.starts_with("flow.local_agent.tool.")
 }
 
 fn normalize_webui_data_url(raw: &str) -> Option<String> {
