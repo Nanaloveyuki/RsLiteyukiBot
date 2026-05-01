@@ -10,6 +10,34 @@
 
 本计划只覆盖当前仓库需要实现的客户端侧能力，不覆盖 `agent-main` 服务端实现。
 
+## Current Status
+
+截至 2026-05-01，Phase 0 已部分完成，当前代码状态如下：
+
+- 已完成：
+  - `flow_local_agent` 配置段已加入 app config
+  - runtime bootstrap 已可携带 `flow_local_agent` 配置
+  - `src/flow_local_agent/` 模块已接入编译
+  - 协议消息类型、close code、运行时状态、客户端占位实现已存在
+  - 最小单元测试已存在并通过
+- 已验证：
+  - `cargo check`
+  - `cargo test --lib flow_local_agent`
+- 尚未完成：
+  - `main` / `web runtime` 的启动接线
+  - Web Host 状态暴露
+  - 共享只读 tool caller 的主链路复用说明
+  - 审批 API
+  - `write_file`
+  - `run_command`
+
+当前阶段的定位应视为：
+
+- Phase 0: schema and skeleton
+  - 已完成
+- Phase 1 及以后
+  - 尚未开始正式接线
+
 ## Integration Positioning
 
 当前项目应扮演：
@@ -67,6 +95,8 @@
   - 安全的文件列举和读取
 - `src/llm/tools/workspace_access/path_safety.rs`
   - 路径逃逸防护
+- `src/llm/shared_tool_caller.rs`
+  - 共享 workspace 只读工具调用入口
 - `src/web/host/mod.rs`
   - Web Host 生命周期、认证、状态挂载点
 - `src/web/host/capability_api.rs`
@@ -164,19 +194,31 @@
 
 ## Tool Mapping Plan
 
+### Shared read-only caller boundary
+
+当前实现约束：
+
+- 共享层仅负责 workspace 范围内的 `list_files` / `read_file`
+- 共享层直接复用 `workspace_access`，不引入 `run_command` / `write_file`
+- Flow Local Agent 已复用该共享层给本地 LLM workspace 工具使用，但其对外暴露给 Flow 的只读工具已单独实现为上游兼容语义
+- 当前本地 agent 主链路不直接接入该共享 caller
+- 后续如需在沙盒模式下复用，本地 agent 主链路应复用同一共享层，而不是重新实现一套文件只读逻辑
+
 ### `list_files`
 
-建议：
+当前实现：
 
-- 直接复用 `workspace_access/file_ops.rs` 的路径安全和目录列举逻辑
-- 保持结果可 JSON 化
+- 共享 caller 仍直接复用 `workspace_access/file_ops.rs`
+- Flow Local Agent 对外 `list_files` 单独实现，返回上游兼容的 JSON 数组条目：`[{name,type,size}]`
+- Flow Local Agent 支持绝对路径、`~` 展开；相对路径优先基于 `flow_local_agent.workspace_root`，未配置时退回进程当前目录
 
 ### `read_file`
 
-建议：
+当前实现：
 
-- 直接复用现有安全读取逻辑
-- 增加协议层返回格式适配
+- 共享 caller 仍复用现有 workspace 安全读取逻辑
+- Flow Local Agent 对外 `read_file` 单独实现，返回上游兼容的原始文本内容
+- Flow Local Agent 支持绝对路径、`~` 展开，并对结果做 100KB 截断
 
 ### `write_file`
 
@@ -267,6 +309,7 @@
 目标：
 
 - 实现 WebSocket 连接、重连、ping/pong
+- 抽出共享只读 tool caller
 - 实现 `list_files`
 - 实现 `read_file`
 - 实现基础状态查询 API
@@ -320,6 +363,9 @@
 
 ## Suggested Work Split
 
+以下拆分仍可作为任务边界参考，但从当前阶段开始，不再作为默认执行顺序。
+后续实现以串行为主，只有在写入范围完全不重叠、且不会影响主线联调时，才允许并行。
+
 适合并行拆给多个 LLM 的任务包：
 
 ### Workstream A: config and runtime skeleton
@@ -364,6 +410,23 @@
 - C 的只读部分可与 A/B 并行
 - D 依赖 B 的协议消息通路
 - E 依赖 D 的后端 API 定型
+
+## Sequential Execution Policy
+
+从 Phase 1 开始，默认采用严格串行推进：
+
+1. 先完成 runtime 启动接线
+2. 再完成只读工具执行链路
+3. 再暴露状态查询 API
+4. 再补审批状态与审批 API
+5. 再做 `write_file`
+6. 最后做 `run_command`
+
+只有满足以下条件时，才允许局部并行：
+
+- 写入文件集合完全不重叠
+- 主线步骤不会被并行任务阻塞
+- 不会引入需要大范围回滚或重构的接口漂移
 
 ## Testing Plan
 
@@ -445,14 +508,26 @@
 
 ## Recommended Implementation Order
 
+当前推荐顺序更新为：
+
 1. 配置结构和 runtime 骨架
-2. 协议模型和 WS client
-3. 只读工具 `list_files/read_file`
-4. 状态查询 API
-5. 审批状态和审批 API
-6. 前端审批入口
-7. `write_file`
-8. `run_command`
+   当前状态：已完成
+2. `main` / `web runtime` 启动接线
+   目标：让 `flow_local_agent` runtime 真正进入启动链，但先不开放工具执行
+3. 协议模型和 WS client 接线
+   目标：真正建立连接、处理 `ping/pong`、close code、重连策略
+4. 只读工具 `list_files/read_file`
+   目标：抽出共享只读 tool caller，并打通 Flow Local Agent 的第一条真实工具调用链
+5. 状态查询 API
+   目标：通过 Web Host 查看连接状态、设备信息、最近错误
+6. 审批状态和审批 API
+   目标：为危险操作确认建立后端通路
+7. 前端审批入口
+   目标：只展示状态和审批，不暴露 token 或内部提示词
+8. `write_file`
+9. `run_command`
+
+如果后续实现与本文档顺序不一致，应先更新本文档，再继续改代码。
 
 ## Delivery Rule
 

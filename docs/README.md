@@ -9,7 +9,11 @@ If you are trying to understand what the repository already does today, start fr
 ## Plan / Design / History Documents
 
 - `flow-local-agent-integration-plan.md`
-  - integration plan for connecting this repo as a Liteyuki Flow local agent
+  - integration plan plus current implementation status and next sequential steps
 
 ## Recommended Reading Order
+
+For the Flow local-agent lane:
+
+1. `flow-local-agent-integration-plan.md`
 
