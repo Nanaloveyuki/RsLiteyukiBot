@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::hardcode_data::config_path::{
-    APP_CONFIG_FILENAMES, LEGACY_LLM_PROMPT_STORE_PATH, LEGACY_WEBUI_PASSWORD_RELATIVE_PATH,
-    LLM_CONFIG_FILENAMES, LLM_PROMPT_STORE_FILENAME, MCP_CONFIG_FILENAME, PASSWORD_CONFIG_FILENAME,
-    PLUGIN_CRON_STATE_FILENAME, SKILLS_DIR_NAME, TOOL_STATE_FILENAME, WEBUI_PASSWORD_FILENAME,
+    APP_CONFIG_FILENAMES, FLOW_LOCAL_AGENT_DEVICE_ID_FILENAME, LEGACY_LLM_PROMPT_STORE_PATH,
+    LEGACY_WEBUI_PASSWORD_RELATIVE_PATH, LLM_CONFIG_FILENAMES, LLM_PROMPT_STORE_FILENAME,
+    MCP_CONFIG_FILENAME, PASSWORD_CONFIG_FILENAME, PLUGIN_CRON_STATE_FILENAME, SKILLS_DIR_NAME,
+    TOOL_STATE_FILENAME, WEBUI_PASSWORD_FILENAME,
 };
 
 pub(crate) fn resolve_env_path(key: &str) -> Option<PathBuf> {
@@ -74,6 +75,10 @@ pub(crate) fn resolve_default_tool_state_path() -> PathBuf {
 
 pub(crate) fn resolve_default_plugin_cron_state_path() -> PathBuf {
     resolve_user_config_file(PLUGIN_CRON_STATE_FILENAME)
+}
+
+pub(crate) fn resolve_default_flow_local_agent_device_id_path() -> PathBuf {
+    resolve_user_config_file(FLOW_LOCAL_AGENT_DEVICE_ID_FILENAME)
 }
 
 pub(crate) fn resolve_existing_named_config_path(
@@ -321,6 +326,12 @@ pub(crate) fn resolve_preferred_plugin_cron_state_path() -> PathBuf {
         &[],
         resolve_default_plugin_cron_state_path,
     )
+}
+
+pub(crate) fn resolve_preferred_flow_local_agent_device_id_path() -> PathBuf {
+    resolve_env_path("LY_FLOW_LOCAL_AGENT_DEVICE_ID_PATH")
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(resolve_default_flow_local_agent_device_id_path)
 }
 
 fn legacy_webui_password_candidates() -> impl Iterator<Item = PathBuf> {

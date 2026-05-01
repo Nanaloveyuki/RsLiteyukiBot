@@ -22,6 +22,7 @@ const DebugPage = lazy(() => import('@/pages/dashboard/debug'));
 const HttpDebug = lazy(() => import('@/pages/dashboard/debug/http'));
 const WSDebug = lazy(() => import('@/pages/dashboard/debug/websocket'));
 const CapabilitiesPage = lazy(() => import('@/pages/dashboard/capabilities'));
+const YukiFlowPage = lazy(() => import('@/pages/dashboard/yuki_flow'));
 const FileManagerPage = lazy(() => import('@/pages/dashboard/file_manager'));
 const LogsPage = lazy(() => import('@/pages/dashboard/logs'));
 const NetworkPage = lazy(() => import('@/pages/dashboard/network'));
@@ -80,6 +81,7 @@ function AppRoutes () {
           <Route path='http' element={<HttpDebug />} />
         </Route>
         <Route path='capabilities' element={<CapabilitiesPage />} />
+        <Route path='yuki_flow' element={<YukiFlowPage />} />
         <Route path='file_manager' element={<FileManagerPage />} />
         <Route path='terminal' element={<TerminalPage />} />
         <Route path='plugins' element={<PluginPage />} />

@@ -84,3 +84,47 @@ fn reject_non_post_method_returns_method_error_response() {
     assert!(text.contains("AppConfig/ReplaceActive only accepts POST"));
     assert!(reject_non_post_method("POST", "AppConfig/ReplaceActive", false).is_none());
 }
+
+#[test]
+fn normalize_onebot_config_payload_coerces_numeric_strings() {
+    let normalized = normalize_onebot_config_payload(serde_json::json!({
+        "network": {
+            "websocketServers": [
+                {
+                    "port": "3001",
+                    "heartInterval": "15000"
+                }
+            ],
+            "websocketClients": [
+                {
+                    "reconnectInterval": "5000",
+                    "heartInterval": "30000"
+                }
+            ],
+            "httpServers": [
+                {
+                    "port": "8080"
+                }
+            ]
+        },
+        "timeout": {
+            "baseTimeout": "10000",
+            "uploadSpeedKBps": "1024",
+            "downloadSpeedKBps": "1024",
+            "maxTimeout": "60000"
+        }
+    }));
+
+    assert_eq!(normalized["network"]["websocketServers"][0]["port"], 3001);
+    assert_eq!(
+        normalized["network"]["websocketServers"][0]["heartInterval"],
+        15000
+    );
+    assert_eq!(
+        normalized["network"]["websocketClients"][0]["reconnectInterval"],
+        5000
+    );
+    assert_eq!(normalized["network"]["httpServers"][0]["port"], 8080);
+    assert_eq!(normalized["timeout"]["baseTimeout"], 10000);
+    assert_eq!(normalized["timeout"]["maxTimeout"], 60000);
+}

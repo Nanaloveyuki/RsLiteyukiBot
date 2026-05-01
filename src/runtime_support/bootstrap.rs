@@ -4,16 +4,17 @@ use std::sync::{Arc, RwLock};
 
 use crate::app_config::{
     load_adapter_configs, prime_reload_warning_state, resolve_app_locale, resolve_disabled_plugins,
-    resolve_disabled_scope_commands, resolve_help_whitelist, resolve_llm_config,
-    resolve_tui_config, runtime_settings_values,
+    resolve_disabled_scope_commands, resolve_flow_local_agent_config, resolve_help_whitelist,
+    resolve_llm_config, resolve_tui_config, runtime_settings_values,
 };
 use crate::i18n::{reload_catalog as reload_i18n_catalog, set_current_locale, trf};
 use crate::utils::config_path::resolve_preferred_password_config_path;
 use liteyukibot_core::{BotRuntimeConfig, RuntimeSettings, RuntimeTarget};
 
 use super::{
-    ExternalGateway, LlmCommandRuntime, PreparedRuntimeBootstrap, SuperuserManager,
-    ensure_default_llm_config_file, load_app_config_with_llm_overlay, resolve_builtin_plugin_dirs,
+    ExternalGateway, LlmCommandRuntime, PreparedFlowLocalAgentRuntime, PreparedRuntimeBootstrap,
+    SuperuserManager, ensure_default_llm_config_file, load_app_config_with_llm_overlay,
+    resolve_builtin_plugin_dirs,
 };
 
 pub(crate) fn prepare_runtime_bootstrap<F>(
@@ -38,12 +39,15 @@ where
     let tui_config = resolve_tui_config(&app_config);
     let locale = resolve_app_locale(&app_config);
     let llm_config = resolve_llm_config(&app_config);
+    let (flow_local_agent, flow_local_agent_warnings) =
+        PreparedFlowLocalAgentRuntime::new(resolve_flow_local_agent_config(&app_config));
     let disabled_commands = resolve_disabled_scope_commands(&app_config);
     let disabled_plugins = resolve_disabled_plugins(&app_config);
     let llm_runtime = LlmCommandRuntime::new(llm_config.command_prefix.clone());
     let external_gateway = ExternalGateway::new();
     let plugin_dirs = resolve_builtin_plugin_dirs();
     set_current_locale(locale);
+    warnings.extend(flow_local_agent_warnings);
     warnings.extend(reload_i18n_catalog(plugin_dirs.iter()));
     warnings = dedup_warnings(warnings);
 
@@ -73,6 +77,7 @@ where
         tui_config,
         locale: locale.as_str().to_string(),
         llm_runtime,
+        flow_local_agent,
         external_gateway,
         plugin_dirs,
         disabled_commands,

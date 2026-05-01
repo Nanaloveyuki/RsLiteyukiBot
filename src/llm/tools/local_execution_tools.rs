@@ -3,15 +3,16 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::llm::client::{LlmClientError, LlmToolOutput};
+use crate::llm::shared_tool_caller::SharedToolCaller;
 use crate::llm::skills::SkillManager;
 
 use super::tool_arguments::{optional_usize, required_string};
 use super::tool_types::{ManagedTool, new_managed_tool};
-use super::workspace_access::{list_workspace_files, read_workspace_file};
 use super::{
     DEFAULT_FILE_LIST_MAX_DEPTH, DEFAULT_FILE_LIST_MAX_ENTRIES, DEFAULT_FILE_READ_MAX_CHARS,
     MAX_FILE_LIST_MAX_DEPTH, MAX_FILE_LIST_MAX_ENTRIES, MAX_FILE_READ_MAX_CHARS,
     TOOL_CATEGORY_SKILLS, TOOL_CATEGORY_WORKSPACE, ToolDescriptor, ToolOrigin,
+    WorkspaceReadOnlyToolName,
 };
 
 pub(super) fn build_local_execution_tools(
@@ -29,8 +30,8 @@ pub(super) fn build_local_execution_tools(
         "Maximum number of characters to return, default {DEFAULT_FILE_READ_MAX_CHARS}, max {MAX_FILE_READ_MAX_CHARS}."
     );
 
-    let workspace_root = workspace_root.to_path_buf();
-    let list_workspace_root = workspace_root.clone();
+    let workspace_tools = SharedToolCaller::for_workspace(workspace_root);
+    let list_workspace_tools = workspace_tools.clone();
     tools.push(new_managed_tool(
         ToolDescriptor {
             name: "workspace_list_files".to_string(),
@@ -60,12 +61,15 @@ pub(super) fn build_local_execution_tools(
             strict: true,
         },
         move |arguments| {
-            let workspace_root = list_workspace_root.clone();
-            async move { list_workspace_files(workspace_root.as_path(), &arguments) }
+            let workspace_tools = list_workspace_tools.clone();
+            async move {
+                workspace_tools
+                    .call_workspace_read_only(WorkspaceReadOnlyToolName::ListFiles, &arguments)
+            }
         },
     ));
 
-    let read_workspace_root = workspace_root;
+    let read_workspace_tools = workspace_tools;
     tools.push(new_managed_tool(
         ToolDescriptor {
             name: "workspace_read_file".to_string(),
@@ -101,8 +105,11 @@ pub(super) fn build_local_execution_tools(
             strict: true,
         },
         move |arguments| {
-            let workspace_root = read_workspace_root.clone();
-            async move { read_workspace_file(workspace_root.as_path(), &arguments) }
+            let workspace_tools = read_workspace_tools.clone();
+            async move {
+                workspace_tools
+                    .call_workspace_read_only(WorkspaceReadOnlyToolName::ReadFile, &arguments)
+            }
         },
     ));
 

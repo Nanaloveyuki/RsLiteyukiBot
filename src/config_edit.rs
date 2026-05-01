@@ -2,6 +2,8 @@ use std::path::Path;
 
 #[path = "config_edit/llm.rs"]
 mod llm;
+#[path = "config_edit/flow_local_agent.rs"]
+mod flow_local_agent;
 #[path = "config_edit/shared.rs"]
 mod shared;
 #[cfg(test)]
@@ -13,7 +15,9 @@ mod toml;
 mod yaml;
 
 pub use llm::LlmConfigPatch;
+pub use flow_local_agent::FlowLocalAgentConfigPatch;
 
+use flow_local_agent::{describe_flow_local_agent_patch, normalize_flow_local_agent_patch};
 use llm::{describe_llm_patch, normalize_llm_patch};
 use shared::persist_config_with_format;
 
@@ -84,5 +88,21 @@ pub fn persist_llm_config(path: &Path, patch: &LlmConfigPatch) -> Result<(), Str
         detail.as_str(),
         |content| yaml::update_llm_document(content, &normalized_patch),
         |content| toml::update_llm_document(content, &normalized_patch),
+    )
+}
+
+#[allow(dead_code)] // 外部调用
+pub fn persist_flow_local_agent_config(
+    path: &Path,
+    patch: &FlowLocalAgentConfigPatch,
+) -> Result<(), String> {
+    let normalized_patch = normalize_flow_local_agent_patch(patch);
+    let detail = describe_flow_local_agent_patch(&normalized_patch);
+    persist_config_with_format(
+        "flow local agent config",
+        path,
+        detail.as_str(),
+        |content| yaml::update_flow_local_agent_document(content, &normalized_patch),
+        |content| toml::update_flow_local_agent_document(content, &normalized_patch),
     )
 }

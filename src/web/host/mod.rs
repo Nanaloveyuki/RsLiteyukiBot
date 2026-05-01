@@ -59,6 +59,7 @@ use crate::app_config::{
 };
 use crate::app_host::{AppHostPluginCatalogSnapshot, AppHostSnapshot, EmbeddedAppHost};
 use crate::config_edit::persist_disabled_plugins;
+use crate::flow_local_agent::FlowLocalAgentRuntimeState;
 use crate::i18n::current_snapshot as current_i18n_snapshot;
 use crate::observability::{BufferedLogEntry, recent_buffered_logs};
 use crate::plugin::source_adapter::{
@@ -172,6 +173,7 @@ pub struct WebHostService {
     runtime_host: Option<EmbeddedAppHost>,
     assets: Arc<WebHostAssets>,
     terminal_state: Arc<WebTerminalState>,
+    flow_local_agent_state: Option<FlowLocalAgentRuntimeState>,
     auth: WebUiAuthManager,
 }
 
@@ -225,6 +227,7 @@ impl WebHostService {
                 runtime_host: None,
                 assets: Arc::new(assets),
                 terminal_state: Arc::new(WebTerminalState::default()),
+                flow_local_agent_state: None,
                 auth,
             },
             listener,
@@ -240,6 +243,14 @@ impl WebHostService {
 
     pub fn with_runtime_host(mut self, runtime_host: EmbeddedAppHost) -> Self {
         self.runtime_host = Some(runtime_host);
+        self
+    }
+
+    pub fn with_flow_local_agent_state(
+        mut self,
+        flow_local_agent_state: FlowLocalAgentRuntimeState,
+    ) -> Self {
+        self.flow_local_agent_state = Some(flow_local_agent_state);
         self
     }
 

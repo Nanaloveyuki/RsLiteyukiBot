@@ -68,6 +68,11 @@ export const siteConfig = {
           icon: <LuBraces className='w-5 h-5' />,
           href: '/capabilities',
         },
+        {
+          label: 'Yuki Flow',
+          icon: <LuBraces className='w-5 h-5' />,
+          href: '/yuki_flow',
+        },
       ],
     },
     {

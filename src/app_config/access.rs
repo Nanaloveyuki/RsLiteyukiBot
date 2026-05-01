@@ -31,6 +31,10 @@ pub(super) fn config_llm(doc: &AppConfigDoc) -> Option<&LlmConfigSection> {
     doc.llm.as_ref()
 }
 
+pub(super) fn config_flow_local_agent(doc: &AppConfigDoc) -> Option<&FlowLocalAgentConfigSection> {
+    doc.flow_local_agent.as_ref()
+}
+
 pub(super) fn config_runtime(doc: &AppConfigDoc) -> Option<&RuntimeConfigSection> {
     doc.rust
         .as_ref()

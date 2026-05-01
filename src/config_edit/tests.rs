@@ -4,16 +4,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use liteyukibot_core::recent_buffered_logs;
 
 use super::llm::{LlmConfigPatch, describe_llm_patch};
+use super::flow_local_agent::{FlowLocalAgentConfigPatch, describe_flow_local_agent_patch};
 use super::persist_disabled_commands;
 use super::toml::{
     update_disabled_commands_document as update_toml_commands_document,
     update_disabled_plugins_document as update_toml_plugins_document,
+    update_flow_local_agent_document as update_toml_flow_local_agent_document,
     update_llm_document as update_toml_llm_document,
     update_whitelist_document as update_toml_document,
 };
 use super::yaml::{
     update_disabled_commands_document as update_yaml_commands_document,
     update_disabled_plugins_document as update_yaml_plugins_document,
+    update_flow_local_agent_document as update_yaml_flow_local_agent_document,
     update_llm_document as update_yaml_llm_document,
     update_whitelist_document as update_yaml_document,
 };
@@ -273,6 +276,70 @@ fn describe_llm_patch_redacts_api_key_values() {
     assert!(summary.contains("api_keys=<updated:2>"));
     assert!(!summary.contains("sk-secret-1"));
     assert!(!summary.contains("sk-secret-2"));
+}
+
+#[test]
+fn update_yaml_flow_local_agent_rewrites_target_fields() {
+    let source = "flow_local_agent:\n  enabled: false\n  approval_policy: 'prompt'\n";
+    let patch = FlowLocalAgentConfigPatch {
+        enabled: Some(true),
+        base_url: Some("https://flow.liteyuki.org".to_string()),
+        token: Some("lys_secret".to_string()),
+        device_name: Some("Yuki Node".to_string()),
+        auto_connect: Some(true),
+        allowed_tools: Some(vec!["read_file".to_string(), "list_files".to_string()]),
+        workspace_root: Some("./workspace".to_string()),
+        command_timeout_seconds: Some(45),
+        approval_policy: Some("prompt".to_string()),
+        ..Default::default()
+    };
+
+    let updated = update_yaml_flow_local_agent_document(source, &patch);
+    assert!(updated.contains("flow_local_agent:"));
+    assert!(updated.contains("enabled: true"));
+    assert!(updated.contains("base_url: 'https://flow.liteyuki.org'"));
+    assert!(updated.contains("token: 'lys_secret'"));
+    assert!(updated.contains("device_name: 'Yuki Node'"));
+    assert!(updated.contains("auto_connect: true"));
+    assert!(updated.contains("allowed_tools:\n    - 'read_file'\n    - 'list_files'"));
+    assert!(updated.contains("workspace_root: './workspace'"));
+    assert!(updated.contains("command_timeout_seconds: 45"));
+}
+
+#[test]
+fn update_toml_flow_local_agent_inserts_section_when_missing() {
+    let source = "[rust]\nadapters = []\n";
+    let patch = FlowLocalAgentConfigPatch {
+        enabled: Some(true),
+        base_url: Some("https://flow.liteyuki.org".to_string()),
+        allowed_tools: Some(vec!["read_file".to_string(), "list_files".to_string()]),
+        command_timeout_seconds: Some(60),
+        approval_policy: Some("prompt".to_string()),
+        ..Default::default()
+    };
+
+    let updated = update_toml_flow_local_agent_document(source, &patch);
+    assert!(updated.contains("[flow_local_agent]"));
+    assert!(updated.contains("enabled = true"));
+    assert!(updated.contains("base_url = \"https://flow.liteyuki.org\""));
+    assert!(updated.contains("allowed_tools = [\"read_file\", \"list_files\"]"));
+    assert!(updated.contains("command_timeout_seconds = 60"));
+    assert!(updated.contains("approval_policy = \"prompt\""));
+}
+
+#[test]
+fn describe_flow_local_agent_patch_redacts_token_value() {
+    let patch = FlowLocalAgentConfigPatch {
+        base_url: Some("https://flow.liteyuki.org".to_string()),
+        token: Some("lys-secret".to_string()),
+        ..Default::default()
+    };
+
+    let summary = describe_flow_local_agent_patch(&patch);
+
+    assert!(summary.contains("base_url=https://flow.liteyuki.org"));
+    assert!(summary.contains("token=<updated>"));
+    assert!(!summary.contains("lys-secret"));
 }
 
 #[test]

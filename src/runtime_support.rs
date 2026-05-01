@@ -1,13 +1,16 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use crate::app_config::LlmConfigSection;
+use crate::app_config::{FlowLocalAgentRuntimeConfig, LlmConfigSection};
+use crate::flow_local_agent::{FlowLocalAgentClient, FlowLocalAgentRuntimeState};
 use crate::superuser::SuperuserManager;
 use crate::tui;
 use liteyukibot_core::AdapterConfig;
 use liteyukibot_core::BotRuntimeConfig;
+use liteyukibot_core::{LogLevel, emit_console_log};
+use tokio::task::JoinHandle;
 
 #[path = "runtime_support/bootstrap.rs"]
 mod bootstrap;
@@ -46,11 +49,137 @@ pub(crate) struct PreparedRuntimeBootstrap {
     #[allow(dead_code)]
     pub(crate) locale: String,
     pub(crate) llm_runtime: LlmCommandRuntime,
+    pub(crate) flow_local_agent: PreparedFlowLocalAgentRuntime,
     pub(crate) external_gateway: ExternalGateway,
     pub(crate) plugin_dirs: Vec<PathBuf>,
     pub(crate) disabled_commands: Vec<String>,
     pub(crate) disabled_plugins: Vec<String>,
     pub(crate) superuser_manager: SuperuserManager,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct PreparedFlowLocalAgentRuntime {
+    state: FlowLocalAgentRuntimeState,
+    inner: Arc<FlowLocalAgentRuntimeInner>,
+}
+
+struct FlowLocalAgentRuntimeInner {
+    config: Mutex<FlowLocalAgentRuntimeConfig>,
+    task: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl PreparedFlowLocalAgentRuntime {
+    pub(crate) fn new(config: FlowLocalAgentRuntimeConfig) -> (Self, Vec<String>) {
+        let (config, warnings) = crate::flow_local_agent::device::normalize_runtime_config(config);
+        let state = FlowLocalAgentRuntimeState::default();
+        (
+            Self {
+                state,
+                inner: Arc::new(FlowLocalAgentRuntimeInner {
+                    config: Mutex::new(config),
+                    task: Mutex::new(None),
+                }),
+            },
+            warnings,
+        )
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn state(&self) -> FlowLocalAgentRuntimeState {
+        self.state.clone()
+    }
+
+    pub(crate) fn config_snapshot(&self) -> FlowLocalAgentRuntimeConfig {
+        self.inner
+            .config
+            .lock()
+            .expect("flow local agent runtime config lock should not be poisoned")
+            .clone()
+    }
+
+    pub(crate) fn spawn_background(&self) {
+        let config = self.config_snapshot();
+        self.restart_with_config(config);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn stop(&self, reason: impl Into<String>) {
+        let reason = reason.into();
+        emit_console_log(
+            LogLevel::Info,
+            "flow.local_agent",
+            format!("flow local agent stop requested: {reason}"),
+        );
+
+        if let Some(previous) = self
+            .inner
+            .task
+            .lock()
+            .expect("flow local agent runtime task lock should not be poisoned")
+            .take()
+        {
+            previous.abort();
+        }
+
+        self.state.mark_disconnected(false, Some(reason));
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn restart_from_app_config(&self) -> Result<(), String> {
+        crate::app_config::ensure_default_config_files().map_err(|err| err.to_string())?;
+        let (doc, _) = crate::app_config::load_app_config_with_warnings(false);
+        let config = crate::app_config::resolve_flow_local_agent_config(&doc);
+        self.restart_with_config(config);
+        Ok(())
+    }
+
+    pub(crate) fn restart_with_config(&self, config: FlowLocalAgentRuntimeConfig) {
+        let (config, warnings) = crate::flow_local_agent::device::normalize_runtime_config(config);
+        for warning in warnings {
+            emit_console_log(LogLevel::Warn, "flow.local_agent", warning);
+        }
+
+        self.state.mark_disconnected(true, Some("restarting with latest config".to_string()));
+
+        if let Some(previous) = self
+            .inner
+            .task
+            .lock()
+            .expect("flow local agent runtime task lock should not be poisoned")
+            .take()
+        {
+            previous.abort();
+        }
+
+        *self
+            .inner
+            .config
+            .lock()
+            .expect("flow local agent runtime config lock should not be poisoned") =
+            config.clone();
+
+        emit_console_log(
+            LogLevel::Info,
+            "flow.local_agent",
+            format!(
+                "flow local agent runtime updated (enabled={}, auto_connect={})",
+                config.enabled, config.auto_connect
+            ),
+        );
+
+        let client = FlowLocalAgentClient::with_runtime_config(config, self.state.clone());
+        let handle = tokio::spawn(async move {
+            if let Err(err) = client.run().await {
+                emit_console_log(LogLevel::Warn, "flow.local_agent", format!("flow local agent stopped: {err}"));
+            }
+        });
+        *self
+            .inner
+            .task
+            .lock()
+            .expect("flow local agent runtime task lock should not be poisoned") = Some(handle);
+    }
 }
 
 #[derive(Clone)]

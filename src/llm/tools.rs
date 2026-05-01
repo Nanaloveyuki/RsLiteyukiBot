@@ -6,6 +6,8 @@ mod inventory_prompt;
 mod local_execution_tools;
 #[path = "tools/runtime_inventory.rs"]
 mod runtime_inventory;
+#[path = "tools/shared_workspace_tools.rs"]
+mod shared_workspace_tools;
 #[cfg(test)]
 #[path = "tools/tests.rs"]
 mod tests;
@@ -30,6 +32,10 @@ use self::tool_types::{
     CapabilityBundle, ManagedTool, SkillCatalogSnapshot, ToolCatalogEntry, ToolCatalogSnapshot,
 };
 use self::workspace_access::resolve_workspace_root;
+
+pub(crate) use self::shared_workspace_tools::{
+    WorkspaceReadOnlyToolCaller, WorkspaceReadOnlyToolName,
+};
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

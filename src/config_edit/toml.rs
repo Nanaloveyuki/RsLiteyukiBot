@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::app_config::{LlmManagedModelConfig, LlmManagedProviderConfig};
 
+use super::flow_local_agent::FlowLocalAgentConfigPatch;
 use super::llm::LlmConfigPatch;
 use super::shared::{append_blank_line_if_needed, detect_newline, join_lines};
 
@@ -116,6 +117,93 @@ pub(crate) fn update_llm_document(content: &str, patch: &LlmConfigPatch) -> Stri
     }
     if let Some(providers) = patch.providers.as_ref() {
         replace_toml_llm_provider_blocks(&mut document.lines, table_start, providers);
+    }
+
+    document.finish()
+}
+
+#[allow(dead_code)]
+pub(crate) fn update_flow_local_agent_document(
+    content: &str,
+    patch: &FlowLocalAgentConfigPatch,
+) -> String {
+    let mut document = TomlDocument::new(content);
+    let table_start = document.ensure_table("flow_local_agent");
+
+    if let Some(enabled) = patch.enabled {
+        upsert_table_key(&mut document.lines, table_start, "enabled", enabled.to_string());
+    }
+    if let Some(base_url) = patch.base_url.as_deref() {
+        upsert_table_key(
+            &mut document.lines,
+            table_start,
+            "base_url",
+            quote_toml_string(base_url),
+        );
+    }
+    if let Some(token) = patch.token.as_deref() {
+        upsert_table_key(
+            &mut document.lines,
+            table_start,
+            "token",
+            quote_toml_string(token),
+        );
+    }
+    if let Some(device_id) = patch.device_id.as_deref() {
+        upsert_table_key(
+            &mut document.lines,
+            table_start,
+            "device_id",
+            quote_toml_string(device_id),
+        );
+    }
+    if let Some(device_name) = patch.device_name.as_deref() {
+        upsert_table_key(
+            &mut document.lines,
+            table_start,
+            "device_name",
+            quote_toml_string(device_name),
+        );
+    }
+    if let Some(auto_connect) = patch.auto_connect {
+        upsert_table_key(
+            &mut document.lines,
+            table_start,
+            "auto_connect",
+            auto_connect.to_string(),
+        );
+    }
+    if let Some(allowed_tools) = patch.allowed_tools.as_ref() {
+        upsert_table_key(
+            &mut document.lines,
+            table_start,
+            "allowed_tools",
+            render_toml_string_list(allowed_tools),
+        );
+    }
+    if let Some(workspace_root) = patch.workspace_root.as_deref() {
+        upsert_table_key(
+            &mut document.lines,
+            table_start,
+            "workspace_root",
+            quote_toml_string(workspace_root),
+        );
+    }
+    if let Some(command_timeout_seconds) = patch.command_timeout_seconds {
+        upsert_table_key(
+            &mut document.lines,
+            table_start,
+            "command_timeout_seconds",
+            command_timeout_seconds.to_string(),
+        );
+    }
+    if let Some(approval_policy) = patch.approval_policy.as_deref() {
+        upsert_table_key(
+            &mut document.lines,
+            table_start,
+            "approval_policy",
+            quote_toml_string(approval_policy),
+        );
     }
 
     document.finish()

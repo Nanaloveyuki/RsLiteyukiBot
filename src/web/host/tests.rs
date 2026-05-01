@@ -52,6 +52,7 @@ fn test_server_with_snapshot(snapshot: AppHostSnapshot) -> WebHostService {
         runtime_host: None,
         assets: Arc::new(test_assets()),
         terminal_state: Arc::new(WebTerminalState::default()),
+        flow_local_agent_state: None,
         auth: WebUiAuthManager::in_memory_for_tests(),
     }
 }
@@ -99,6 +100,49 @@ impl LlmManagerRouteTestEnv {
 }
 
 impl Drop for LlmManagerRouteTestEnv {
+    fn drop(&mut self) {
+        self.guards.clear();
+        let _ = fs::remove_dir_all(self.root.as_path());
+    }
+}
+
+struct FlowLocalAgentRouteTestEnv {
+    root: PathBuf,
+    guards: Vec<EnvVarGuard>,
+}
+
+impl FlowLocalAgentRouteTestEnv {
+    fn new() -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("rsliteyuki-flow-local-agent-route-{nanos}"));
+        fs::create_dir_all(root.as_path()).expect("temp flow local agent dir should be created");
+        let config_path = root.join("config.yaml");
+        fs::write(
+            config_path.as_path(),
+            "core:\n  adapters: []\nflow_local_agent:\n  enabled: false\n",
+        )
+        .expect("test config should be written");
+
+        let guards = vec![
+            EnvVarGuard::set("LY_CONFIG_PATH", config_path.as_path()),
+            EnvVarGuard::set(
+                "LY_FLOW_LOCAL_AGENT_DEVICE_ID_PATH",
+                root.join("flow-device-id.txt").as_path(),
+            ),
+        ];
+
+        Self { root, guards }
+    }
+
+    fn config_path(&self) -> PathBuf {
+        self.root.join("config.yaml")
+    }
+}
+
+impl Drop for FlowLocalAgentRouteTestEnv {
     fn drop(&mut self) {
         self.guards.clear();
         let _ = fs::remove_dir_all(self.root.as_path());
@@ -1048,6 +1092,172 @@ fn llm_prompt_profile_routes_support_full_management_cycle() {
         .expect("prompt profile routes should persist llm-prompts.json");
     assert!(prompt_store.contains("\"active_profile\": \"default\""));
     assert!(prompt_store.contains("\"name\": \"default\""));
+}
+
+#[test]
+fn flow_local_agent_routes_load_save_and_report_status() {
+    let _lock = env_lock_guard();
+    let env = FlowLocalAgentRouteTestEnv::new();
+    let state = crate::flow_local_agent::FlowLocalAgentRuntimeState::default();
+    state.mark_disconnected(true, Some("connect failed".to_string()));
+    let server = test_server().with_flow_local_agent_state(state.clone());
+
+    let initial_response = route_json_api(&server, "GET", "/api/FlowLocalAgent/GetConfig", None);
+    assert_eq!(initial_response["code"], 0);
+    assert_eq!(initial_response["data"]["enabled"], false);
+    assert_eq!(initial_response["data"]["hasToken"], false);
+    assert_eq!(initial_response["data"]["tokenPreview"], "");
+    assert_eq!(initial_response["data"]["approvalPolicy"], "prompt");
+    assert_eq!(initial_response["data"]["autoConnect"], true);
+    assert!(initial_response["data"]["effectiveDeviceId"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    assert_eq!(
+        initial_response["data"]["configPath"],
+        env.config_path().display().to_string()
+    );
+
+    let save_response = route_json_api(
+        &server,
+        "POST",
+        "/api/FlowLocalAgent/SetConfig",
+        Some(&serde_json::json!({
+            "enabled": true,
+            "baseUrl": "https://flow.liteyuki.org/",
+            "deviceId": "configured-device",
+            "deviceName": "Yuki Box",
+            "autoConnect": false,
+            "allowedTools": ["read_file", "list_files", "read_file"],
+            "workspaceRoot": "./workspace",
+            "commandTimeoutSeconds": "45",
+            "approvalPolicy": "PROMPT"
+        })),
+    );
+    assert_eq!(save_response["code"], 0);
+    assert_eq!(save_response["data"]["enabled"], true);
+    assert_eq!(save_response["data"]["baseUrl"], "https://flow.liteyuki.org");
+    assert_eq!(save_response["data"]["hasToken"], false);
+    assert_eq!(save_response["data"]["tokenPreview"], "");
+    assert_eq!(save_response["data"]["deviceId"], "configured-device");
+    assert_eq!(save_response["data"]["effectiveDeviceId"], "configured-device");
+    assert_eq!(save_response["data"]["deviceName"], "Yuki Box");
+    assert_eq!(save_response["data"]["autoConnect"], false);
+    assert_eq!(
+        save_response["data"]["allowedTools"],
+        serde_json::json!(["read_file", "list_files"])
+    );
+    assert_eq!(save_response["data"]["workspaceRoot"], "./workspace");
+    assert_eq!(save_response["data"]["commandTimeoutSeconds"], 45);
+    assert_eq!(save_response["data"]["approvalPolicy"], "prompt");
+
+    let status_response = route_json_api(&server, "GET", "/api/FlowLocalAgent/GetStatus", None);
+    assert_eq!(status_response["code"], 0);
+    assert_eq!(status_response["data"]["connected"], false);
+    assert_eq!(status_response["data"]["reconnectAllowed"], true);
+    assert_eq!(status_response["data"]["lastError"], "connect failed");
+
+    let token_response = route_json_api(
+        &server,
+        "POST",
+        "/api/FlowLocalAgent/SetToken",
+        Some(&serde_json::json!({
+            "token": "lys_test"
+        })),
+    );
+    assert_eq!(token_response["code"], 0);
+    assert_eq!(token_response["data"]["hasToken"], true);
+    assert_eq!(token_response["data"]["tokenPreview"], "lys_...");
+
+    let connect_now_response = route_json_api(
+        &server,
+        "POST",
+        "/api/FlowLocalAgent/ConnectNow",
+        Some(&serde_json::json!({})),
+    );
+    assert_eq!(connect_now_response["code"], -1);
+    assert!(connect_now_response["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("runtime host is unavailable")));
+
+    let disconnect_now_response = route_json_api(
+        &server,
+        "POST",
+        "/api/FlowLocalAgent/DisconnectNow",
+        Some(&serde_json::json!({})),
+    );
+    assert_eq!(disconnect_now_response["code"], -1);
+    assert!(disconnect_now_response["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("runtime host is unavailable")));
+
+    let persisted = fs::read_to_string(env.config_path()).expect("flow local agent config should persist");
+    assert!(persisted.contains("flow_local_agent:"));
+    assert!(persisted.contains("enabled: true"));
+    assert!(persisted.contains("base_url: 'https://flow.liteyuki.org'"));
+    assert!(persisted.contains("token: 'lys_test'"));
+    assert!(persisted.contains("device_id: 'configured-device'"));
+    assert!(persisted.contains("device_name: 'Yuki Box'"));
+    assert!(persisted.contains("auto_connect: false"));
+    assert!(persisted.contains("workspace_root: './workspace'"));
+    assert!(persisted.contains("command_timeout_seconds: 45"));
+    assert!(persisted.contains("approval_policy: 'prompt'"));
+}
+
+#[test]
+fn flow_local_agent_logs_route_returns_filtered_buffered_entries() {
+    let server = test_server();
+    let unique = format!(
+        "flow-local-agent-log-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    );
+    crate::emit_console_log(
+        crate::LogLevel::Warn,
+        "flow.local_agent",
+        unique.as_str(),
+    );
+    crate::emit_console_log(
+        crate::LogLevel::Info,
+        "flow.other",
+        "should-not-appear",
+    );
+
+    let response = route_json_api(&server, "GET", "/api/FlowLocalAgent/GetLogs", None);
+
+    assert_eq!(response["code"], 0);
+    assert!(response["data"]["entries"]
+        .as_array()
+        .is_some_and(|entries| entries.iter().all(|entry| {
+            entry["module"]
+                .as_str()
+                .is_some_and(|module| module == "flow.local_agent" || module.starts_with("flow.local_agent."))
+        })));
+    assert!(response["data"]["entries"]
+        .as_array()
+        .is_some_and(|entries| entries.iter().any(|entry| entry["message"] == unique)));
+}
+
+#[test]
+fn app_config_replace_active_accepts_flow_local_agent_only_config() {
+    let _lock = env_lock_guard();
+    let env = FlowLocalAgentRouteTestEnv::new();
+    let server = test_server();
+
+    let response = route_json_api(
+        &server,
+        "POST",
+        "/api/AppConfig/ReplaceActive",
+        Some(&serde_json::json!({
+            "content": "flow_local_agent:\n  enabled: true\n  auto_connect: true\n  command_timeout_seconds: 30\n  approval_policy: prompt\n"
+        })),
+    );
+
+    assert_eq!(response["code"], 0);
+    let persisted = fs::read_to_string(env.config_path()).expect("active config should persist");
+    assert!(persisted.contains("flow_local_agent:"));
+    assert!(persisted.contains("enabled: true"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2340,6 +2550,77 @@ fn ob11_config_route_returns_napcat_compatible_shape() {
 }
 
 #[test]
+fn ob11_config_route_accepts_numeric_strings_in_set_config_payload() {
+    let _lock = env_lock_guard();
+    let root = std::env::temp_dir().join(format!(
+        "rsliteyuki-ob11-set-config-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ));
+    fs::create_dir_all(root.join("config").join("webui"))
+        .expect("webui config dir should be created");
+    let _cwd = EnvVarGuard::set("LY_CONFIG_PATH", root.join("config.yaml").as_path());
+    let previous_dir = std::env::current_dir().expect("current dir should exist");
+    std::env::set_current_dir(&root).expect("current dir should switch to temp root");
+
+    let server = test_server();
+    let payload = serde_json::json!({
+        "config": {
+            "network": {
+                "websocketServers": [
+                    {
+                        "name": "liteyuki-agent",
+                        "enable": true,
+                        "debug": false,
+                        "host": "127.0.0.1",
+                        "port": "3001",
+                        "messagePostFormat": "Array",
+                        "reportSelfMessage": true,
+                        "enableForcePushEvent": true,
+                        "heartInterval": "15000",
+                        "token": "yuki"
+                    }
+                ]
+            },
+            "timeout": {
+                "baseTimeout": "10000",
+                "uploadSpeedKBps": "1024",
+                "downloadSpeedKBps": "1024",
+                "maxTimeout": "60000"
+            }
+        }
+    });
+    let request = format!(
+        "POST /api/OB11Config/SetConfig HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}\r\n\r\n{}",
+        payload.to_string().len(),
+        local_auth_header(&server),
+        payload
+    );
+
+    let response = server.route_http_request(request.as_bytes(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let (headers, body) = split_response(response);
+    let body: serde_json::Value =
+        serde_json::from_slice(&body).expect("ob11 set config body should be valid json");
+
+    assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert_eq!(body["code"], 0);
+
+    let persisted = load_onebot_config();
+    assert_eq!(persisted.network.websocket_servers.len(), 1);
+    assert_eq!(persisted.network.websocket_servers[0].port, 3001);
+    assert_eq!(
+        persisted.network.websocket_servers[0].heart_interval,
+        15_000
+    );
+    assert_eq!(persisted.timeout.base_timeout, 10_000);
+
+    std::env::set_current_dir(previous_dir).expect("current dir should restore");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn i18n_route_returns_current_catalog_snapshot() {
     let server = test_server();
     let response = server.route_http_request(
@@ -2683,6 +2964,7 @@ fn directory_asset_mode_serves_files_and_spa_fallback() {
         runtime_host: None,
         assets: Arc::new(assets),
         terminal_state: Arc::new(WebTerminalState::default()),
+        flow_local_agent_state: None,
         auth: WebUiAuthManager::in_memory_for_tests(),
     };
 
@@ -2749,6 +3031,7 @@ fn dev_frontend_redirects_non_api_routes_when_probe_is_alive() {
         runtime_host: None,
         assets: Arc::new(test_assets()),
         terminal_state: Arc::new(WebTerminalState::default()),
+        flow_local_agent_state: None,
         auth: WebUiAuthManager::in_memory_for_tests(),
     };
 
@@ -2784,6 +3067,7 @@ fn dev_frontend_redirect_keeps_local_api_and_static_routes() {
         runtime_host: None,
         assets: Arc::new(test_assets()),
         terminal_state: Arc::new(WebTerminalState::default()),
+        flow_local_agent_state: None,
         auth: WebUiAuthManager::in_memory_for_tests(),
     };
 

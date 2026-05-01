@@ -2004,6 +2004,7 @@ dependencies = [
  "tokio-tungstenite",
  "toml 0.9.12+spec-1.1.0",
  "unicode-width 0.2.0",
+ "uuid",
  "zip",
 ]
 
