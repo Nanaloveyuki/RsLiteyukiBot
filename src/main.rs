@@ -6,6 +6,7 @@ mod app_config;
 mod command_registry;
 mod config_edit;
 mod external_commands;
+mod flow_local_agent;
 // 外部调用
 #[allow(dead_code)]
 mod hardcode_data;
@@ -58,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let adapter_autostart = bootstrap.adapter_autostart;
     let help_whitelist = bootstrap.help_whitelist;
     let llm_runtime = bootstrap.llm_runtime;
+    let flow_local_agent = bootstrap.flow_local_agent;
     let external_gateway = bootstrap.external_gateway;
     let plugin_dirs = bootstrap.plugin_dirs;
     let disabled_commands = bootstrap.disabled_commands;
@@ -122,6 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     bot.start().await?;
+    flow_local_agent.client.spawn_background();
 
     let tui_result = tui::run(
         &bot,

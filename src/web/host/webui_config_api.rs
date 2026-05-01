@@ -90,7 +90,8 @@ pub(super) fn route_webui_config_api(
         || api_path == "/NapCatConfig/GetUinConfig"
     {
         let config = load_napcat_config(
-            api_path == "/RuntimeConfig/GetAccountConfig" || api_path == "/NapCatConfig/GetUinConfig",
+            api_path == "/RuntimeConfig/GetAccountConfig"
+                || api_path == "/NapCatConfig/GetUinConfig",
         );
         let body = napcat_ok(&config);
         return Some(napcat_response(body, is_head));
@@ -102,8 +103,8 @@ pub(super) fn route_webui_config_api(
         || api_path == "/NapCatConfig/SetUinConfig"
     {
         let body = parse_json_body(request);
-        let use_uin_config =
-            api_path == "/RuntimeConfig/SetAccountConfig" || api_path == "/NapCatConfig/SetUinConfig";
+        let use_uin_config = api_path == "/RuntimeConfig/SetAccountConfig"
+            || api_path == "/NapCatConfig/SetUinConfig";
         let current = load_napcat_config(use_uin_config);
         let current_value = serde_json::to_value(&current)
             .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
@@ -113,7 +114,10 @@ pub(super) fn route_webui_config_api(
                 Ok(()) => napcat_ok(&serde_json::Value::Null),
                 Err(err) => napcat_err(-1, err.as_str()),
             },
-            Err(err) => napcat_err(-1, format!("invalid runtime config payload: {err}").as_str()),
+            Err(err) => napcat_err(
+                -1,
+                format!("invalid runtime config payload: {err}").as_str(),
+            ),
         };
         return Some(napcat_response(body, is_head));
     }

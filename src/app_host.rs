@@ -28,6 +28,7 @@ pub use self::state::{AppHostExternalStats, AppHostPluginCatalogSnapshot, AppHos
 pub struct EmbeddedAppHost {
     bot: Arc<AsyncMutex<LiteyukiBot>>,
     state: Arc<RwLock<AppHostState>>,
+    flow_local_agent: crate::runtime_support::PreparedFlowLocalAgentRuntime,
 }
 
 impl EmbeddedAppHost {
@@ -152,5 +153,9 @@ impl EmbeddedAppHost {
 
     pub async fn shutdown(&self) -> Result<(), String> {
         runtime::shutdown_embedded_app_host(self).await
+    }
+
+    pub fn flow_local_agent_state(&self) -> crate::flow_local_agent::FlowLocalAgentRuntimeState {
+        self.flow_local_agent.state.clone()
     }
 }

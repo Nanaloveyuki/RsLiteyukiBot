@@ -22,8 +22,16 @@ impl EmbeddedWebRuntime {
         };
         let assets = build_default_web_host_assets();
         let (server, listener) =
-            WebHostService::bind(build_default_web_host_config(), snapshot_provider, assets)
-                .map(|(server, listener)| (server.with_runtime_host(app_host.clone()), listener))?;
+            WebHostService::bind(build_default_web_host_config(), snapshot_provider, assets).map(
+                |(server, listener)| {
+                    (
+                        server
+                            .with_runtime_host(app_host.clone())
+                            .with_flow_local_agent_state(app_host.flow_local_agent_state()),
+                        listener,
+                    )
+                },
+            )?;
 
         Ok(Self {
             app_host,

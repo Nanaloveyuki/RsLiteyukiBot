@@ -9,6 +9,9 @@ mod command_registry;
 #[allow(dead_code, unused_imports)]
 #[path = "../src/config_edit.rs"]
 mod config_edit;
+#[allow(dead_code, unused_imports)]
+#[path = "../src/flow_local_agent/mod.rs"]
+mod flow_local_agent;
 #[allow(dead_code)]
 #[path = "../src/hardcode_data/mod.rs"]
 mod hardcode_data;
@@ -417,6 +420,7 @@ fn validate_app_config_reports_invalid_values() {
         tui: None,
         i18n: None,
         llm: None,
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,
@@ -454,6 +458,7 @@ fn runtime_reload_warnings_detect_low_level_runtime_fields() {
         tui: None,
         i18n: None,
         llm: None,
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,
@@ -498,6 +503,7 @@ fn runtime_reload_warnings_skip_when_sensitive_fields_unchanged() {
         tui: None,
         i18n: None,
         llm: None,
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,
@@ -542,6 +548,7 @@ fn connect_websocket_both_mode_generates_forward_and_reverse_adapters() {
         tui: None,
         i18n: None,
         llm: None,
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,
@@ -594,6 +601,7 @@ fn connect_websocket_port_without_mode_defaults_to_reverse() {
         tui: None,
         i18n: None,
         llm: None,
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,
@@ -643,6 +651,7 @@ fn connect_websocket_urls_expand_to_multiple_adapters() {
         tui: None,
         i18n: None,
         llm: None,
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,
@@ -690,6 +699,7 @@ fn connect_http_urls_expand_to_multiple_adapters() {
         tui: None,
         i18n: None,
         llm: None,
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,
@@ -732,6 +742,7 @@ fn resolve_help_whitelist_accepts_numeric_and_prefixed_entries() {
         tui: None,
         i18n: None,
         llm: None,
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,
@@ -761,6 +772,7 @@ fn validate_app_config_warns_empty_onebot_whitelist_entry() {
         tui: None,
         i18n: None,
         llm: None,
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,
@@ -802,6 +814,7 @@ fn resolve_disabled_scope_commands_normalizes_and_deduplicates_entries() {
         tui: None,
         i18n: None,
         llm: None,
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,
@@ -829,6 +842,7 @@ fn validate_app_config_warns_invalid_disabled_command_entry() {
         tui: None,
         i18n: None,
         llm: None,
+        flow_local_agent: None,
         commands: Some(CommandConfigSection {
             disabled: vec!["adapter:discord ping".to_string()],
         }),
@@ -856,6 +870,7 @@ fn resolve_disabled_plugins_normalizes_and_deduplicates_entries() {
         tui: None,
         i18n: None,
         llm: None,
+        flow_local_agent: None,
         commands: None,
         desktop: None,
         plugins: Some(PluginConfigSection {
@@ -887,6 +902,7 @@ fn validate_app_config_warns_invalid_disabled_plugin_entry() {
         tui: None,
         i18n: None,
         llm: None,
+        flow_local_agent: None,
         commands: None,
         desktop: None,
         plugins: Some(PluginConfigSection {
@@ -936,6 +952,7 @@ fn resolve_llm_config_reads_values_from_config() {
             command_prefix: Some("/ask".to_string()),
             ..Default::default()
         }),
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,
@@ -989,6 +1006,7 @@ fn resolve_llm_config_falls_back_to_provider_urls_when_base_url_missing() {
             command_prefix: Some("/ask".to_string()),
             ..Default::default()
         }),
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,
@@ -1027,6 +1045,7 @@ fn validate_app_config_warns_when_llm_is_enabled_without_api_key() {
             command_prefix: Some(" ".to_string()),
             ..Default::default()
         }),
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,
@@ -1080,6 +1099,7 @@ fn validate_app_config_warns_llm_base_url_in_main_config() {
             command_prefix: Some("/ask".to_string()),
             ..Default::default()
         }),
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,
@@ -1122,6 +1142,7 @@ fn validate_app_config_warns_invalid_llm_sampling_ranges() {
             command_prefix: Some("/ask".to_string()),
             ..Default::default()
         }),
+        flow_local_agent: None,
         commands: None,
         plugins: None,
         desktop: None,

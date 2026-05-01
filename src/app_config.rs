@@ -30,7 +30,9 @@ pub(crate) use self::access::{
     runtime_settings_values,
 };
 pub(crate) use self::adapters::load_adapter_configs;
-pub(crate) use self::resolve::{resolve_app_locale, resolve_llm_config, resolve_tui_config};
+pub(crate) use self::resolve::{
+    resolve_app_locale, resolve_flow_local_agent_config, resolve_llm_config, resolve_tui_config,
+};
 pub(crate) use self::storage::{
     ensure_default_config_files, load_app_config_from_path, load_app_config_with_warnings,
     resolve_app_config_path,
@@ -66,6 +68,8 @@ pub(crate) struct AppConfigDoc {
     pub(crate) i18n: Option<I18nConfigSection>,
     #[serde(default)]
     pub(crate) llm: Option<LlmConfigSection>,
+    #[serde(default)]
+    pub(crate) flow_local_agent: Option<FlowLocalAgentConfigSection>,
     #[serde(default)]
     pub(crate) commands: Option<CommandConfigSection>,
     #[serde(default)]
@@ -383,6 +387,30 @@ pub(crate) struct LlmConfigSection {
     pub(crate) providers: Option<Vec<LlmManagedProviderConfig>>,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct FlowLocalAgentConfigSection {
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) base_url: Option<String>,
+    #[serde(default)]
+    pub(crate) token: Option<String>,
+    #[serde(default)]
+    pub(crate) device_id: Option<String>,
+    #[serde(default)]
+    pub(crate) device_name: Option<String>,
+    #[serde(default)]
+    pub(crate) auto_connect: Option<bool>,
+    #[serde(default)]
+    pub(crate) allowed_tools: Vec<String>,
+    #[serde(default)]
+    pub(crate) workspace_root: Option<String>,
+    #[serde(default)]
+    pub(crate) command_timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub(crate) approval_policy: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub(crate) struct LlmManagedProviderConfig {
     #[serde(default)]
@@ -429,6 +457,21 @@ pub(crate) struct LlmRuntimeConfig {
     pub(crate) parallel_tool_calls: bool,
     pub(crate) system_prompt: Option<String>,
     pub(crate) command_prefix: String,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct FlowLocalAgentRuntimeConfig {
+    pub(crate) enabled: bool,
+    pub(crate) base_url: Option<String>,
+    pub(crate) token: Option<String>,
+    pub(crate) device_id: Option<String>,
+    pub(crate) device_name: Option<String>,
+    pub(crate) auto_connect: bool,
+    pub(crate) allowed_tools: Vec<String>,
+    pub(crate) workspace_root: Option<PathBuf>,
+    pub(crate) command_timeout_ms: u64,
+    pub(crate) approval_policy: String,
 }
 
 impl llm::OpenAiRuntimeConfig for LlmRuntimeConfig {
@@ -620,6 +663,22 @@ llm:
   # api_key: sk-xxx
   # system_prompt: "You are a helpful assistant."
 
+flow_local_agent:
+  enabled: false
+  auto_connect: true
+  command_timeout_seconds: 30
+  approval_policy: prompt
+  # base_url: https://flow.liteyuki.org
+  # token: lys_xxx
+  # device_id: 00000000-0000-0000-0000-000000000000
+  # device_name: My Server
+  # workspace_root: ./
+  # allowed_tools:
+  #   - run_command
+  #   - read_file
+  #   - write_file
+  #   - list_files
+
 commands:
   # 格式: "<scope> <name>"
   # - "tui /help"
@@ -716,6 +775,18 @@ command_prefix = "/ask"
 # api_keys = ["sk-xxx"]
 # api_key = "sk-xxx"
 # system_prompt = "You are a helpful assistant."
+
+[flow_local_agent]
+enabled = false
+auto_connect = true
+command_timeout_seconds = 30
+approval_policy = "prompt"
+# base_url = "https://flow.liteyuki.org"
+# token = "lys_xxx"
+# device_id = "00000000-0000-0000-0000-000000000000"
+# device_name = "My Server"
+# workspace_root = "./"
+# allowed_tools = ["run_command", "read_file", "write_file", "list_files"]
 
 [commands]
 # disabled = ["tui /help", "adapter:onebot11 /su"]

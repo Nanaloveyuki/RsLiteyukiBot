@@ -13,6 +13,7 @@ pub(crate) const LLM_PROMPT_STORE_FILENAME: &str = "llm-prompts.json";
 pub(crate) const MCP_CONFIG_FILENAME: &str = "mcp-servers.json";
 pub(crate) const TOOL_STATE_FILENAME: &str = "tool-state.json";
 pub(crate) const PLUGIN_CRON_STATE_FILENAME: &str = "plugin-cron-state.json";
+pub(crate) const FLOW_LOCAL_AGENT_DEVICE_ID_FILENAME: &str = "flow-local-agent-device-id";
 pub(crate) const SKILLS_DIR_NAME: &str = "skills";
 pub(crate) const LEGACY_WEBUI_PASSWORD_RELATIVE_PATH: &str = ".liteyuki/password.json";
 pub(crate) const LEGACY_LLM_PROMPT_STORE_PATH: &str = "llm-prompts.json";

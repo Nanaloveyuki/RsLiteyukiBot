@@ -220,8 +220,9 @@ async fn spawn_web_host() -> (String, String, tokio::task::JoinHandle<std::io::R
         port: 0,
         dev_frontend: None,
     };
-    let (service, listener) = WebHostService::bind(config, snapshot_provider, build_default_web_host_assets())
-        .expect("web host should bind");
+    let (service, listener) =
+        WebHostService::bind(config, snapshot_provider, build_default_web_host_assets())
+            .expect("web host should bind");
     let token = service.local_token();
     let base_url = format!("http://{}", service.bind_addr());
     let task = tokio::spawn(service.serve(listener));

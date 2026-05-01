@@ -5,6 +5,7 @@ pub mod app_host;
 pub mod bootstrap;
 pub mod comm;
 pub mod core;
+pub mod flow_local_agent;
 pub(crate) mod hardcode_data;
 pub mod llm;
 pub mod observability;

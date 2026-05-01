@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use crate::app_config::LlmConfigSection;
+use crate::app_config::{FlowLocalAgentRuntimeConfig, LlmConfigSection};
+use crate::flow_local_agent::{FlowLocalAgentClient, FlowLocalAgentRuntimeState};
 use crate::superuser::SuperuserManager;
 use crate::tui;
 use liteyukibot_core::AdapterConfig;
@@ -46,11 +47,36 @@ pub(crate) struct PreparedRuntimeBootstrap {
     #[allow(dead_code)]
     pub(crate) locale: String,
     pub(crate) llm_runtime: LlmCommandRuntime,
+    pub(crate) flow_local_agent: PreparedFlowLocalAgentRuntime,
     pub(crate) external_gateway: ExternalGateway,
     pub(crate) plugin_dirs: Vec<PathBuf>,
     pub(crate) disabled_commands: Vec<String>,
     pub(crate) disabled_plugins: Vec<String>,
     pub(crate) superuser_manager: SuperuserManager,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct PreparedFlowLocalAgentRuntime {
+    pub(crate) config: FlowLocalAgentRuntimeConfig,
+    pub(crate) state: FlowLocalAgentRuntimeState,
+    pub(crate) client: FlowLocalAgentClient,
+}
+
+impl PreparedFlowLocalAgentRuntime {
+    pub(crate) fn new(config: FlowLocalAgentRuntimeConfig) -> (Self, Vec<String>) {
+        let (config, warnings) = crate::flow_local_agent::device::normalize_runtime_config(config);
+        let state = FlowLocalAgentRuntimeState::default();
+        let client = FlowLocalAgentClient::with_runtime_config(config.clone(), state.clone());
+        (
+            Self {
+                config,
+                state,
+                client,
+            },
+            warnings,
+        )
+    }
 }
 
 #[derive(Clone)]

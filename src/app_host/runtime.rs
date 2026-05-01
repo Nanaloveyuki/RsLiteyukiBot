@@ -32,6 +32,7 @@ impl EmbeddedAppHost {
         let help_whitelist = bootstrap.help_whitelist;
         let locale = bootstrap.locale;
         let llm_runtime = bootstrap.llm_runtime;
+        let flow_local_agent = bootstrap.flow_local_agent;
         let external_gateway = bootstrap.external_gateway;
         let plugin_dirs = bootstrap.plugin_dirs;
         let disabled_commands = bootstrap.disabled_commands;
@@ -72,6 +73,10 @@ impl EmbeddedAppHost {
                 runtime_target_name(target),
                 adapter_configs.len(),
                 plugin_dirs.len()
+            ));
+            host.push_note(format!(
+                "flow local agent initialized (enabled={})",
+                flow_local_agent.config.enabled
             ));
         });
 
@@ -134,6 +139,7 @@ impl EmbeddedAppHost {
         if adapter_autostart {
             attempt_embedded_adapter_autostart(&bot, &state).await;
         }
+        flow_local_agent.client.spawn_background();
         with_state_write(&state, |host| {
             host.set_status("running");
             host.push_note("embedded runtime ready");
@@ -142,7 +148,11 @@ impl EmbeddedAppHost {
         let bot = Arc::new(AsyncMutex::new(bot));
         spawn_plugin_cron_scheduler(bot.clone(), state.clone());
 
-        Ok(Self { bot, state })
+        Ok(Self {
+            bot,
+            state,
+            flow_local_agent,
+        })
     }
 }
 

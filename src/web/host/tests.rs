@@ -52,6 +52,7 @@ fn test_server_with_snapshot(snapshot: AppHostSnapshot) -> WebHostService {
         runtime_host: None,
         assets: Arc::new(test_assets()),
         terminal_state: Arc::new(WebTerminalState::default()),
+        flow_local_agent_state: None,
         auth: WebUiAuthManager::in_memory_for_tests(),
     }
 }
@@ -2683,6 +2684,7 @@ fn directory_asset_mode_serves_files_and_spa_fallback() {
         runtime_host: None,
         assets: Arc::new(assets),
         terminal_state: Arc::new(WebTerminalState::default()),
+        flow_local_agent_state: None,
         auth: WebUiAuthManager::in_memory_for_tests(),
     };
 
@@ -2749,6 +2751,7 @@ fn dev_frontend_redirects_non_api_routes_when_probe_is_alive() {
         runtime_host: None,
         assets: Arc::new(test_assets()),
         terminal_state: Arc::new(WebTerminalState::default()),
+        flow_local_agent_state: None,
         auth: WebUiAuthManager::in_memory_for_tests(),
     };
 
@@ -2784,6 +2787,7 @@ fn dev_frontend_redirect_keeps_local_api_and_static_routes() {
         runtime_host: None,
         assets: Arc::new(test_assets()),
         terminal_state: Arc::new(WebTerminalState::default()),
+        flow_local_agent_state: None,
         auth: WebUiAuthManager::in_memory_for_tests(),
     };
 

@@ -1,4 +1,4 @@
-use super::access::{config_i18n, config_llm, config_tui_resume};
+use super::access::{config_flow_local_agent, config_i18n, config_llm, config_tui_resume};
 use super::*;
 use crate::hardcode_data::llm::{
     DEFAULT_LLM_BASE_URL, DEFAULT_LLM_COMMAND_PREFIX, DEFAULT_LLM_MODEL, DEFAULT_LLM_PROVIDER,
@@ -209,5 +209,75 @@ pub(crate) fn resolve_llm_config(app_config: &AppConfigDoc) -> LlmRuntimeConfig 
         parallel_tool_calls,
         system_prompt,
         command_prefix,
+    }
+}
+
+pub(crate) fn resolve_flow_local_agent_config(
+    app_config: &AppConfigDoc,
+) -> FlowLocalAgentRuntimeConfig {
+    const DEFAULT_ALLOWED_TOOLS: &[&str] =
+        &["run_command", "read_file", "write_file", "list_files"];
+    const DEFAULT_APPROVAL_POLICY: &str = "prompt";
+    const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
+
+    let section = config_flow_local_agent(app_config);
+
+    let enabled = section.and_then(|cfg| cfg.enabled).unwrap_or(false);
+    let base_url = section
+        .and_then(|cfg| cfg.base_url.as_deref())
+        .and_then(normalize_non_empty_string);
+    let token = section
+        .and_then(|cfg| cfg.token.as_deref())
+        .and_then(normalize_non_empty_string);
+    let device_id = section
+        .and_then(|cfg| cfg.device_id.as_deref())
+        .and_then(normalize_non_empty_string);
+    let device_name = section
+        .and_then(|cfg| cfg.device_name.as_deref())
+        .and_then(normalize_non_empty_string);
+    let auto_connect = section.and_then(|cfg| cfg.auto_connect).unwrap_or(true);
+    let workspace_root = section
+        .and_then(|cfg| cfg.workspace_root.as_deref())
+        .and_then(normalize_non_empty_string)
+        .map(PathBuf::from);
+    let command_timeout_ms = super::seconds_to_timeout_ms(Some(
+        section
+            .and_then(|cfg| cfg.command_timeout_seconds)
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_TIMEOUT_SECONDS),
+    ));
+    let approval_policy = section
+        .and_then(|cfg| cfg.approval_policy.as_deref())
+        .and_then(normalize_lowercase_non_empty_string)
+        .unwrap_or_else(|| DEFAULT_APPROVAL_POLICY.to_string());
+
+    let allowed_tools = {
+        let configured = section
+            .map(|cfg| cfg.allowed_tools.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|tool| normalize_lowercase_non_empty_string(tool.as_str()))
+            .collect::<Vec<_>>();
+        if configured.is_empty() {
+            DEFAULT_ALLOWED_TOOLS
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect()
+        } else {
+            configured
+        }
+    };
+
+    FlowLocalAgentRuntimeConfig {
+        enabled,
+        base_url,
+        token,
+        device_id,
+        device_name,
+        auto_connect,
+        allowed_tools,
+        workspace_root,
+        command_timeout_ms,
+        approval_policy,
     }
 }

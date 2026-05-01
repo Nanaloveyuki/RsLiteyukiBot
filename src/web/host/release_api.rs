@@ -124,29 +124,28 @@ enum ReleaseFilter {
     All,
 }
 
-pub(super) fn route_release_api(
-    api_path: &str,
-    raw_path: &str,
-    is_head: bool,
-) -> Option<Vec<u8>> {
+pub(super) fn route_release_api(api_path: &str, raw_path: &str, is_head: bool) -> Option<Vec<u8>> {
     if api_path == "/base/getLatestTag" {
-        let body = match run_async_for_web_host(latest_release_payload(parse_query_string(raw_path))) {
-            Ok(payload) => napcat_ok(&payload.latest.tag),
-            Err(err) => napcat_err(-1, err.as_str()),
-        };
+        let body =
+            match run_async_for_web_host(latest_release_payload(parse_query_string(raw_path))) {
+                Ok(payload) => napcat_ok(&payload.latest.tag),
+                Err(err) => napcat_err(-1, err.as_str()),
+            };
         return Some(napcat_response(body, is_head));
     }
 
     if api_path == "/base/GetLatestRelease" {
-        let body = match run_async_for_web_host(latest_release_payload(parse_query_string(raw_path))) {
-            Ok(payload) => napcat_ok(&payload),
-            Err(err) => napcat_err(-1, err.as_str()),
-        };
+        let body =
+            match run_async_for_web_host(latest_release_payload(parse_query_string(raw_path))) {
+                Ok(payload) => napcat_ok(&payload),
+                Err(err) => napcat_err(-1, err.as_str()),
+            };
         return Some(napcat_response(body, is_head));
     }
 
     if api_path == "/base/getAllReleases" {
-        let body = match run_async_for_web_host(all_releases_payload(parse_query_string(raw_path))) {
+        let body = match run_async_for_web_host(all_releases_payload(parse_query_string(raw_path)))
+        {
             Ok(payload) => napcat_ok(&payload),
             Err(err) => napcat_err(-1, err.as_str()),
         };
@@ -397,7 +396,9 @@ fn select_recommended_asset<'a>(
 ) -> Option<&'a ReleaseAssetPayload> {
     assets
         .iter()
-        .filter_map(|asset| asset_match_score(asset.name.as_str(), platform).map(|score| (score, asset)))
+        .filter_map(|asset| {
+            asset_match_score(asset.name.as_str(), platform).map(|score| (score, asset))
+        })
         .max_by(|(left_score, left_asset), (right_score, right_asset)| {
             left_score
                 .cmp(right_score)
@@ -453,7 +454,9 @@ fn windows_asset_score(name: &str) -> Option<u32> {
     if name.ends_with(".exe") {
         return Some(220);
     }
-    if name.ends_with(".zip") && (name.contains("windows") || name.contains("win") || name.contains("setup")) {
+    if name.ends_with(".zip")
+        && (name.contains("windows") || name.contains("win") || name.contains("setup"))
+    {
         return Some(180);
     }
     None
