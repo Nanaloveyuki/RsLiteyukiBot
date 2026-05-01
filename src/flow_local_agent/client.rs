@@ -107,6 +107,15 @@ impl FlowLocalAgentClient {
         );
 
         loop {
+            emit_console_log(
+                LogLevel::Debug,
+                "flow.local_agent",
+                format!(
+                    "attempting outbound websocket connection (device={}, server={})",
+                    device_label,
+                    sanitize_server_for_log(url.as_str())
+                ),
+            );
             match connect_async(url.as_str()).await {
                 Ok((stream, _)) => {
                     self.state.mark_connected();
@@ -176,6 +185,15 @@ impl FlowLocalAgentClient {
 
                     match connection_result {
                         Ok(true) => {
+                            emit_console_log(
+                                LogLevel::Debug,
+                                "flow.local_agent",
+                                format!(
+                                    "flow local agent scheduling reconnect in {}s (device={})",
+                                    FLOW_LOCAL_AGENT_RECONNECT_DELAY.as_secs(),
+                                    device_label
+                                ),
+                            );
                             sleep(FLOW_LOCAL_AGENT_RECONNECT_DELAY).await;
                         }
                         Ok(false) => return Ok(()),
@@ -186,6 +204,15 @@ impl FlowLocalAgentClient {
                                 "flow.local_agent",
                                 format!(
                                     "flow local agent connection error (device={}): {err}",
+                                    device_label
+                                ),
+                            );
+                            emit_console_log(
+                                LogLevel::Debug,
+                                "flow.local_agent",
+                                format!(
+                                    "flow local agent retrying in {}s after connection error (device={})",
+                                    FLOW_LOCAL_AGENT_RECONNECT_DELAY.as_secs(),
                                     device_label
                                 ),
                             );
@@ -205,6 +232,15 @@ impl FlowLocalAgentClient {
                             sanitize_server_for_log(url.as_str())
                         ),
                     );
+                    emit_console_log(
+                        LogLevel::Debug,
+                        "flow.local_agent",
+                        format!(
+                            "flow local agent retrying in {}s after connect failure (device={})",
+                            FLOW_LOCAL_AGENT_RECONNECT_DELAY.as_secs(),
+                            device_label
+                        ),
+                    );
                     sleep(FLOW_LOCAL_AGENT_RECONNECT_DELAY).await;
                 }
             }
@@ -219,6 +255,11 @@ impl FlowLocalAgentClient {
             .map_err(|err| format!("invalid flow local agent message: {err}"))?;
         match message {
             FlowLocalAgentServerMessage::Ping(_) => {
+                emit_console_log(
+                    LogLevel::Debug,
+                    "flow.local_agent",
+                    "flow local agent received ping; replying with pong",
+                );
                 let payload = serde_json::to_string(&FlowLocalAgentClientMessage::Pong)
                     .map_err(|err| format!("failed to serialize pong: {err}"))?;
                 write

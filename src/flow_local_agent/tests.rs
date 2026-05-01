@@ -6,10 +6,10 @@ use super::protocol::{
 use super::state::FlowLocalAgentRuntimeState;
 use crate::app_config::FlowLocalAgentRuntimeConfig;
 use crate::runtime_support::PreparedFlowLocalAgentRuntime;
+use liteyukibot_core::test_support::{EnvVarGuard, process_state_lock};
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
@@ -75,18 +75,15 @@ fn protocol_messages_deserialize_expected_variants() {
 
 #[test]
 fn prepared_runtime_generates_and_reuses_persisted_device_id() {
-    let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let _lock = process_state_lock();
     let path = temp_path("flow-device-id");
     let _ = fs::remove_file(&path);
 
-    let previous_path = std::env::var("LY_FLOW_LOCAL_AGENT_DEVICE_ID_PATH").ok();
-    unsafe {
-        std::env::set_var("LY_FLOW_LOCAL_AGENT_DEVICE_ID_PATH", &path);
-    }
+    let _device_id_guard = EnvVarGuard::set("LY_FLOW_LOCAL_AGENT_DEVICE_ID_PATH", path.as_path());
 
     let (first, first_warnings) = PreparedFlowLocalAgentRuntime::new(runtime_config(None));
     let first_device_id = first
-        .config
+        .config_snapshot()
         .device_id
         .clone()
         .expect("device id should be generated");
@@ -94,15 +91,10 @@ fn prepared_runtime_generates_and_reuses_persisted_device_id() {
 
     let (second, second_warnings) = PreparedFlowLocalAgentRuntime::new(runtime_config(None));
     assert_eq!(
-        second.config.device_id.as_deref(),
+        second.config_snapshot().device_id.as_deref(),
         Some(first_device_id.as_str())
     );
     assert!(second_warnings.is_empty());
-
-    match previous_path {
-        Some(value) => unsafe { std::env::set_var("LY_FLOW_LOCAL_AGENT_DEVICE_ID_PATH", value) },
-        None => unsafe { std::env::remove_var("LY_FLOW_LOCAL_AGENT_DEVICE_ID_PATH") },
-    }
 
     let _ = fs::remove_file(path);
 }
@@ -120,11 +112,6 @@ fn runtime_config(device_id: Option<String>) -> FlowLocalAgentRuntimeConfig {
         command_timeout_ms: 30_000,
         approval_policy: "prompt".to_string(),
     }
-}
-
-fn env_lock() -> &'static Mutex<()> {
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    ENV_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn temp_path(label: &str) -> PathBuf {

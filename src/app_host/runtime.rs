@@ -76,7 +76,7 @@ impl EmbeddedAppHost {
             ));
             host.push_note(format!(
                 "flow local agent initialized (enabled={})",
-                flow_local_agent.config.enabled
+                flow_local_agent.config_snapshot().enabled
             ));
         });
 
@@ -139,7 +139,7 @@ impl EmbeddedAppHost {
         if adapter_autostart {
             attempt_embedded_adapter_autostart(&bot, &state).await;
         }
-        flow_local_agent.client.spawn_background();
+        flow_local_agent.spawn_background();
         with_state_write(&state, |host| {
             host.set_status("running");
             host.push_note("embedded runtime ready");

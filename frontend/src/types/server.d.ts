@@ -213,7 +213,8 @@ interface ActiveAppConfigState {
 interface FlowLocalAgentConfig {
   enabled: boolean;
   baseUrl: string;
-  token: string;
+  hasToken: boolean;
+  tokenPreview: string;
   deviceId: string;
   deviceName: string;
   autoConnect: boolean;
@@ -229,4 +230,28 @@ interface FlowLocalAgentStatus {
   connected: boolean;
   reconnectAllowed: boolean;
   lastError: string | null;
+}
+
+interface FlowLocalAgentDeviceCode {
+  deviceCode: string;
+  userCode: string;
+  verificationUrl: string;
+  expiresIn: number;
+}
+
+interface FlowLocalAgentDeviceCodePollResult {
+  status: 'pending' | 'approved' | 'expired' | string;
+  hasToken: boolean;
+}
+
+interface BufferedLogEntry {
+  timestamp: string;
+  level: string;
+  module: string;
+  message: string;
+  line: string;
+}
+
+interface FlowLocalAgentLogsPayload {
+  entries: BufferedLogEntry[];
 }

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::app_config::FlowLocalAgentRuntimeConfig;
 
@@ -21,7 +21,7 @@ struct FlowLocalPathResolver {
     home_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct FlowLocalFileEntry {
     name: String,
     #[serde(rename = "type")]

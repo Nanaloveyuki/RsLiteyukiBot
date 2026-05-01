@@ -156,6 +156,15 @@ impl EmbeddedAppHost {
     }
 
     pub fn flow_local_agent_state(&self) -> crate::flow_local_agent::FlowLocalAgentRuntimeState {
-        self.flow_local_agent.state.clone()
+        self.flow_local_agent.state()
+    }
+
+    pub fn restart_flow_local_agent(&self) -> Result<(), String> {
+        self.flow_local_agent.restart_from_app_config()
+    }
+
+    pub fn disconnect_flow_local_agent(&self) {
+        self.flow_local_agent
+            .stop("manually disconnected from WebUI".to_string());
     }
 }

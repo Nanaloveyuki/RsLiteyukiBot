@@ -1,12 +1,14 @@
 use super::*;
 use crate::config_edit::FlowLocalAgentConfigPatch;
+use crate::utils::llm_config::{normalize_non_empty_string, normalize_provider_url};
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FlowLocalAgentWebConfigPayload {
     enabled: bool,
     base_url: String,
-    token: String,
+    has_token: bool,
+    token_preview: String,
     device_id: String,
     device_name: String,
     auto_connect: bool,
@@ -24,6 +26,42 @@ struct FlowLocalAgentStatusPayload {
     connected: bool,
     reconnect_allowed: bool,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowLocalAgentLogsPayload {
+    entries: Vec<BufferedLogEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowLocalAgentDeviceCodePayload {
+    device_code: String,
+    user_code: String,
+    verification_url: String,
+    expires_in: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowLocalAgentDeviceCodePollPayload {
+    status: String,
+    has_token: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct FlowLocalAgentDeviceCodeStartResponse {
+    device_code: String,
+    user_code: String,
+    verification_url: String,
+    expires_in: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct FlowLocalAgentDeviceCodePollResponse {
+    status: String,
+    token: Option<String>,
 }
 
 pub(super) fn route_webui_config_api(
@@ -168,10 +206,81 @@ pub(super) fn route_webui_config_api(
         {
             return Some(response);
         }
-        let body = match save_flow_local_agent_web_config(request) {
+        let body = match save_flow_local_agent_web_config_with_runtime(service, request) {
             Ok(payload) => napcat_ok(&payload),
             Err(err) => napcat_err(-1, err.as_str()),
         };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/FlowLocalAgent/SetToken" {
+        if let Some(response) = reject_non_post_method(method, "FlowLocalAgent/SetToken", is_head)
+        {
+            return Some(response);
+        }
+        let body = match save_flow_local_agent_token(service, request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/FlowLocalAgent/Auth/DeviceCode/Start" {
+        if let Some(response) = reject_non_post_method(
+            method,
+            "FlowLocalAgent/Auth/DeviceCode/Start",
+            is_head,
+        ) {
+            return Some(response);
+        }
+        let body = match start_flow_local_agent_device_code(request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/FlowLocalAgent/Auth/DeviceCode/Poll" {
+        if let Some(response) = reject_non_post_method(
+            method,
+            "FlowLocalAgent/Auth/DeviceCode/Poll",
+            is_head,
+        ) {
+            return Some(response);
+        }
+        let body = match poll_flow_local_agent_device_code(service, request) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/FlowLocalAgent/ConnectNow" {
+        if let Some(response) = reject_non_post_method(method, "FlowLocalAgent/ConnectNow", is_head)
+        {
+            return Some(response);
+        }
+        let body = match restart_flow_local_agent_runtime(service) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/FlowLocalAgent/DisconnectNow" {
+        if let Some(response) = reject_non_post_method(method, "FlowLocalAgent/DisconnectNow", is_head)
+        {
+            return Some(response);
+        }
+        let body = match disconnect_flow_local_agent_runtime(service) {
+            Ok(payload) => napcat_ok(&payload),
+            Err(err) => napcat_err(-1, err.as_str()),
+        };
+        return Some(napcat_response(body, is_head));
+    }
+
+    if api_path == "/FlowLocalAgent/GetLogs" {
+        let body = napcat_ok(&flow_local_agent_logs_payload());
         return Some(napcat_response(body, is_head));
     }
 
@@ -410,6 +519,7 @@ fn load_flow_local_agent_web_config_payload() -> Result<FlowLocalAgentWebConfigP
     crate::app_config::ensure_default_config_files().map_err(|err| err.to_string())?;
     let (doc, _) = crate::app_config::load_app_config_with_warnings(false);
     let runtime = crate::app_config::resolve_flow_local_agent_config(&doc);
+    let token = runtime.token.clone().unwrap_or_default();
     let effective_device_id = crate::flow_local_agent::device::normalize_runtime_config(runtime.clone())
         .0
         .device_id
@@ -420,7 +530,8 @@ fn load_flow_local_agent_web_config_payload() -> Result<FlowLocalAgentWebConfigP
     Ok(FlowLocalAgentWebConfigPayload {
         enabled: runtime.enabled,
         base_url: runtime.base_url.unwrap_or_default(),
-        token: runtime.token.unwrap_or_default(),
+        has_token: !token.is_empty(),
+        token_preview: preview_secret_token(token.as_str()),
         device_id: doc
             .flow_local_agent
             .as_ref()
@@ -448,10 +559,7 @@ fn save_flow_local_agent_web_config(request: &[u8]) -> Result<Value, String> {
             .get("baseUrl")
             .and_then(Value::as_str)
             .map(ToString::to_string),
-        token: body
-            .get("token")
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
+        token: None,
         device_id: body
             .get("deviceId")
             .and_then(Value::as_str)
@@ -488,6 +596,193 @@ fn save_flow_local_agent_web_config(request: &[u8]) -> Result<Value, String> {
     serde_json::to_value(payload).map_err(|err| format!("failed to serialize flow local agent config: {err}"))
 }
 
+fn save_flow_local_agent_web_config_with_runtime(
+    service: &WebHostService,
+    request: &[u8],
+) -> Result<Value, String> {
+    let payload = save_flow_local_agent_web_config(request)?;
+    let _ = restart_flow_local_agent_runtime(service);
+    Ok(payload)
+}
+
+fn save_flow_local_agent_token(service: &WebHostService, request: &[u8]) -> Result<Value, String> {
+    let body = parse_json_object_body(request, "FlowLocalAgent/SetToken")?;
+    let token = body
+        .get("token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "token is required".to_string())?;
+
+    persist_flow_local_agent_token(token)?;
+    let _ = restart_flow_local_agent_runtime(service);
+    let payload = load_flow_local_agent_web_config_payload()?;
+    serde_json::to_value(payload)
+        .map_err(|err| format!("failed to serialize flow local agent token state: {err}"))
+}
+
+fn start_flow_local_agent_device_code(request: &[u8]) -> Result<Value, String> {
+    let body = parse_json_object_body(request, "FlowLocalAgent/Auth/DeviceCode/Start")?;
+    let base_url = resolve_flow_local_agent_base_url(body.get("baseUrl").and_then(Value::as_str))?;
+    let request_payload = serde_json::json!({
+        "server_url": base_url,
+    });
+    let url = format!("{base_url}/api/v1/auth/device/code");
+    let response = run_async_for_web_host(async move {
+        let response = super::upstream::upstream_http_client()
+            .post(url)
+            .json(&request_payload)
+            .send()
+            .await
+            .map_err(|err| format!("failed to request flow local agent device code: {err}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|err| format!("failed to read flow local agent device code response: {err}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "flow device auth returned {}: {}",
+                status.as_u16(),
+                summarize_brief_error_body(body.as_str())
+            ));
+        }
+        serde_json::from_str::<FlowLocalAgentDeviceCodeStartResponse>(body.as_str())
+            .map_err(|err| format!("invalid flow local agent device code response: {err}"))
+    })?;
+    serde_json::to_value(FlowLocalAgentDeviceCodePayload {
+        device_code: response.device_code,
+        user_code: response.user_code,
+        verification_url: response.verification_url,
+        expires_in: response.expires_in,
+    })
+    .map_err(|err| format!("failed to serialize flow local agent device code payload: {err}"))
+}
+
+fn poll_flow_local_agent_device_code(
+    service: &WebHostService,
+    request: &[u8],
+) -> Result<Value, String> {
+    let body = parse_json_object_body(request, "FlowLocalAgent/Auth/DeviceCode/Poll")?;
+    let base_url = resolve_flow_local_agent_base_url(body.get("baseUrl").and_then(Value::as_str))?;
+    let device_code = body
+        .get("deviceCode")
+        .and_then(Value::as_str)
+        .and_then(normalize_non_empty_string)
+        .ok_or_else(|| "deviceCode is required".to_string())?;
+
+    let request_payload = serde_json::json!({
+        "device_code": device_code,
+    });
+    let url = format!("{base_url}/api/v1/auth/device/token");
+    let response = run_async_for_web_host(async move {
+        let response = super::upstream::upstream_http_client()
+            .post(url)
+            .json(&request_payload)
+            .send()
+            .await
+            .map_err(|err| format!("failed to poll flow local agent device token: {err}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|err| format!("failed to read flow local agent device token response: {err}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "flow device token returned {}: {}",
+                status.as_u16(),
+                summarize_brief_error_body(body.as_str())
+            ));
+        }
+        serde_json::from_str::<FlowLocalAgentDeviceCodePollResponse>(body.as_str())
+            .map_err(|err| format!("invalid flow local agent device token response: {err}"))
+    })?;
+
+    let has_token = match response.token.as_deref() {
+        Some(token) if response.status == "approved" => {
+            persist_flow_local_agent_token(token)?;
+            let _ = restart_flow_local_agent_runtime(service);
+            true
+        }
+        _ => false,
+    };
+
+    serde_json::to_value(FlowLocalAgentDeviceCodePollPayload {
+        status: response.status,
+        has_token,
+    })
+    .map_err(|err| format!("failed to serialize flow local agent device poll payload: {err}"))
+}
+
+fn persist_flow_local_agent_token(token: &str) -> Result<(), String> {
+    let path = active_app_config_path()?;
+    crate::config_edit::persist_flow_local_agent_config(
+        path.as_path(),
+        &FlowLocalAgentConfigPatch {
+            token: Some(token.to_string()),
+            ..Default::default()
+        },
+    )
+}
+
+fn restart_flow_local_agent_runtime(service: &WebHostService) -> Result<Value, String> {
+    let runtime_host = service
+        .runtime_host
+        .as_ref()
+        .ok_or_else(|| "flow local agent runtime host is unavailable".to_string())?;
+    runtime_host.restart_flow_local_agent()?;
+    Ok(serde_json::json!({
+        "requested": true,
+    }))
+}
+
+fn disconnect_flow_local_agent_runtime(service: &WebHostService) -> Result<Value, String> {
+    let runtime_host = service
+        .runtime_host
+        .as_ref()
+        .ok_or_else(|| "flow local agent runtime host is unavailable".to_string())?;
+    runtime_host.disconnect_flow_local_agent();
+    Ok(serde_json::json!({
+        "requested": true,
+    }))
+}
+
+fn resolve_flow_local_agent_base_url(raw: Option<&str>) -> Result<String, String> {
+    if let Some(value) = raw.and_then(normalize_provider_url) {
+        return Ok(value);
+    }
+
+    crate::app_config::ensure_default_config_files().map_err(|err| err.to_string())?;
+    let (doc, _) = crate::app_config::load_app_config_with_warnings(false);
+    crate::app_config::resolve_flow_local_agent_config(&doc)
+        .base_url
+        .ok_or_else(|| "flow local agent baseUrl is required".to_string())
+}
+
+fn preview_secret_token(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.len() <= 12 {
+        return format!("{}...", &trimmed[..trimmed.len().min(4)]);
+    }
+    let prefix = &trimmed[..4];
+    let suffix = &trimmed[trimmed.len() - 4..];
+    format!("{prefix}...{suffix}")
+}
+
+fn summarize_brief_error_body(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("detail")
+                .and_then(Value::as_str)
+                .or_else(|| value.get("message").and_then(Value::as_str))
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| body.trim().chars().take(160).collect::<String>())
+}
+
 fn flow_local_agent_status_payload(service: &WebHostService) -> FlowLocalAgentStatusPayload {
     let snapshot = service
         .flow_local_agent_state
@@ -502,6 +797,19 @@ fn flow_local_agent_status_payload(service: &WebHostService) -> FlowLocalAgentSt
             .unwrap_or(false),
         last_error: snapshot.and_then(|value| value.last_error),
     }
+}
+
+fn flow_local_agent_logs_payload() -> FlowLocalAgentLogsPayload {
+    let entries = recent_buffered_logs(400)
+        .into_iter()
+        .filter(|entry| is_flow_local_agent_log_module(entry.module.as_str()))
+        .collect();
+
+    FlowLocalAgentLogsPayload { entries }
+}
+
+fn is_flow_local_agent_log_module(module: &str) -> bool {
+    module == "flow.local_agent" || module.starts_with("flow.local_agent.")
 }
 
 fn normalize_webui_data_url(raw: &str) -> Option<String> {

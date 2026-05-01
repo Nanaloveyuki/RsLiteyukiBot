@@ -124,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     bot.start().await?;
-    flow_local_agent.client.spawn_background();
+    flow_local_agent.spawn_background();
 
     let tui_result = tui::run(
         &bot,
